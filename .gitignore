@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific exclusions
+*.db
+*.sqlite
+*.sqlite3
+data/
+datasets/
+models/weights/
+*.pth
+*.pt
+
+# Security — never commit keys
+*.key
+*.pem
+
+# Planning docs (local only, not repo content)
+Phase3_Master_Plan_Team06_Final.md
+rules.md
+
+# Logs
+*.log
+logs/
