@@ -154,8 +154,8 @@ class SpatialSignatureDataset(Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def __getitem__(self, idx):
-        path1, path2 = self.pairs[idx]
+    def __getitem__(self, index):
+        path1, path2 = self.pairs[index]
         img1 = preprocess_image(path1)
         img2 = preprocess_image(path2)
 
@@ -166,7 +166,7 @@ class SpatialSignatureDataset(Dataset):
         return (
             torch.tensor(img1, dtype=torch.float32),
             torch.tensor(img2, dtype=torch.float32),
-            torch.tensor(self.labels[idx], dtype=torch.float32),
+            torch.tensor(self.labels[index], dtype=torch.float32),
         )
 
 
@@ -184,10 +184,10 @@ class TemporalSignatureDataset(Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def __getitem__(self, idx):
-        seq1, seq2 = self.pairs[idx]
+    def __getitem__(self, index):
+        seq1, seq2 = self.pairs[index]
         return (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),
-            torch.tensor(self.labels[idx], dtype=torch.float32),
+            torch.tensor(self.labels[index], dtype=torch.float32),
         )
