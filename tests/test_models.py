@@ -172,3 +172,73 @@ class TestFusionEngine:
         decision_below, _, _ = engine.fuse(spatial_score=0.49)
         assert decision_at == "Genuine"
         assert decision_below == "Forged"
+
+
+class TestWeightsSaveLoad:
+    """Verify that trained weights survive save/load round-trip."""
+
+    def test_spatial_save_load_roundtrip(self, tmp_path):
+        from src.models.siamese import SpatialSiamese
+        model = SpatialSiamese(embedding_dim=512)
+        x = torch.randn(1, 1, 256, 256)
+
+        model.eval()
+        with torch.no_grad():
+            emb_before = model.encode(x)
+
+        path = tmp_path / "spatial.pth"
+        torch.save(model.state_dict(), path)
+
+        model2 = SpatialSiamese(embedding_dim=512)
+        model2.load_state_dict(torch.load(path, map_location="cpu"))
+        model2.eval()
+        with torch.no_grad():
+            emb_after = model2.encode(x)
+
+        assert torch.allclose(emb_before, emb_after)
+
+    def test_temporal_save_load_roundtrip(self, tmp_path):
+        from src.models.siamese import TemporalSiamese
+        model = TemporalSiamese(embedding_dim=128)
+        x = torch.randn(1, 50, 3)
+
+        model.eval()
+        with torch.no_grad():
+            emb_before = model.encode(x)
+
+        path = tmp_path / "temporal.pth"
+        torch.save(model.state_dict(), path)
+
+        model2 = TemporalSiamese(embedding_dim=128)
+        model2.load_state_dict(torch.load(path, map_location="cpu"))
+        model2.eval()
+        with torch.no_grad():
+            emb_after = model2.encode(x)
+
+        assert torch.allclose(emb_before, emb_after)
+
+    def test_checkpoint_resume(self, tmp_path):
+        """Full checkpoint (model + optimizer + epoch) round-trip."""
+        from src.models.siamese import SpatialSiamese
+        import torch.optim as optim
+
+        model = SpatialSiamese(embedding_dim=512)
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+        epoch = 42
+        loss = 0.123
+
+        path = tmp_path / "checkpoint.pth"
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "loss": loss,
+        }, path)
+
+        checkpoint = torch.load(path, map_location="cpu")
+        assert checkpoint["epoch"] == 42
+        assert abs(checkpoint["loss"] - 0.123) < 1e-6
+
+        model2 = SpatialSiamese(embedding_dim=512)
+        model2.load_state_dict(checkpoint["model_state_dict"])
+        assert sum(p.numel() for p in model2.parameters()) == sum(p.numel() for p in model.parameters())
