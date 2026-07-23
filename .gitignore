@@ -42,7 +42,9 @@ models/weights/
 # Planning docs (local only, not repo content)
 Phase3_Master_Plan_Team06_Final.md
 rules.md
+docs/
 
 # Logs
 *.log
 logs/
+
