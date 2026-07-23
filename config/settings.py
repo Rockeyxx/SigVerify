@@ -3,6 +3,10 @@ Project Configuration — Signature Verification System (EE 499)
 
 Central configuration for hyperparameters, thresholds, paths, and
 system-wide constants. All tunable values live here.
+
+Note on Model Weights Distribution:
+  Compiled `.pth` model weights files are excluded from Git version control
+  via `.gitignore` and hosted on GitHub Releases for downloading.
 """
 
 import os
@@ -35,6 +39,10 @@ BATCH_SIZE = 32
 NUM_EPOCHS = 100
 WEIGHT_DECAY = 1e-4
 
+# Early Stopping hyperparameters (monitors validation loss to halt training)
+EARLY_STOPPING_PATIENCE = 10            # Stop after 10 epochs without validation improvement
+EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrease required to trigger improvement
+
 # ─── Fusion & Decision ───────────────────────────────────────────────
 ALPHA_DEFAULT = 0.5                     # Tuned on validation via grid search
 ALPHA_GRID_STEP = 0.05
@@ -44,3 +52,4 @@ DECISION_THRESHOLD = 0.5               # τ: S_final ≥ τ → Genuine
 TARGET_FAR = 0.05
 TARGET_FRR = 0.05
 TARGET_ACCURACY = 0.95
+

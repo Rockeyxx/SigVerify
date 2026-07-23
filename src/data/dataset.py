@@ -5,6 +5,22 @@ Handles data loading, preprocessing, augmentation, quality gating, and
 writer-independent splitting for both spatial (image) and temporal
 (dynamic) signature datasets.
 
+Expected Local Dataset Structure (`./data`):
+--------------------------------------------
+data/
+├── cedar/                  # Offline CEDAR dataset (55 writers)
+│   ├── writer_01/
+│   │   ├── original_1_1.png ... original_1_24.png  (Genuine)
+│   │   └── forged_1_1.png   ... forged_1_24.png    (Skilled Forgeries)
+│   └── ...
+├── bhsig260/               # Offline BHSig260 dataset (260 writers)
+│   ├── Bengali/
+│   └── Hindi/
+└── svc2004/                # Online SVC2004 dataset (40 writers)
+    └── Task1/              # Coordinates (X, Y, T, Button, Azimuth, Altitude, Pressure)
+        ├── User1.txt ... User40.txt
+        └── ...
+
 Supported datasets:
   Spatial:  CEDAR, BHSig260, UTSig, In-house collection
   Temporal: SVC2004, In-house collection
@@ -29,14 +45,22 @@ from config.settings import (
 
 def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     """
-    Load and preprocess a signature image.
-    Pipeline: grayscale → aspect-ratio-preserving pad → resize → normalize.
-    Returns: numpy array of shape (1, H, W) as float32 in [0, 1].
+    Load and preprocess a signature image for the Spatial CNN branch.
+
+    Pipeline:
+      1. Load image as 8-bit single-channel grayscale.
+      2. Apply aspect-ratio-preserving zero/white padding to form a square canvas.
+      3. Bilinear resize down to target_size (e.g. 256×256).
+      4. Normalize pixel intensity values into [0.0, 1.0] range.
+      5. Add channel dimension [1, H, W] expected by PyTorch Conv2d.
+
+    Returns: numpy float32 array of shape (1, H, W) in [0.0, 1.0].
     """
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Cannot load image: {image_path}")
 
+    # Pad image to a square canvas while keeping original aspect ratio intact
     h, w = img.shape
     max_dim = max(h, w)
     padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
@@ -44,6 +68,7 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     x_off = (max_dim - w) // 2
     padded[y_off:y_off + h, x_off:x_off + w] = img
 
+    # Resize to standard spatial input size (256x256) and scale intensity to [0.0, 1.0]
     resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
     normalized = resized.astype(np.float32) / 255.0
     return normalized[np.newaxis, :, :]
@@ -51,21 +76,27 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
 
 def quality_gate(image_path):
     """
-    Check quality via effective-resolution proxies.
-    Does NOT gate on file DPI tag. Uses bounding-box size + Laplacian sharpness.
+    Evaluate signature image quality via effective-resolution proxies.
+    
+    Adheres to AGENTS.md standards: does NOT rely on EXIF DPI metadata tags.
+    Instead calculates:
+      - Bounding box dimension size across all signature ink stroke contours.
+      - Laplacian variance sharpness score to flag blurry or degraded scans.
+
     Returns: (passed: bool, details: dict)
     """
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return False, {"error": "Cannot load image"}
 
+    # Binarize image via Otsu thresholding to segment stroke contours from background
     _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return False, {"error": "No signature content detected"}
 
-    # Bounding-box size check across all signature contours
+    # Calculate bounding-box span across all signature contours
     x_min = min(cv2.boundingRect(c)[0] for c in contours)
     y_min = min(cv2.boundingRect(c)[1] for c in contours)
     x_max = max(cv2.boundingRect(c)[0] + cv2.boundingRect(c)[2] for c in contours)
@@ -73,6 +104,7 @@ def quality_gate(image_path):
     bbox_w = x_max - x_min
     bbox_h = y_max - y_min
 
+    # Calculate image focus/sharpness using Laplacian variance
     laplacian = cv2.Laplacian(img, cv2.CV_64F)
     sharpness = laplacian.var()
 
@@ -88,7 +120,10 @@ def writer_independent_split(writer_ids, train_ratio=0.7, val_ratio=0.15,
                               test_ratio=0.15, seed=42):
     """
     Split writer IDs into non-overlapping train/val/test sets.
-    No writer appears in more than one partition (ISO/IEC 23053).
+
+    Ensures zero writer overlap across partitions (ISO/IEC 23053:2022 standard).
+    No individual writer appears in more than one partition, ensuring true
+    writer-independent open-set verification evaluation.
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
     rng = random.Random(seed)
@@ -103,12 +138,12 @@ def writer_independent_split(writer_ids, train_ratio=0.7, val_ratio=0.15,
 def generate_pairs(samples_by_writer, num_genuine_per_writer=5,
                    num_impostor_per_writer=5, seed=42):
     """
-    Generate genuine and impostor pairs from samples grouped by writer.
+    Generate balanced genuine and forgery pair combinations per writer.
 
     Args:
-        samples_by_writer: dict[writer_id → list of sample paths/arrays]
-        num_genuine_per_writer: number of genuine pairs per writer
-        num_impostor_per_writer: number of impostor pairs per writer
+        samples_by_writer: dict mapping writer_id to list of signature paths/arrays.
+        num_genuine_per_writer: target genuine pairs per writer (label = 1).
+        num_impostor_per_writer: target forgery/impostor pairs per writer (label = 0).
 
     Returns:
         (pairs: list of (sample1, sample2), labels: list of int)
@@ -122,13 +157,13 @@ def generate_pairs(samples_by_writer, num_genuine_per_writer=5,
         if len(samples) < 2:
             continue
 
-        # Genuine pairs (same writer)
+        # Create genuine pairs (signatures written by the same person)
         for _ in range(min(num_genuine_per_writer, len(samples) * (len(samples)-1) // 2)):
             s1, s2 = rng.sample(samples, 2)
             pairs.append((s1, s2))
             labels.append(1)
 
-        # Impostor pairs (different writer)
+        # Create impostor pairs (signatures from two different writers)
         other_writers = [w for w in writers if w != writer]
         for _ in range(num_impostor_per_writer):
             other = rng.choice(other_writers)
@@ -142,8 +177,12 @@ def generate_pairs(samples_by_writer, num_genuine_per_writer=5,
 
 class SpatialSignatureDataset(Dataset):
     """
-    Dataset for spatial (image) signature pairs.
-    Each sample: (img1_tensor, img2_tensor, label).
+    PyTorch Dataset loading spatial (image) signature pairs for Siamese training.
+    
+    Each item returns:
+        - img1_tensor: preprocessed image 1 tensor [1, 256, 256]
+        - img2_tensor: preprocessed image 2 tensor [1, 256, 256]
+        - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
     def __init__(self, pairs, labels, transform=None):
@@ -172,9 +211,12 @@ class SpatialSignatureDataset(Dataset):
 
 class TemporalSignatureDataset(Dataset):
     """
-    Dataset for temporal (dynamic) signature pairs.
-    Each sample: (seq1_tensor, seq2_tensor, label).
-    Sequences are variable-length (L, 3); collation handles padding.
+    PyTorch Dataset loading temporal (dynamic) signature pairs for Siamese training.
+
+    Each item returns:
+        - seq1_tensor: trajectory sequence tensor [L1, 3] containing (X, Y, Pressure)
+        - seq2_tensor: trajectory sequence tensor [L2, 3] containing (X, Y, Pressure)
+        - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
     def __init__(self, pairs, labels):
@@ -191,3 +233,4 @@ class TemporalSignatureDataset(Dataset):
             torch.tensor(seq2, dtype=torch.float32),
             torch.tensor(self.labels[index], dtype=torch.float32),
         )
+

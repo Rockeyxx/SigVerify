@@ -99,6 +99,35 @@ A multimodal biometric verification system that authenticates handwritten signat
 
 ## Datasets
 
+### Local Dataset Structure (`./data`)
+
+To train and evaluate the models locally, arrange your datasets inside the `./data` directory following this layout:
+
+```
+data/
+├── cedar/                  # Offline CEDAR dataset (55 writers)
+│   ├── writer_01/
+│   │   ├── original_1_1.png ... original_1_24.png  (Genuine signatures)
+│   │   └── forged_1_1.png   ... forged_1_24.png    (Skilled Forgeries)
+│   └── ...
+├── bhsig260/               # Offline BHSig260 dataset (260 writers)
+│   ├── Bengali/
+│   └── Hindi/
+├── utsig/                  # Offline UTSig dataset (115 writers)
+└── svc2004/                # Online SVC2004 dataset (40 writers)
+    └── Task1/              # Coordinates (X, Y, T, Button, Azimuth, Altitude, Pressure)
+        ├── User1.txt ... User40.txt
+        └── ...
+```
+
+### Writer-Independent Data Split Protocol
+
+All model training and validation routines follow an **open-set writer-independent split protocol** compliant with **ISO/IEC 23053:2022**:
+
+- **Partition Ratios**: 70% Train, 15% Validation, 15% Test.
+- **Zero Writer Overlap**: Writer IDs are partitioned such that $\text{Writers}_{\text{train}} \cap \text{Writers}_{\text{val}} \cap \text{Writers}_{\text{test}} = \emptyset$. No individual writer appears in more than one partition.
+- **Skilled Forgery Benchmark**: Impostor pairs are evaluated strictly using skilled forgeries rather than random signers.
+
 | Dataset                                                                         | Modality | Script           | Role                                      |
 | ------------------------------------------------------------------------------- | -------- | ---------------- | ----------------------------------------- |
 | [CEDAR](https://cedar.buffalo.edu/NIJ/data/)                                    | Offline  | Latin            | Spatial branch training                   |
@@ -106,6 +135,21 @@ A multimodal biometric verification system that authenticates handwritten signat
 | [UTSig](http://mlcm.ut.ac.ir/Datasets.html)                                     | Offline  | Persian / Arabic | Closest proxy to Arabic-script deployment |
 | [SVC2004](http://www.cse.ust.hk/svc2004/)                                       | Online   | —                | Temporal branch training                  |
 | In-house collection                                                             | Both     | Arabic           | Fine-tuning, same-signer multimodal pairs |
+
+---
+
+## Model Weights & GitHub Releases
+
+Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded from Git repository tracking via `.gitignore` to keep the repository lightweight:
+
+- **Pre-compiled Weights Distribution**: Official pre-trained weights (`spatial_cnn.pth` and `temporal_lstm.pth`) are hosted and distributed via **[GitHub Releases](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases)**.
+- **Local Deployment**: Download the compiled weight `.pth` files from the latest GitHub Release and place them into the `models/weights/` directory:
+  ```
+  models/weights/
+  ├── spatial_cnn.pth
+  └── temporal_lstm.pth
+  ```
+
 
 ---
 

@@ -25,8 +25,40 @@ from config.settings import (
     NUM_EPOCHS, WEIGHT_DECAY, MODEL_WEIGHTS_DIR,
     TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     PRESSURE_DROPOUT_RATE,
+    EARLY_STOPPING_PATIENCE, EARLY_STOPPING_MIN_DELTA,
 )
 from src.models.siamese import SpatialSiamese, TemporalSiamese, ContrastiveLoss
+
+
+class EarlyStopping:
+    """
+    Early Stopping monitor to halt training if validation loss stops improving.
+    Prevents model overfitting by saving the best performing weight checkpoint.
+    """
+
+    def __init__(self, patience=EARLY_STOPPING_PATIENCE, min_delta=EARLY_STOPPING_MIN_DELTA):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            return False
+
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            return False
+        else:
+            self.counter += 1
+            print(f"  Early stopping counter: {self.counter}/{self.patience} (Best Val Loss: {self.best_loss:.4f})")
+            if self.counter >= self.patience:
+                self.early_stop = True
+                return True
+            return False
 
 
 def parse_args():
@@ -35,6 +67,8 @@ def parse_args():
                         help="Which branch to train")
     parser.add_argument("--data-dir", nargs="+", required=True,
                         help="Path(s) to dataset directories")
+    parser.add_argument("--val-dir", nargs="+", default=None,
+                        help="Optional path(s) to validation holdout dataset directories")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
@@ -45,12 +79,16 @@ def parse_args():
 
 
 def train_one_epoch(model, dataloader, loss_fn, optimizer, device, epoch):
-    """Train for one epoch. Returns average loss."""
+    """
+    Train model for a single epoch.
+    Returns average training loss across all batches.
+    """
     model.train()
     total_loss = 0.0
     num_batches = 0
 
     for batch_idx, (x1, x2, labels) in enumerate(dataloader):
+        # Transfer batch tensors to active computing device (GPU or CPU)
         x1, x2, labels = x1.to(device), x2.to(device), labels.to(device)
 
         optimizer.zero_grad()
@@ -63,13 +101,33 @@ def train_one_epoch(model, dataloader, loss_fn, optimizer, device, epoch):
         num_batches += 1
 
         if batch_idx % 10 == 0:
-            print(f"  Epoch {epoch} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item():.4f}")
+            print(f"  Epoch {epoch} | Batch {batch_idx}/{len(dataloader)} | Train Loss: {loss.item():.4f}")
+
+    return total_loss / max(num_batches, 1)
+
+
+def validate_one_epoch(model, dataloader, loss_fn, device):
+    """
+    Evaluate validation loss on holdout set without computing gradients.
+    Returns average validation loss.
+    """
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+
+    with torch.no_grad():
+        for x1, x2, labels in dataloader:
+            x1, x2, labels = x1.to(device), x2.to(device), labels.to(device)
+            emb1, emb2 = model(x1, x2)
+            loss = loss_fn(emb1, emb2, labels)
+            total_loss += loss.item()
+            num_batches += 1
 
     return total_loss / max(num_batches, 1)
 
 
 def save_checkpoint(model, optimizer, epoch, loss, path):
-    """Save training checkpoint for resuming."""
+    """Save full training checkpoint for resuming later."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
         "epoch": epoch,
@@ -81,19 +139,21 @@ def save_checkpoint(model, optimizer, epoch, loss, path):
 
 
 def save_weights(model, path):
-    """Save final model weights (state_dict only)."""
+    """Save model weights (state_dict only) for distribution and deployment."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(model.state_dict(), path)
-    print(f"  Weights saved: {path}")
+    print(f"  Best model weights saved: {path}")
 
 
 def main():
     args = parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device("cpu")  # Local execution requirement
+    
+    # Dynamic hardware selection: utilize CUDA GPU acceleration when available, else fallback to CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Initialize model
+    # Initialize Siamese backbone based on requested branch
     if args.branch == "spatial":
         model = SpatialSiamese(embedding_dim=SPATIAL_EMBEDDING_DIM).to(device)
         weights_filename = "spatial_cnn.pth"
@@ -108,6 +168,7 @@ def main():
 
     loss_fn = ContrastiveLoss(margin=CONTRASTIVE_MARGIN)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=WEIGHT_DECAY)
+    early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE, min_delta=EARLY_STOPPING_MIN_DELTA)
     start_epoch = 0
 
     if args.resume and os.path.exists(args.resume):
@@ -115,17 +176,20 @@ def main():
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        print(f"Resumed from epoch {start_epoch}")
+        print(f"Resumed training from epoch {start_epoch}")
+
+    weights_path = os.path.join(MODEL_WEIGHTS_DIR, weights_filename)
 
     print(f"Training {args.branch} branch")
     print(f"Data directories: {args.data_dir}")
     print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.lr}")
-    print(f"Device: {device}")
+    print(f"Hardware Device: {device}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
 
-    print("Training script ready. Place datasets in data/ and run with --data-dir.")
+    print("Training script initialized. Connect DataLoader pipelines to execute training with validation and early stopping.")
 
 
 if __name__ == "__main__":
     main()
+

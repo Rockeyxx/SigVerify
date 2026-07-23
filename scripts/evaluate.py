@@ -14,8 +14,9 @@ import os
 import sys
 
 import numpy as np
+import torch
 import matplotlib
-matplotlib.use("Agg")  # Non-interactive backend
+matplotlib.use("Agg")  # Non-interactive backend for headless plotting
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, det_curve, confusion_matrix
 
@@ -26,7 +27,10 @@ from config.settings import ALPHA_GRID_STEP, TARGET_FAR, TARGET_FRR
 
 def compute_eer(genuine_scores, impostor_scores):
     """
-    Compute Equal Error Rate from genuine and impostor score distributions.
+    Compute Equal Error Rate (EER) from genuine and impostor similarity scores.
+
+    EER occurs at the operating threshold where False Acceptance Rate (FAR)
+    equals False Rejection Rate (FRR).
 
     Returns: (eer: float, threshold_at_eer: float)
     """
@@ -36,21 +40,21 @@ def compute_eer(genuine_scores, impostor_scores):
     fpr, tpr, thresholds = roc_curve(labels, scores)
     fnr = 1 - tpr
 
-    # EER is where FPR ≈ FNR
+    # Identify the threshold index where FPR and FNR intersect
     idx = np.nanargmin(np.abs(fpr - fnr))
     eer = (fpr[idx] + fnr[idx]) / 2
     return float(eer), float(thresholds[idx])
 
 
 def compute_far_frr(genuine_scores, impostor_scores, threshold):
-    """Compute FAR and FRR at a given threshold."""
+    """Calculate False Acceptance Rate (FAR) and False Rejection Rate (FRR) at a given threshold."""
     far = np.mean(impostor_scores >= threshold)
     frr = np.mean(genuine_scores < threshold)
     return float(far), float(frr)
 
 
 def plot_roc(genuine_scores, impostor_scores, title, output_path):
-    """Generate and save ROC curve."""
+    """Generate and export Receiver Operating Characteristic (ROC) curve plot."""
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     fpr, tpr, _ = roc_curve(labels, scores)
@@ -69,7 +73,7 @@ def plot_roc(genuine_scores, impostor_scores, title, output_path):
 
 
 def plot_det(genuine_scores, impostor_scores, title, output_path):
-    """Generate and save DET curve."""
+    """Generate and export Detection Error Tradeoff (DET) curve plot."""
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     fpr, fnr, _ = det_curve(labels, scores)
@@ -87,7 +91,7 @@ def plot_det(genuine_scores, impostor_scores, title, output_path):
 
 
 def plot_confusion_matrix(genuine_scores, impostor_scores, threshold, title, output_path):
-    """Generate and save confusion matrix plot."""
+    """Generate and export confusion matrix visualization at a calibrated decision threshold."""
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     preds = (scores >= threshold).astype(int)
@@ -119,7 +123,7 @@ def alpha_grid_search(spatial_genuine, spatial_impostor,
                       temporal_genuine, temporal_impostor,
                       step=ALPHA_GRID_STEP, output_path=None):
     """
-    Grid search α ∈ [0, 1] to minimize EER on validation set.
+    Perform grid search over spatial weight α ∈ [0.0, 1.0] to minimize validation EER.
     Returns: (best_alpha, best_eer, results: list of (alpha, eer))
     """
     results = []
@@ -152,7 +156,7 @@ def alpha_grid_search(spatial_genuine, spatial_impostor,
 
 
 def tri_point_report(spatial_eer, temporal_eer, fused_eer, fused_is_provisional=True):
-    """Print the tri-point EER report."""
+    """Print tri-point EER report summarizing unimodal and multimodal branch metrics."""
     print("\n" + "=" * 50)
     print("TRI-POINT EER REPORT")
     print("=" * 50)
@@ -180,12 +184,17 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Dynamic hardware selection for evaluation inference
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     print(f"Evaluation mode: {args.branch or 'fused'}")
+    print(f"Hardware Device: {device}")
     print(f"Data directory: {args.data_dir}")
     print(f"Output directory: {args.output_dir}")
 
-    print("Evaluation script ready. Connect dataset loading and model inference to run metrics.")
+    print("Evaluation script initialized. Connect dataset loading and model inference to run metrics.")
 
 
 if __name__ == "__main__":
     main()
+
