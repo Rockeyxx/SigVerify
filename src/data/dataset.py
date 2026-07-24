@@ -8,18 +8,21 @@ writer-independent splitting for both spatial (image) and temporal
 Expected Local Dataset Structure (`./data`):
 --------------------------------------------
 data/
-├── cedar/                  # Offline CEDAR dataset (55 writers)
-│   ├── writer_01/
-│   │   ├── original_1_1.png ... original_1_24.png  (Genuine)
-│   │   └── forged_1_1.png   ... forged_1_24.png    (Skilled Forgeries)
-│   └── ...
+├── cedar/                  # Offline CEDAR dataset (55 writers, flat layout)
+│   ├── full_org/           # original_{writer}_{sample}.png    (Genuine)
+│   └── full_forg/          # forgeries_{writer}_{sample}.png   (Skilled Forgeries)
 ├── bhsig260/               # Offline BHSig260 dataset (260 writers)
-│   ├── Bengali/
-│   └── Hindi/
-└── svc2004/                # Online SVC2004 dataset (40 writers)
-    └── Task1/              # Coordinates (X, Y, T, Button, Azimuth, Altitude, Pressure)
-        ├── User1.txt ... User40.txt
-        └── ...
+│   ├── Bengali/            # 100 writers: {writer}/B-S-{w}-{G|F}-{n}.tif
+│   └── Hindi/              # 160 writers: {writer}/H-S-{w}-{G|F}-{n}.tif
+├── utsig/                  # Offline UTSig dataset (115 writers)
+│   ├── Genuine/            # {writer}/{n}.tif
+│   └── Forgery/            # {Skilled,Simple,Opposite Hand}/{writer}/{n}.tif
+└── svc2004/                # Online SVC2004 dataset (40 writers, flat layout)
+    └── U{user}S{sample}.TXT
+        # S1–S20 = genuine, S21–S40 = skilled forgery.
+        # Task1 files are 4-column (X, Y, T, Button) — no pressure.
+        # Task2 files are 7-column (X, Y, T, Button, Azimuth, Altitude, Pressure).
+        # parse_svc2004() auto-detects the width; Task1 imputes P = 1.0.
 
 Supported datasets:
   Spatial:  CEDAR, BHSig260, UTSig, In-house collection
@@ -40,6 +43,8 @@ from config.settings import (
     SPATIAL_INPUT_SIZE,
     MIN_BBOX_PIXELS,
     MIN_LAPLACIAN_VARIANCE,
+    PAIRS_GENUINE_PER_WRITER,
+    PAIRS_IMPOSTOR_PER_WRITER,
 )
 
 
@@ -50,7 +55,7 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     Pipeline:
       1. Load image as 8-bit single-channel grayscale.
       2. Apply aspect-ratio-preserving zero/white padding to form a square canvas.
-      3. Bilinear resize down to target_size (e.g. 256×256).
+      3. Area-averaging resize (INTER_AREA) down to target_size (e.g. 256×256).
       4. Normalize pixel intensity values into [0.0, 1.0] range.
       5. Add channel dimension [1, H, W] expected by PyTorch Conv2d.
 
@@ -173,6 +178,81 @@ def generate_pairs(samples_by_writer, num_genuine_per_writer=5,
             labels.append(0)
 
     return pairs, labels
+
+
+def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
+                           num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42):
+    """
+    Generate pairs under the **skilled-forgery** scenario (AGENTS.md eval protocol).
+
+    Unlike `generate_pairs`, every negative here is a genuine signature paired
+    against a forgery *of that same writer* — a deliberate imitation, not a
+    random stranger's signature. Random-impostor negatives are trivially
+    separable and inflate the reported EER into a number that does not describe
+    the attack the system actually faces. All reported metrics use this pairing.
+
+    Args:
+        samples_by_writer: dict mapping writer_id to
+            {"genuine": [paths/arrays], "forged": [paths/arrays]}.
+        num_genuine_per_writer: target genuine pairs per writer (label = 1).
+        num_forged_per_writer: target skilled-forgery pairs per writer (label = 0).
+
+    Returns:
+        (pairs: list of (sample1, sample2), labels: list of int)
+    """
+    rng = random.Random(seed)
+    pairs, labels = [], []
+
+    for writer in samples_by_writer:
+        genuine = samples_by_writer[writer].get("genuine", [])
+        forged = samples_by_writer[writer].get("forged", [])
+
+        # A writer needs 2 genuines to form a positive and >=1 forgery for a
+        # skilled negative. Without both, this writer cannot be scored.
+        if len(genuine) < 2 or not forged:
+            continue
+
+        # Genuine pairs: two authentic signatures from the same writer
+        num_genuine = min(num_genuine_per_writer, len(genuine) * (len(genuine) - 1) // 2)
+        for _ in range(num_genuine):
+            s1, s2 = rng.sample(genuine, 2)
+            pairs.append((s1, s2))
+            labels.append(1)
+
+        # Skilled-forgery pairs: authentic vs. an imitation of this same writer
+        num_forged = min(num_forged_per_writer, len(genuine) * len(forged))
+        for _ in range(num_forged):
+            pairs.append((rng.choice(genuine), rng.choice(forged)))
+            labels.append(0)
+
+    return pairs, labels
+
+
+def collate_temporal_pairs(batch):
+    """
+    Collate variable-length trajectory pairs into a padded batch.
+
+    Signatures have different point counts, so a batch must be padded to its
+    longest member. The true lengths are returned alongside so the LSTM can
+    `pack_padded_sequence` them — otherwise the recurrent state keeps consuming
+    pad rows and short samples get a different embedding inside a batch than
+    they do alone.
+
+    Args:
+        batch: list of (seq1 [L1, 3], seq2 [L2, 3], label) from TemporalSignatureDataset.
+
+    Returns:
+        (seq1 [B, maxL1, 3], lengths1 [B], seq2 [B, maxL2, 3], lengths2 [B], labels [B])
+    """
+    seqs1, seqs2, labels = zip(*batch)
+
+    lengths1 = torch.tensor([len(s) for s in seqs1], dtype=torch.long)
+    lengths2 = torch.tensor([len(s) for s in seqs2], dtype=torch.long)
+
+    padded1 = torch.nn.utils.rnn.pad_sequence(list(seqs1), batch_first=True)
+    padded2 = torch.nn.utils.rnn.pad_sequence(list(seqs2), batch_first=True)
+
+    return padded1, lengths1, padded2, lengths2, torch.stack(list(labels))
 
 
 class SpatialSignatureDataset(Dataset):
