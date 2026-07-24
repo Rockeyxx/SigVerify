@@ -128,13 +128,13 @@ All model training and validation routines follow an **open-set writer-independe
 - **Zero Writer Overlap**: Writer IDs are partitioned such that $\text{Writers}_{\text{train}} \cap \text{Writers}_{\text{val}} \cap \text{Writers}_{\text{test}} = \emptyset$. No individual writer appears in more than one partition.
 - **Skilled Forgery Benchmark**: Impostor pairs are evaluated strictly using skilled forgeries rather than random signers.
 
-| Dataset                                                                         | Modality | Script           | Role                                      |
-| ------------------------------------------------------------------------------- | -------- | ---------------- | ----------------------------------------- |
-| [CEDAR](https://cedar.buffalo.edu/NIJ/data/)                                    | Offline  | Latin            | Spatial branch training                   |
-| [BHSig260](https://drive.google.com/drive/folders/0B29vNACcjvzVc1RfVkg5dUh2b1E) | Offline  | Bengali / Hindi  | Multi-script generalization               |
-| [UTSig](http://mlcm.ut.ac.ir/Datasets.html)                                     | Offline  | Persian / Arabic | Closest proxy to Arabic-script deployment |
-| [SVC2004](http://www.cse.ust.hk/svc2004/)                                       | Online   | —                | Temporal branch training                  |
-| In-house collection                                                             | Both     | Arabic           | Fine-tuning, same-signer multimodal pairs |
+| Dataset                                                                                                            | Modality | Script           | Role                                      |
+| ------------------------------------------------------------------------------------------------------------------ | -------- | ---------------- | ----------------------------------------- |
+| [CEDAR](https://www.kaggle.com/datasets/shreelakshmigp/cedardataset)                                               | Offline  | Latin            | Spatial branch training                   |
+| [BHSig260](https://drive.google.com/file/d/0B29vNACcjvzVc1RfVkg5dUh2b1E/view?resourcekey=0-MUNnTzBi4h_VE0J84NDF3Q) | Offline  | Bengali / Hindi  | Multi-script generalization               |
+| [UTSig](https://www.kaggle.com/datasets/sinjinir1999/utsignature-verification?resource=download)                   | Offline  | Persian / Arabic | Closest proxy to Arabic-script deployment |
+| [SVC2004](https://cse.hkust.edu.hk/svc2004/download.html)                                                          | Online   | —                | Temporal branch training                  |
+| In-house collection                                                                                                | Both     | Arabic           | Fine-tuning, same-signer multimodal pairs |
 
 ---
 
@@ -149,7 +149,6 @@ Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded f
   ├── spatial_cnn.pth
   └── temporal_lstm.pth
   ```
-
 
 ---
 
@@ -198,11 +197,16 @@ Training uses **writer-independent splits** — no signer appears in more than o
 ## Evaluation
 
 ```bash
-# Full evaluation with tri-point reporting
-python scripts/evaluate.py --weights-dir ./models/weights --data-dir ./data
+# Evaluate a single branch
+python scripts/evaluate.py --branch spatial \
+    --weights ./models/weights/spatial_cnn.pth \
+    --data-dir ./data/cedar --output-dir ./results
 
-# α grid search (fusion weight calibration)
-python scripts/evaluate.py --alpha-sweep --output ./results/alpha_sweep.png
+# α grid search + tri-point report (fusion weight calibration)
+python scripts/evaluate.py --branch fused --alpha-sweep \
+    --spatial-weights ./models/weights/spatial_cnn.pth \
+    --temporal-weights ./models/weights/temporal_lstm.pth \
+    --data-dir ./data --output-dir ./results
 ```
 
 Metrics reported:

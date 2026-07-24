@@ -11,6 +11,7 @@ build/
 venv/
 .venv/
 env/
+.claude/
 
 # IDE
 .idea/
@@ -47,4 +48,5 @@ docs/
 # Logs
 *.log
 logs/
+
 

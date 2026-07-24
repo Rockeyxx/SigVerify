@@ -57,6 +57,33 @@ them, even if they appear in the literature review or older drafts:
 - **Inference:** if no pressure available, impute `P = 1.0` and set the
   degraded-mode flag in the GUI
 
+#### Capture Output Contract (device → model)
+
+A signature pad emits more channels than the model accepts. Tablets typically
+report **7**: `X, Y, timestamp, button/contact, azimuth, altitude, pressure` —
+the same shape as SVC2004 Task2, which is why Task2 is the corpus that matches
+the deployment device.
+
+`src/capture/` is responsible for narrowing whatever the device produces down
+to the 3 channels the model takes. This is not optional formatting — a `[1, L, 6]`
+tensor is explicitly banned under Drift Prevention.
+
+| Device channel | Fate |
+|---|---|
+| X, Y | **Kept** — z-scored per signature (zero mean, unit variance per axis) |
+| Pressure | **Kept** — scaled to `[0.0, 1.0]`; absent ⇒ impute `1.0` + degraded flag |
+| Timestamp | Dropped |
+| Button / contact state | Dropped — it is pen-down/up, **not** a pressure substitute |
+| Azimuth, altitude, tilt | Dropped |
+
+- Capture **must** normalize via `src.data.parsers.normalize_trajectory()` —
+  the same function the training parsers call. Any separate normalization path
+  creates train/inference skew and silently invalidates every embedding.
+- X/Y are standardized **per signature** so the model keys on stroke shape and
+  dynamics, not on where the person signed on the pad or how large they wrote.
+- Raw coordinate streams are **never persisted** — derive the embedding, store
+  that, discard the stream (ISO/IEC 24745:2022).
+
 ### Loss
 
 - **Contrastive loss:** `L = y·d² + (1−y)·max(0, m−d)²`
@@ -162,3 +189,27 @@ Scopes: models, data, database, capture, gui, config, scripts
 - Tune `α` and `τ` on **validation only**, report on **held-out test**
 - If FAR target is missed, **prioritize keeping FAR low** over FRR
 - Label fused EER as **provisional** until in-house multimodal data exists
+
+### Pressure Ablation (temporal branch — two required runs)
+
+The temporal branch is trained **twice**, on the two SVC2004 tasks, and both
+results are reported. The tasks share filenames, writer count, and split seed,
+so the only variable between the runs is the pressure channel — which makes the
+difference in EER a direct measurement of what pressure contributes.
+
+| Run | Corpus | Channel 3 | Pressure dropout | Role |
+|---|---|---|---|---|
+| **A — baseline** | `data/svc2004_task1` | `P = 1.0` imputed (4-col source) | Disabled — it is a no-op when every P is already 1.0 | Pressure-blind control. Also the honest lower bound for any device that reports no pressure |
+| **B — headline** | `data/svc2004_task2` | Real pressure, scaled to `[0, 1]` (7-col source) | **Active at `PRESSURE_DROPOUT_RATE`** | The shipped temporal model — matches the capture device's channel set |
+
+Rules:
+
+- **Run B is the deployed model.** Run A exists to quantify the delta and to
+  bound degraded-mode performance; it is never the shipped weights.
+- Both runs use the **same `--seed`**, so the writer split is identical and the
+  two EERs are directly comparable. A different seed invalidates the comparison.
+- Report both EERs side by side. Do **not** report only the better number.
+- Pressure dropout stays on for Run B. It is what keeps Run B usable when a
+  device reports no pressure at inference — without it, the degraded path falls
+  outside the model's learned distribution.
+- Weights are written to distinct filenames so Run A cannot overwrite Run B.
