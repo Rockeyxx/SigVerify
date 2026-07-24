@@ -11,6 +11,8 @@ Architecture follows the approved Term-1 baseline (Alternative 3 — Late-Fusion
 Dual Siamese Networks). See AGENTS.md for hard constraints.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -78,8 +80,11 @@ class SpatialSiamese(nn.Module):
 
     def encode(self, x):
         """
-        Extract normalized embedding from a single image.
+        Extract the raw (un-normalized) embedding from a single image.
         Tensor flow: [B, 1, 256, 256] → [B, 256, 8, 8] → [B, 256, 1, 1] → [B, 512].
+
+        Embeddings are NOT L2-normalized — magnitudes are free to vary, which
+        is what the contrastive margin operates on. Do not assume ‖e‖ = 1.
         """
         x = self.features(x)
         x = self.pool(x)
@@ -138,23 +143,37 @@ class TemporalSiamese(nn.Module):
                 x[mask, :, 2] = 1.0
         return x
 
-    def encode(self, x):
+    def encode(self, x, lengths=None):
         """
-        Extract embedding from a trajectory sequence.
+        Extract the raw (un-normalized) embedding from a trajectory sequence.
         Input shape: [B, L, 3] where L is sequence length, 3 features are (X, Y, P).
         Output shape: [B, 128].
+
+        `lengths` (optional [B] int tensor of true sequence lengths) makes the
+        LSTM skip padding via pack_padded_sequence, so a padded batch produces
+        the same embedding as the sample encoded alone.
         """
         x = self._apply_pressure_dropout(x)
-        output, (h_n, _) = self.lstm(x)
+
+        if lengths is not None:
+            # Packing hides the padded tail from both LSTM directions. Without it
+            # the backward pass would start on pad rows and contaminate h_n.
+            packed = nn.utils.rnn.pack_padded_sequence(
+                x, lengths.cpu(), batch_first=True, enforce_sorted=False
+            )
+            _, (h_n, _) = self.lstm(packed)
+        else:
+            _, (h_n, _) = self.lstm(x)
+
         # Extract last layer forward state (h_n[-2]) and backward state (h_n[-1])
         h_forward = h_n[-2]
         h_backward = h_n[-1]
         h_combined = torch.cat([h_forward, h_backward], dim=1)
         return self.embedding(h_combined)
 
-    def forward(self, x1, x2):
+    def forward(self, x1, x2, lengths1=None, lengths2=None):
         """Forward pass for a pair of trajectory sequences. Returns both embeddings."""
-        return self.encode(x1), self.encode(x2)
+        return self.encode(x1, lengths1), self.encode(x2, lengths2)
 
 
 class ContrastiveLoss(nn.Module):
@@ -169,23 +188,46 @@ class ContrastiveLoss(nn.Module):
         - y = 0 for forgery/impostor pairs (enforces separation distance d ≥ m)
         - d is the pairwise L2 Euclidean distance
         - m is the contrastive margin threshold
+
+    Hard-negative mining (AGENTS.md requirement): most impostor pairs sit beyond
+    the margin and contribute exactly zero loss, so averaging over the whole
+    batch dilutes the gradient signal toward zero as training progresses. Each
+    batch therefore keeps only the `hard_negative_ratio` fraction of impostors
+    with the largest loss — equivalently the smallest distances, the ones the
+    model currently finds most confusable. Set the ratio to 1.0 to disable
+    mining and recover the plain contrastive mean.
     """
 
-    def __init__(self, margin=1.0):
+    def __init__(self, margin=1.0, hard_negative_ratio=0.5):
         super().__init__()
         self.margin = margin
+        self.hard_negative_ratio = hard_negative_ratio
 
     def forward(self, embedding1, embedding2, label):
         # Calculate pairwise L2 Euclidean distance between embedding vectors
         distance = F.pairwise_distance(embedding1, embedding2, p=2)
-        
+
         # Loss component for genuine pairs: minimize square of distance
         genuine_loss = label * distance.pow(2)
-        
+
         # Loss component for forgery pairs: push distance above margin m
         impostor_loss = (1 - label) * F.relu(self.margin - distance).pow(2)
-        
-        return (genuine_loss + impostor_loss).mean()
+
+        if self.hard_negative_ratio >= 1.0:
+            return (genuine_loss + impostor_loss).mean()
+
+        is_impostor = label < 0.5
+        num_impostor = int(is_impostor.sum())
+
+        # Genuine terms are always kept in full — mining only prunes impostors
+        kept = [genuine_loss[~is_impostor]]
+
+        if num_impostor > 0:
+            num_mined = max(1, math.ceil(self.hard_negative_ratio * num_impostor))
+            hardest = torch.topk(impostor_loss[is_impostor], num_mined).values
+            kept.append(hardest)
+
+        return torch.cat(kept).mean()
 
 
 class FusionEngine:
@@ -213,15 +255,26 @@ class FusionEngine:
         mean, std = norm_params
         return (score - mean) / std if std != 0 else score - mean
 
-    def fuse(self, spatial_score=None, temporal_score=None):
+    def fuse(self, spatial_score=None, temporal_score=None, pressure_imputed=False):
         """
         Fuse available branch scores and compare against decision threshold τ.
 
-        Returns:
-            (decision: str, confidence: float, routing: str)
-            - decision: "Genuine" if fused score S_final >= threshold, else "Forged"
-            - confidence: score scaled to [0.0, 100.0] percentage
-            - routing: "multimodal", "spatial_only", or "temporal_only"
+        Args:
+            spatial_score:    calibrated spatial similarity, or None if unavailable.
+            temporal_score:   calibrated temporal similarity, or None if unavailable.
+            pressure_imputed: True when the temporal sample had no pressure channel
+                              and P = 1.0 was substituted (AGENTS.md degraded mode).
+
+        Returns a dict — this is the contract the GUI renders against:
+            {
+              "decision":   "Genuine" if S_final >= τ else "Forged",
+              "confidence": score scaled to [0.0, 100.0] percentage,
+              "routing":    "multimodal" | "spatial_only" | "temporal_only",
+              "degraded":   True when the verification ran on reduced evidence —
+                            either a branch was missing or pressure was imputed.
+                            The GUI must surface this; a degraded "Genuine" is
+                            not the same claim as a multimodal one.
+            }
         """
         if spatial_score is not None and temporal_score is not None:
             s = self.alpha * self._normalize(spatial_score, self.spatial_norm) + \
@@ -236,7 +289,10 @@ class FusionEngine:
         else:
             raise ValueError("At least one modality score must be provided for fusion.")
 
-        decision = "Genuine" if s >= self.threshold else "Forged"
-        confidence = min(max(s * 100, 0.0), 100.0)
-        return decision, confidence, routing
+        return {
+            "decision": "Genuine" if s >= self.threshold else "Forged",
+            "confidence": float(min(max(s * 100, 0.0), 100.0)),
+            "routing": routing,
+            "degraded": bool(routing != "multimodal" or pressure_imputed),
+        }
 

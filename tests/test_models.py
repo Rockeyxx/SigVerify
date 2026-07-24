@@ -136,24 +136,47 @@ class TestFusionEngine:
     def test_multimodal_fusion(self):
         """Test dual-branch multimodal score weighted sum decision."""
         engine = FusionEngine(alpha=0.6, threshold=0.5)
-        decision, confidence, routing = engine.fuse(
-            spatial_score=0.8, temporal_score=0.7
-        )
-        assert routing == "multimodal"
-        assert isinstance(decision, str)
-        assert decision in ("Genuine", "Forged")
+        result = engine.fuse(spatial_score=0.8, temporal_score=0.7)
+        assert result["routing"] == "multimodal"
+        assert result["decision"] in ("Genuine", "Forged")
+
+    def test_result_contract_keys(self):
+        """Verify fuse() returns the exact dict contract the GUI consumes."""
+        engine = FusionEngine(alpha=0.5, threshold=0.5)
+        result = engine.fuse(spatial_score=0.8, temporal_score=0.7)
+        assert set(result) == {"decision", "confidence", "routing", "degraded"}
+        assert isinstance(result["decision"], str)
+        assert isinstance(result["confidence"], float)
+        assert isinstance(result["routing"], str)
+        assert isinstance(result["degraded"], bool)
+
+    def test_multimodal_not_degraded(self):
+        """Both modalities present with real pressure is the full-confidence path."""
+        engine = FusionEngine(alpha=0.5, threshold=0.5)
+        result = engine.fuse(spatial_score=0.8, temporal_score=0.7)
+        assert result["degraded"] is False
 
     def test_spatial_only_fallback(self):
         """Test automatic fallback routing when temporal sequence is absent."""
         engine = FusionEngine(alpha=0.5, threshold=0.5)
-        decision, confidence, routing = engine.fuse(spatial_score=0.8)
-        assert routing == "spatial_only"
+        result = engine.fuse(spatial_score=0.8)
+        assert result["routing"] == "spatial_only"
+        assert result["degraded"] is True
 
     def test_temporal_only_fallback(self):
         """Test automatic fallback routing when signature image is absent."""
         engine = FusionEngine(alpha=0.5, threshold=0.5)
-        decision, confidence, routing = engine.fuse(temporal_score=0.6)
-        assert routing == "temporal_only"
+        result = engine.fuse(temporal_score=0.6)
+        assert result["routing"] == "temporal_only"
+        assert result["degraded"] is True
+
+    def test_imputed_pressure_flags_degraded(self):
+        """Verify P=1.0 imputation marks the verification degraded even when multimodal."""
+        engine = FusionEngine(alpha=0.5, threshold=0.5)
+        result = engine.fuse(spatial_score=0.8, temporal_score=0.7,
+                             pressure_imputed=True)
+        assert result["routing"] == "multimodal"
+        assert result["degraded"] is True
 
     def test_no_modality_raises(self):
         """Verify ValueError is raised if neither modality score is supplied."""
@@ -164,10 +187,99 @@ class TestFusionEngine:
     def test_threshold_decision_boundary(self):
         """Verify decision boundary classification around threshold tau."""
         engine = FusionEngine(alpha=0.5, threshold=0.5)
-        decision_at, _, _ = engine.fuse(spatial_score=0.5)
-        decision_below, _, _ = engine.fuse(spatial_score=0.49)
-        assert decision_at == "Genuine"
-        assert decision_below == "Forged"
+        assert engine.fuse(spatial_score=0.5)["decision"] == "Genuine"
+        assert engine.fuse(spatial_score=0.49)["decision"] == "Forged"
+
+
+class TestHardNegativeMining:
+    """Test suite for dynamic hard-negative mining inside the contrastive loss."""
+
+    def _batch_with_one_hard_negative(self):
+        """
+        Build a batch of 4 impostor pairs: one hard (d≈0.1, well inside the
+        margin) and three easy (d=5.0, far beyond it and contributing zero loss).
+        """
+        emb1 = torch.zeros(4, 2)
+        emb2 = torch.tensor([[0.1, 0.0], [5.0, 0.0], [5.0, 0.0], [5.0, 0.0]])
+        labels = torch.zeros(4)
+        return emb1, emb2, labels
+
+    def test_mining_raises_loss_above_vanilla_mean(self):
+        """Mined loss must exceed the vanilla mean, which easy negatives dilute to ~0."""
+        emb1, emb2, labels = self._batch_with_one_hard_negative()
+        vanilla = ContrastiveLoss(margin=1.0, hard_negative_ratio=1.0)
+        mined = ContrastiveLoss(margin=1.0, hard_negative_ratio=0.25)
+        assert mined(emb1, emb2, labels) > vanilla(emb1, emb2, labels)
+
+    def test_ratio_one_matches_vanilla_contrastive(self):
+        """hard_negative_ratio=1.0 disables selection and reproduces the plain mean."""
+        emb1 = torch.randn(6, 8)
+        emb2 = torch.randn(6, 8)
+        labels = torch.tensor([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+        loss_fn = ContrastiveLoss(margin=1.0, hard_negative_ratio=1.0)
+
+        distance = torch.nn.functional.pairwise_distance(emb1, emb2, p=2)
+        expected = (labels * distance.pow(2)
+                    + (1 - labels) * torch.nn.functional.relu(1.0 - distance).pow(2)).mean()
+        assert torch.allclose(loss_fn(emb1, emb2, labels), expected, atol=1e-6)
+
+    def test_gradients_flow_through_mined_loss(self):
+        """Backprop must still reach both branches after negative selection."""
+        emb1 = torch.randn(8, 16, requires_grad=True)
+        emb2 = torch.randn(8, 16, requires_grad=True)
+        labels = torch.tensor([1.0, 0.0] * 4)
+        ContrastiveLoss(margin=1.0, hard_negative_ratio=0.5)(emb1, emb2, labels).backward()
+        assert emb1.grad is not None and emb1.grad.abs().sum() > 0
+        assert emb2.grad is not None and emb2.grad.abs().sum() > 0
+
+    def test_all_genuine_batch_is_safe(self):
+        """A batch with zero impostors must not divide by zero or return NaN."""
+        emb1 = torch.randn(4, 8)
+        emb2 = torch.randn(4, 8)
+        labels = torch.ones(4)
+        loss = ContrastiveLoss(margin=1.0, hard_negative_ratio=0.5)(emb1, emb2, labels)
+        assert torch.isfinite(loss)
+
+    def test_all_impostor_batch_is_safe(self):
+        """A batch with zero genuine pairs must not divide by zero or return NaN."""
+        emb1 = torch.randn(4, 8)
+        emb2 = torch.randn(4, 8)
+        labels = torch.zeros(4)
+        loss = ContrastiveLoss(margin=1.0, hard_negative_ratio=0.5)(emb1, emb2, labels)
+        assert torch.isfinite(loss)
+
+
+class TestTemporalPackedBatching:
+    """Test suite for variable-length batching via pack_padded_sequence."""
+
+    def test_padded_batch_matches_single_sample(self):
+        """
+        The core contamination check: encoding a short sequence inside a padded
+        batch must equal encoding it alone. Without packing, the LSTM keeps
+        consuming pad rows and the two diverge.
+        """
+        model = TemporalSiamese(embedding_dim=128, pressure_dropout=0.0)
+        model.eval()
+
+        long_seq = torch.randn(300, 3)
+        short_seq = torch.randn(150, 3)
+
+        padded = torch.zeros(2, 300, 3)
+        padded[0, :300] = long_seq
+        padded[1, :150] = short_seq
+        lengths = torch.tensor([300, 150])
+
+        with torch.no_grad():
+            batched = model.encode(padded, lengths=lengths)
+            alone = model.encode(short_seq.unsqueeze(0), lengths=torch.tensor([150]))
+
+        assert torch.allclose(batched[1], alone[0], atol=1e-5)
+
+    def test_encode_without_lengths_still_works(self):
+        """Omitting lengths keeps the original un-packed path for equal-length batches."""
+        model = TemporalSiamese(embedding_dim=128, pressure_dropout=0.0)
+        model.eval()
+        assert model.encode(torch.randn(2, 50, 3)).shape == (2, 128)
 
 
 class TestWeightsSaveLoad:

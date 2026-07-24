@@ -14,6 +14,23 @@ import os
 # ─── Paths ────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "models", "weights")
+RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+
+# Dataset roots. `data/` is gitignored — datasets are fetched locally, never committed.
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+CEDAR_DIR = os.path.join(DATA_DIR, "cedar")          # full_org/ + full_forg/
+BHSIG260_DIR = os.path.join(DATA_DIR, "bhsig260")    # Bengali/ + Hindi/
+UTSIG_DIR = os.path.join(DATA_DIR, "utsig")          # Genuine/ + Forgery/
+
+# SVC2004 ships two tasks. Both are kept so the temporal branch can be trained
+# twice and the contribution of the pressure channel measured directly.
+SVC2004_TASK1_DIR = os.path.join(DATA_DIR, "svc2004_task1")   # 4-col, no pressure
+SVC2004_TASK2_DIR = os.path.join(DATA_DIR, "svc2004_task2")   # 7-col, real pressure
+SVC2004_DIR = SVC2004_TASK2_DIR                               # default: pressure-aware
+
+# ─── DataLoader ───────────────────────────────────────────────────────
+NUM_WORKERS = 4                         # 0 on Windows/notebook if workers hang
+PIN_MEMORY = False                      # CPU-only training — pinning buys nothing
 
 # ─── Spatial Branch (Offline — Siamese CNN) ───────────────────────────
 SPATIAL_INPUT_SIZE = (256, 256)          # H × W → [1, 1, 256, 256] tensor
@@ -32,8 +49,15 @@ TEMPORAL_NUM_LAYERS = 2
 PRESSURE_DROPOUT_RATE = 0.4             # Replace P with 1.0 for 40% of training samples
 PRESSURE_IMPUTATION_VALUE = 1.0
 
+# ─── Pair Generation ─────────────────────────────────────────────────
+# Per-writer pair budgets for a real training run (the 5/5 demo defaults are
+# far too small: 55 CEDAR writers × 5 would yield only ~550 pairs total).
+PAIRS_GENUINE_PER_WRITER = 40
+PAIRS_IMPOSTOR_PER_WRITER = 40
+
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
+HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by mining
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
 NUM_EPOCHS = 100
