@@ -28,6 +28,12 @@ SVC2004_TASK1_DIR = os.path.join(DATA_DIR, "svc2004_task1")   # 4-col, no pressu
 SVC2004_TASK2_DIR = os.path.join(DATA_DIR, "svc2004_task2")   # 7-col, real pressure
 SVC2004_DIR = SVC2004_TASK2_DIR                               # default: pressure-aware
 
+# MOBISIG: 83 users, finger-drawn on a capacitive touchscreen rather than a pen
+# tablet, so its "pressure" comes from contact area. Used to pre-train the
+# temporal branch, not to train the shipped model, since the deployment device
+# is a pen tablet. https://www.ms.sapientia.ro/~manyi/mobisig.html
+MOBISIG_DIR = os.path.join(DATA_DIR, "MOBISIG")
+
 # ─── DataLoader ───────────────────────────────────────────────────────
 NUM_WORKERS = 4                         # 0 on Windows/notebook if workers hang
 PIN_MEMORY = False                      # CPU-only training — pinning buys nothing
@@ -60,17 +66,45 @@ CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by mining
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
-NUM_EPOCHS = 100
+NUM_EPOCHS = 50
 WEIGHT_DECAY = 1e-4
 
+# Dropout on the 8192-d pooled vector feeding the spatial embedding projection.
+# Off by default. At 0.4 it costs about a point of held-out EER and barely
+# narrows the train/validation gap, so head capacity is not what limits
+# generalization here.
+SPATIAL_HEAD_DROPOUT = 0.0
+
+# Writer-independent split ratios (train, val, test).
+# The image corpora have 430 writers between them, so 70/15/15 still leaves 65
+# test writers. SVC2004 has only 40, where the same ratio yields 6 test writers
+# and roughly 480 pairs, far too few to rank configurations on. Halving the
+# training share buys 10 validation and 10 test writers instead.
+SPATIAL_SPLIT_RATIOS = (0.7, 0.15, 0.15)
+TEMPORAL_SPLIT_RATIOS = (0.5, 0.25, 0.25)
+
+# Pairs drawn per writer for the temporal branch. Twenty training writers give
+# only 1600 pairs at the shared default of 40+40, and the LSTM overfits that
+# within about fifteen epochs. Each SVC2004 writer supplies 20 genuine and 20
+# forged samples, which allow 190 genuine and 400 impostor combinations, so
+# sampling more of them costs nothing but time.
+TEMPORAL_PAIRS_GENUINE_PER_WRITER = 180
+TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
+
 # Early Stopping hyperparameters (monitors validation loss to halt training)
-EARLY_STOPPING_PATIENCE = 10            # Stop after 10 epochs without validation improvement
+EARLY_STOPPING_PATIENCE = 5            # Stop after 10 epochs without validation improvement
 EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrease required to trigger improvement
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 ALPHA_DEFAULT = 0.5                     # Tuned on validation via grid search
 ALPHA_GRID_STEP = 0.05
-DECISION_THRESHOLD = 0.5               # τ: S_final ≥ τ → Genuine
+# τ: S_final ≥ τ → Genuine. Tuned on the validation split, never on test, and
+# re-derive it whenever the spatial weights change. Similarity is S = 1/(1+d),
+# so a threshold sits directly on a distance: the old default of 0.5 meant
+# d = 1.0, which is exactly CONTRASTIVE_MARGIN. That put the decision boundary
+# on the loss's own target with no slack, and every impostor the model had not
+# pushed fully past the margin landed on the accept side.
+DECISION_THRESHOLD = 0.7143
 
 # ─── Evaluation Targets ──────────────────────────────────────────────
 TARGET_FAR = 0.05

@@ -29,7 +29,7 @@ class SpatialSiamese(nn.Module):
     their 512-dimensional continuous embeddings for distance comparison.
     """
 
-    def __init__(self, embedding_dim=512):
+    def __init__(self, embedding_dim=512, head_dropout=0.0):
         super().__init__()
         self.embedding_dim = embedding_dim
 
@@ -66,30 +66,44 @@ class SpatialSiamese(nn.Module):
             nn.MaxPool2d(2),
         )
 
-        # Global average pooling reduces spatial dims from [B, 256, H', W'] to [B, 256, 1, 1]
-        # This reduces parameter count in the FC projection layer and provides spatial invariance.
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        # A 4x4 grid keeps 16 regions per channel, which preserves the coarse
+        # stroke geometry that identifies a signer. Pooling all 64 positions into
+        # one channel mean would describe ink density instead of shape.
+        # 8 divides evenly by 4, so these are exact non-overlapping 2x2 windows.
+        self.pool_grid = 4
+        self.pool_avg = nn.AdaptiveAvgPool2d((self.pool_grid, self.pool_grid))
+        self.pool_max = nn.AdaptiveMaxPool2d((self.pool_grid, self.pool_grid))
 
-        # Fully connected projection block mapping pooled features to a 512-d embedding space
+        # avg gives regional ink density, max the strongest filter response there.
+        # Ink covers roughly 1% of the canvas, so averaging on its own dilutes the
+        # stroke evidence against a background level that is nearly identical for
+        # every signer. The max branch ignores that floor.
+        pooled_features = 2 * 256 * self.pool_grid * self.pool_grid   # 8192
+
+        # One linear projection, no hidden ReLU. A ReLU here would confine every
+        # embedding to a single convex cone, capping angular spread and pushing
+        # discrimination into vector magnitude instead of direction.
         self.embedding = nn.Sequential(
-            nn.Linear(256, 1024),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(1024, embedding_dim),
+            nn.Dropout(head_dropout),
+            nn.Linear(pooled_features, embedding_dim),
         )
 
     def encode(self, x):
         """
         Extract the raw (un-normalized) embedding from a single image.
-        Tensor flow: [B, 1, 256, 256] → [B, 256, 8, 8] → [B, 256, 1, 1] → [B, 512].
+        Tensor flow: [B, 1, 256, 256] → [B, 256, 8, 8] → 2x [B, 256, 4, 4]
+                     → [B, 8192] → [B, 512].
 
-        Embeddings are NOT L2-normalized — magnitudes are free to vary, which
-        is what the contrastive margin operates on. Do not assume ‖e‖ = 1.
+        Embeddings are NOT L2-normalized. Projecting onto the unit sphere makes
+        CONTRASTIVE_MARGIN scale-free, which is tidier, but it measured slightly
+        worse on held-out EER, so the raw projection stands. Do not assume ‖e‖ = 1.
         """
         x = self.features(x)
-        x = self.pool(x)
-        x = torch.flatten(x, 1)  # Flatten feature map to vector [B, 256]
-        return self.embedding(x)
+        pooled = torch.cat(
+            [torch.flatten(self.pool_avg(x), 1), torch.flatten(self.pool_max(x), 1)],
+            dim=1,
+        )
+        return self.embedding(pooled)
 
     def forward(self, x1, x2):
         """Forward pass for a pair of images. Returns embeddings for both input branches."""
@@ -112,9 +126,18 @@ class TemporalSiamese(nn.Module):
         self.embedding_dim = embedding_dim
         self.pressure_dropout = pressure_dropout
 
+        # The capture device reports position and pressure, but what separates a
+        # signer from a forger is mostly how the pen moves: a forger can copy the
+        # shape while tracing it far more slowly and evenly. Velocity is the most
+        # discriminative feature family in the online-verification literature, so
+        # it is derived here from consecutive frames rather than being demanded
+        # from the tablet. The capture contract stays (X, Y, P); the LSTM sees
+        # (X, Y, P, dX, dY, dP).
+        lstm_features = input_features * 2
+
         # Bidirectional LSTM to capture stroke dynamics forward and backward in time
         self.lstm = nn.LSTM(
-            input_size=input_features,
+            input_size=lstm_features,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -122,13 +145,29 @@ class TemporalSiamese(nn.Module):
             bidirectional=True,
         )
 
-        # Concatenated final hidden states (2 * hidden_size) projected to 128-d embedding space
-        self.embedding = nn.Sequential(
-            nn.Linear(hidden_size * 2, 256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(256, embedding_dim),
-        )
+        # Concatenated final hidden states (2 * hidden_size) projected to 128-d
+        # embedding space by a single linear layer.
+        #
+        # No ReLU and no dropout on this path. Dropout inside a Siamese head is
+        # actively harmful: the two branches draw independent masks, so the same
+        # signature encoded twice lands at two different points. That puts a
+        # random floor under the genuine-pair distance the loss is trying to
+        # drive to zero. A ReLU would also trap every embedding in one convex
+        # cone, pushing discrimination into magnitude rather than direction.
+        self.embedding = nn.Linear(hidden_size * 2, embedding_dim)
+
+    @staticmethod
+    def _add_dynamics(x):
+        """
+        Append per-frame deltas, turning [B, L, 3] into [B, L, 6].
+
+        The first frame has no predecessor, so its delta is zero. Deltas at
+        indices past a sequence's true length read into padding, but packing in
+        `encode` drops those positions before the LSTM sees them.
+        """
+        delta = torch.zeros_like(x)
+        delta[:, 1:] = x[:, 1:] - x[:, :-1]
+        return torch.cat([x, delta], dim=-1)
 
     def _apply_pressure_dropout(self, x):
         """
@@ -154,6 +193,11 @@ class TemporalSiamese(nn.Module):
         the same embedding as the sample encoded alone.
         """
         x = self._apply_pressure_dropout(x)
+
+        # Deltas are taken after pressure dropout so a sample whose pressure was
+        # flattened to 1.0 also reports a flat dP, which is what a real capture
+        # without pressure looks like.
+        x = self._add_dynamics(x)
 
         if lengths is not None:
             # Packing hides the padded tail from both LSTM directions. Without it
