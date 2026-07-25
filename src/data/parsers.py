@@ -15,6 +15,7 @@ Temporal parsers yield [L, 3] float32 arrays — trajectories are small enough
 to hold in memory, and eager loading keeps the collate path simple.
 """
 
+import csv
 import os
 import re
 
@@ -25,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
     CEDAR_DIR,
+    MOBISIG_DIR,
     PRESSURE_IMPUTATION_VALUE,
     SVC2004_DIR,
     UTSIG_DIR,
@@ -39,6 +41,10 @@ _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _CEDAR_FORGED = re.compile(r"^forgeries_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _BHSIG_FILE = re.compile(r"^[BH]-S-(\d+)-([GF])-(\d+)\.tif$", re.IGNORECASE)
 _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
+# SIGN_GEN_USER7_USER7_3.csv  -> genuine, writer 7
+# SIGN_FOR_USER7_USER2_3.csv  -> forgery of writer 7, drawn by user 2
+_MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
+                           re.IGNORECASE)
 
 
 def _require_dir(path, label):
@@ -280,6 +286,63 @@ def parse_svc2004(root=SVC2004_DIR):
     return writers
 
 
+def load_mobisig_file(path):
+    """
+    Load one MOBISIG CSV into the model's [L, 3] input.
+
+    The file carries 13 columns, including velocity, accelerometer and gyroscope
+    channels. Only x, y and pressure are read: the capture contract is three
+    channels, and the model derives its own dynamics from them.
+    """
+    xs, ys, ps = [], [], []
+    with open(path, newline="") as handle:
+        for row in csv.DictReader(handle):
+            xs.append(float(row["x"]))
+            ys.append(float(row["y"]))
+            ps.append(float(row["pressure"]))
+
+    # MOBISIG pressure already arrives in [0, 1]; normalize_trajectory clips it.
+    return normalize_trajectory(np.column_stack([xs, ys]), np.asarray(ps))
+
+
+def parse_mobisig(root=MOBISIG_DIR):
+    """
+    Parse MOBISIG: `USER{n}/SIGN_{GEN,FOR}_USER{owner}_USER{signer}_{k}.csv`.
+
+    83 users x 45 genuine + 20 skilled forgeries. A forgery filename names two
+    users: the one being imitated and the one who drew it. The signature belongs
+    to the **owner** being imitated, since that is whose identity the system
+    would be deciding on. Filing it under the forger instead would put an
+    impostor attempt in that person's genuine reference set.
+
+    These are finger-drawn signatures on a capacitive touchscreen, so pressure
+    derives from contact area rather than a pen sensor. Suitable for pre-training
+    the temporal branch, not for training the shipped pen-tablet model.
+    """
+    _require_dir(root, "MOBISIG")
+    writers = {}
+
+    for user_dir in sorted(os.listdir(root)):
+        user_path = os.path.join(root, user_dir)
+        if not os.path.isdir(user_path):
+            continue
+
+        for filename in sorted(os.listdir(user_path)):
+            match = _MOBISIG_FILE.match(filename)
+            if not match:
+                continue
+
+            kind, owner = match.group(1), int(match.group(2))
+            writer_id = f"mobisig_{owner}"
+            label = "genuine" if kind == "GEN" else "forged"
+
+            writers.setdefault(writer_id, _new_writer())
+            writers[writer_id][label].append(
+                load_mobisig_file(os.path.join(user_path, filename)))
+
+    return writers
+
+
 # Registered after definition so parse_dataset can dispatch by directory name.
 _PARSERS = {
     "cedar": parse_cedar,
@@ -290,7 +353,8 @@ _PARSERS = {
     "svc2004": parse_svc2004,
     "svc2004_task1": parse_svc2004,
     "svc2004_task2": parse_svc2004,
+    "mobisig": parse_mobisig,
 }
 
 SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig")
-TEMPORAL_DATASETS = ("svc2004",)
+TEMPORAL_DATASETS = ("svc2004", "mobisig")

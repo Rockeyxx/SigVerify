@@ -15,6 +15,7 @@ import pytest
 from config.settings import (
     BHSIG260_DIR,
     CEDAR_DIR,
+    MOBISIG_DIR,
     SVC2004_TASK1_DIR,
     SVC2004_TASK2_DIR,
     UTSIG_DIR,
@@ -23,6 +24,7 @@ from src.data.parsers import (
     load_svc2004_file,
     parse_bhsig260,
     parse_cedar,
+    parse_mobisig,
     parse_svc2004,
     parse_utsig,
     svc2004_has_pressure,
@@ -279,3 +281,68 @@ def test_real_task2_has_real_pressure():
     assert pressure.min() >= 0.0 and pressure.max() <= 1.0
     assert pressure.std() > 0.0, "pressure is constant — the channel carries no signal"
     assert not np.allclose(pressure, 1.0)
+
+
+class TestParseMobisig:
+    """MOBISIG: USER<n>/SIGN_{GEN,FOR}_USER<owner>_USER<signer>_<k>.csv."""
+
+    HEADER = ("x,y,timestamp,pressure,fingerarea,velocityx,velocityy,"
+              "accelx,accely,accelz,gyrox,gyroy,gyroz")
+
+    def _write(self, path, rows):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(self.HEADER + "\n")
+            for x, y, p in rows:
+                fh.write(f"{x},{y},1000,{p},0.1,0,0,0,0,0,0,0,0\n")
+        return path
+
+    def _fixture(self, root):
+        rows = [(10.0, 20.0, 0.5), (11.0, 22.0, 0.6), (13.0, 25.0, 0.4)]
+        for owner in (1, 2):
+            for k in (1, 2):
+                self._write(os.path.join(
+                    root, f"USER{owner}", f"SIGN_GEN_USER{owner}_USER{owner}_{k}.csv"), rows)
+            # A forgery of `owner`, produced by a different user.
+            self._write(os.path.join(
+                root, f"USER{owner}", f"SIGN_FOR_USER{owner}_USER9_1.csv"), rows)
+        return root
+
+    def test_groups_by_owner_not_by_forger(self, tmp_path):
+        """A forgery belongs to the writer being imitated, never to whoever drew it."""
+        writers = parse_mobisig(self._fixture(str(tmp_path)))
+        assert set(writers) == {"mobisig_1", "mobisig_2"}
+        assert len(writers["mobisig_1"]["genuine"]) == 2
+        assert len(writers["mobisig_1"]["forged"]) == 1
+        assert "mobisig_9" not in writers
+
+    def test_returns_normalized_l3_trajectories(self, tmp_path):
+        sample = parse_mobisig(self._fixture(str(tmp_path)))["mobisig_1"]["genuine"][0]
+        assert sample.ndim == 2 and sample.shape[1] == 3
+        assert np.allclose(sample[:, :2].mean(axis=0), 0.0, atol=1e-5)
+        assert sample[:, 2].min() >= 0.0 and sample[:, 2].max() <= 1.0
+
+    def test_ignores_non_signature_files(self, tmp_path):
+        root = self._fixture(str(tmp_path))
+        _touch(os.path.join(root, "users.csv"))
+        _touch(os.path.join(root, "statistics.txt"))
+        assert set(parse_mobisig(root)) == {"mobisig_1", "mobisig_2"}
+
+    def test_missing_root_raises(self):
+        with pytest.raises(FileNotFoundError):
+            parse_mobisig("/nonexistent/mobisig")
+
+
+@pytest.mark.skipif(not _have(MOBISIG_DIR), reason="MOBISIG not downloaded")
+def test_real_mobisig_counts():
+    """MOBISIG ships 83 users, each with 45 genuine and 20 skilled forgeries."""
+    writers = parse_mobisig(MOBISIG_DIR)
+    assert len(writers) == 83
+    assert all(len(v["genuine"]) == 45 and len(v["forged"]) == 20
+               for v in writers.values())
+
+    sample = writers["mobisig_1"]["genuine"][0]
+    assert sample.ndim == 2 and sample.shape[1] == 3
+    assert np.all(np.isfinite(sample))
+    # Capacitive screens report a real, varying contact pressure.
+    assert sample[:, 2].std() > 0.0
