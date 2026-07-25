@@ -291,7 +291,7 @@ class FusionEngine:
 
         return {
             "decision": "Genuine" if s >= self.threshold else "Forged",
-            "confidence": float(min(max(s * 100, 0.0), 100.0)),
+            "confidence": min(max(s * 100, 0.0), 100.0),
             "routing": routing,
             "degraded": bool(routing != "multimodal" or pressure_imputed),
         }
