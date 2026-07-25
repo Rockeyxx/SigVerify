@@ -17,9 +17,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import matplotlib
-matplotlib.use("Agg")  # Non-interactive backend for headless plotting
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, det_curve, confusion_matrix
+from tqdm.auto import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -28,6 +28,7 @@ from config.settings import (
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
+    SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
@@ -65,51 +66,116 @@ def compute_far_frr(genuine_scores, impostor_scores, threshold):
     return float(far), float(frr)
 
 
-def plot_roc(genuine_scores, impostor_scores, title, output_path):
-    """Generate and export Receiver Operating Characteristic (ROC) curve plot."""
+def _finish_plot(fig, output_path, kind):
+    """
+    Save-and-close for the CLI path.
+
+    The plot helpers below take an optional `ax`. When a caller supplies one,
+    say the notebook drawing into its own subplot grid, the figure belongs to
+    that caller, so it is neither saved nor closed here. That is the
+    `fig is None` case, where this returns immediately.
+    """
+    if fig is None:
+        return
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    tqdm.write(f"{kind} saved: {output_path}")
+
+
+def plot_loss_curve(history, title="Training vs Validation Loss",
+                    output_path=None, ax=None):
+    """
+    Plot per-epoch train and validation loss from a `train.fit` history dict.
+
+    Marks the best-validation epoch, since that is the one whose weights were
+    saved. Under early stopping the final epoch is rarely the best, and a curve
+    that doesn't say so invites reading the wrong number off it.
+    """
+    train_loss = history["train_loss"]
+    val_loss = history["val_loss"]
+    epochs = range(1, len(train_loss) + 1)
+
+    fig, ax = (None, ax) if ax is not None else plt.subplots(figsize=(8, 5))
+
+    # Markers make a short run readable and a long one an unreadable smear.
+    marker = "o" if len(train_loss) <= 30 else None
+    ax.plot(epochs, train_loss, label="Train Loss", marker=marker, linewidth=2)
+    ax.plot(epochs, val_loss, label="Validation Loss", marker=marker,
+            linewidth=2, linestyle="--")
+
+    if val_loss:
+        best = int(np.argmin(val_loss))
+        ax.axvline(best + 1, color="green", linestyle=":", alpha=0.7)
+        ax.scatter([best + 1], [val_loss[best]], color="green", s=60, zorder=5,
+                   label=f"Best epoch {best + 1} (val {val_loss[best]:.4f})")
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Contrastive Loss")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    _finish_plot(fig, output_path, "Loss curve")
+    return ax
+
+
+def plot_roc(genuine_scores, impostor_scores, title, output_path=None, ax=None):
+    """
+    Plot a Receiver Operating Characteristic (ROC) curve.
+
+    Draws into `ax` if given (nothing is saved); otherwise creates its own
+    figure and writes it to `output_path`.
+    """
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     fpr, tpr, _ = roc_curve(labels, scores)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = (None, ax) if ax is not None else plt.subplots(figsize=(8, 6))
     ax.plot(fpr, tpr, linewidth=2)
     ax.plot([0, 1], [0, 1], 'k--', alpha=0.5)
     ax.set_xlabel("False Positive Rate (FAR)")
     ax.set_ylabel("True Positive Rate (1 - FRR)")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"ROC curve saved: {output_path}")
+    _finish_plot(fig, output_path, "ROC curve")
+    return ax
 
 
-def plot_det(genuine_scores, impostor_scores, title, output_path):
-    """Generate and export Detection Error Tradeoff (DET) curve plot."""
+def plot_det(genuine_scores, impostor_scores, title, output_path=None, ax=None):
+    """
+    Plot a Detection Error Tradeoff (DET) curve.
+
+    Draws into `ax` if given (nothing is saved); otherwise creates its own
+    figure and writes it to `output_path`.
+    """
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     fpr, fnr, _ = det_curve(labels, scores)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = (None, ax) if ax is not None else plt.subplots(figsize=(8, 6))
     ax.plot(fpr * 100, fnr * 100, linewidth=2)
     ax.set_xlabel("False Alarm Rate (%)")
     ax.set_ylabel("Miss Rate (%)")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"DET curve saved: {output_path}")
+    _finish_plot(fig, output_path, "DET curve")
+    return ax
 
 
-def plot_confusion_matrix(genuine_scores, impostor_scores, threshold, title, output_path):
-    """Generate and export confusion matrix visualization at a calibrated decision threshold."""
+def plot_confusion_matrix(genuine_scores, impostor_scores, threshold, title,
+                          output_path=None, ax=None):
+    """
+    Plot a confusion matrix at a calibrated decision threshold.
+
+    Draws into `ax` if given (nothing is saved); otherwise creates its own
+    figure and writes it to `output_path`.
+    """
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     preds = (scores >= threshold).astype(int)
     cm = confusion_matrix(labels, preds)
 
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = (None, ax) if ax is not None else plt.subplots(figsize=(6, 5))
     im = ax.imshow(cm, cmap="Blues")
     ax.set_xticks([0, 1])
     ax.set_yticks([0, 1])
@@ -124,11 +190,9 @@ def plot_confusion_matrix(genuine_scores, impostor_scores, threshold, title, out
             ax.text(j, i, str(cm[i, j]), ha="center", va="center",
                     color="white" if cm[i, j] > cm.max()/2 else "black", fontsize=14)
 
-    fig.colorbar(im)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"Confusion matrix saved: {output_path}")
+    ax.figure.colorbar(im, ax=ax)
+    _finish_plot(fig, output_path, "Confusion matrix")
+    return ax
 
 
 def alpha_grid_search(spatial_genuine, spatial_impostor,
@@ -207,17 +271,22 @@ def build_eval_loader(corpus, writer_ids, branch, batch_size, num_workers, seed)
                       num_workers=num_workers, collate_fn=collate)
 
 
-def score_loader(model, dataloader, device):
+def score_pairs(model, dataloader, device, desc="scoring"):
     """
-    Run inference over a loader and split the similarity scores by true label.
+    Run inference over a loader and return similarity scores in loader order.
 
-    Returns: (genuine_scores, impostor_scores) as numpy arrays.
+    Order is only meaningful for shuffle-free loaders, which is every loader
+    `build_eval_loader` hands out. Where it holds, the scores line up with
+    `dataloader.dataset.pairs`, letting a caller show which specific pair got
+    which prediction.
+
+    Returns: (scores, labels) as numpy arrays.
     """
     model.eval()
-    genuine, impostor = [], []
+    all_scores, all_labels = [], []
 
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc=desc, leave=False):
             if len(batch) == 5:
                 x1, lengths1, x2, lengths2, labels = batch
                 emb1, emb2 = model(x1.to(device), x2.to(device), lengths1, lengths2)
@@ -228,12 +297,23 @@ def score_loader(model, dataloader, device):
             scores = similarity_from_distance(
                 torch.nn.functional.pairwise_distance(emb1, emb2, p=2)
             ).cpu().numpy()
-            labels = labels.numpy()
 
-            genuine.extend(scores[labels == 1])
-            impostor.extend(scores[labels == 0])
+            all_scores.append(scores)
+            all_labels.append(labels.cpu().numpy())
 
-    return np.array(genuine), np.array(impostor)
+    if not all_scores:
+        return np.array([]), np.array([])
+    return np.concatenate(all_scores), np.concatenate(all_labels)
+
+
+def score_loader(model, dataloader, device, desc="scoring"):
+    """
+    Run inference over a loader and split the similarity scores by true label.
+
+    Returns: (genuine_scores, impostor_scores) as numpy arrays.
+    """
+    scores, labels = score_pairs(model, dataloader, device, desc=desc)
+    return scores[labels == 1], scores[labels == 0]
 
 
 def load_branch_model(branch, weights_path, device):
@@ -306,7 +386,7 @@ def per_dataset_report(branch, model, corpus, test_ids, threshold, args, device)
     for name, writers in sorted(groups.items()):
         loader = build_eval_loader(corpus, writers, branch, args.batch_size,
                                    args.num_workers, args.seed)
-        genuine, impostor = score_loader(model, loader, device)
+        genuine, impostor = score_loader(model, loader, device, desc=f"{branch} · {name}")
         if len(genuine) == 0 or len(impostor) == 0:
             continue
 
@@ -335,10 +415,12 @@ def evaluate_branch(branch, weights_path, corpus, val_ids, test_ids, args, devic
 
     # τ is tuned on validation ONLY (AGENTS.md). Picking it on test would be
     # reporting the best-case threshold rather than an honest operating point.
-    val_genuine, val_impostor = score_loader(model, val_loader, device)
+    val_genuine, val_impostor = score_loader(model, val_loader, device,
+                                             desc=f"{branch} · val (tune τ)")
     _, threshold = compute_eer(val_genuine, val_impostor)
 
-    test_genuine, test_impostor = score_loader(model, test_loader, device)
+    test_genuine, test_impostor = score_loader(model, test_loader, device,
+                                               desc=f"{branch} · test")
     eer, _ = compute_eer(test_genuine, test_impostor)
     far, frr = compute_far_frr(test_genuine, test_impostor, threshold)
 
@@ -374,6 +456,11 @@ def evaluate_branch(branch, weights_path, corpus, val_ids, test_ids, args, devic
 
 
 def main(argv=None):
+    # Headless backend is selected here, not at import time: importing this
+    # module from a notebook must not clobber the interactive backend and kill
+    # every inline plot. Only the CLI path runs without a display.
+    matplotlib.use("Agg")
+
     args = parse_args(argv)
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -389,7 +476,10 @@ def main(argv=None):
         corpus.update(parse_dataset(directory))
 
     # Re-derives the exact partition training used — same writer list, same seed.
-    train_ids, val_ids, test_ids = writer_independent_split(sorted(corpus), seed=args.seed)
+    ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
+              else SPATIAL_SPLIT_RATIOS)
+    train_ids, val_ids, test_ids = writer_independent_split(
+        sorted(corpus), *ratios, seed=args.seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.branch in ("spatial", "temporal"):
