@@ -21,7 +21,10 @@ them, even if they appear in the literature review or older drafts:
   continuous embeddings with L2 or cosine distance
 - **No SQLCipher / whole-file DB encryption** — encryption is
   application-layer AES-256-GCM only
-- **No `[1, L, 6]` temporal tensor** — the temporal input is `[1, L, 3]`
+- **No extra *captured* channels** — the capture contract is `[1, L, 3]`,
+  `(X, Y, Pressure)`. The device must not be asked for azimuth, altitude or
+  tilt. Features **derived** from those three channels inside the model are
+  allowed and expected (see Temporal Branch below)
 - **No cloud APIs, no remote inference, no discrete GPU at inference**
 
 ---
@@ -51,6 +54,14 @@ them, even if they appear in the literature review or older drafts:
 ### Temporal Branch (Online)
 
 - Input tensor: **`[1, L, 3]`** — `(X, Y, Pressure)`, variable length `L`
+- **Derived dynamics:** the model appends per-frame deltas `(dX, dY, dP)` to
+  form a `[1, L, 6]` tensor *internally*, before the LSTM. Velocity is the most
+  discriminative feature family in the online-verification literature: a forger
+  can copy the shape of a signature while tracing it far more slowly and evenly.
+  This costs the capture device nothing, since deltas come from consecutive
+  frames of the three channels it already reports. Feeding raw coordinates alone
+  produced a collapsed model with train loss pinned at the theoretical
+  no-discrimination value (see `docs/PROBLEMS_FACED.md` P-002)
 - Backbone: **Siamese LSTM** → **128-d** embedding
 - **Training:** pressure-channel dropout (~30–50% of samples replace real
   pressure with `P = 1.0`)
@@ -64,9 +75,14 @@ report **7**: `X, Y, timestamp, button/contact, azimuth, altitude, pressure` —
 the same shape as SVC2004 Task2, which is why Task2 is the corpus that matches
 the deployment device.
 
+The target device is an **XPPen Deco 640**, which reports position and pressure
+but no tilt or azimuth. The 3-channel contract is therefore what the hardware
+can actually deliver, not merely a preference.
+
 `src/capture/` is responsible for narrowing whatever the device produces down
-to the 3 channels the model takes. This is not optional formatting — a `[1, L, 6]`
-tensor is explicitly banned under Drift Prevention.
+to the 3 channels the model takes. Widening the *captured* contract is banned
+under Drift Prevention. Deriving further features from those 3 channels inside
+the model is not.
 
 | Device channel | Fate |
 |---|---|
