@@ -4,19 +4,440 @@ Evaluation Script — Signature Verification System
 Standalone evaluation and calibration script. Imports from src.models
 and runs analysis independently of the training pipeline.
 
-Implements:
-  - EER, FAR, FRR computation under skilled-forgery protocol
-  - ROC/DET curve generation
-  - Confusion matrix reporting
-  - α grid search over [0, 1] in 0.05 steps (validation set)
-  - τ (threshold) calibration on validation, frozen for test
-  - Tri-point reporting: spatial-only EER, temporal-only EER, fused EER
+Usage:
+    python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth --data-dir ./data
+    python scripts/evaluate.py --alpha-sweep --spatial-weights ... --temporal-weights ... --data-dir ./data
 """
 
-# TODO: Implement EER computation from score distributions
-# TODO: Implement ROC and DET curve generation (matplotlib)
-# TODO: Implement confusion matrix reporting
-# TODO: Implement α grid search with α-vs-EER sweep plot
-# TODO: Implement τ threshold calibration
-# TODO: Implement tri-point reporting (spatial, temporal, fused)
-# TODO: Implement asymmetric FAR/FRR analysis
+import argparse
+import os
+import sys
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend for headless plotting
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, det_curve, confusion_matrix
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from config.settings import (
+    ALPHA_GRID_STEP, TARGET_FAR, TARGET_FRR,
+    SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
+    TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
+    BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
+)
+from src.data.dataset import (
+    SpatialSignatureDataset, TemporalSignatureDataset,
+    collate_temporal_pairs, generate_skilled_pairs, writer_independent_split,
+)
+from src.data.parsers import parse_dataset
+from src.models.siamese import SpatialSiamese, TemporalSiamese
+
+
+def compute_eer(genuine_scores, impostor_scores):
+    """
+    Compute Equal Error Rate (EER) from genuine and impostor similarity scores.
+
+    EER occurs at the operating threshold where False Acceptance Rate (FAR)
+    equals False Rejection Rate (FRR).
+
+    Returns: (eer: float, threshold_at_eer: float)
+    """
+    labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
+    scores = np.concatenate([genuine_scores, impostor_scores])
+
+    fpr, tpr, thresholds = roc_curve(labels, scores)
+    fnr = 1 - tpr
+
+    # Identify the threshold index where FPR and FNR intersect
+    idx = np.nanargmin(np.abs(fpr - fnr))
+    eer = (fpr[idx] + fnr[idx]) / 2
+    return float(eer), float(thresholds[idx])
+
+
+def compute_far_frr(genuine_scores, impostor_scores, threshold):
+    """Calculate False Acceptance Rate (FAR) and False Rejection Rate (FRR) at a given threshold."""
+    far = np.mean(impostor_scores >= threshold)
+    frr = np.mean(genuine_scores < threshold)
+    return float(far), float(frr)
+
+
+def plot_roc(genuine_scores, impostor_scores, title, output_path):
+    """Generate and export Receiver Operating Characteristic (ROC) curve plot."""
+    labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
+    scores = np.concatenate([genuine_scores, impostor_scores])
+    fpr, tpr, _ = roc_curve(labels, scores)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(fpr, tpr, linewidth=2)
+    ax.plot([0, 1], [0, 1], 'k--', alpha=0.5)
+    ax.set_xlabel("False Positive Rate (FAR)")
+    ax.set_ylabel("True Positive Rate (1 - FRR)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"ROC curve saved: {output_path}")
+
+
+def plot_det(genuine_scores, impostor_scores, title, output_path):
+    """Generate and export Detection Error Tradeoff (DET) curve plot."""
+    labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
+    scores = np.concatenate([genuine_scores, impostor_scores])
+    fpr, fnr, _ = det_curve(labels, scores)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(fpr * 100, fnr * 100, linewidth=2)
+    ax.set_xlabel("False Alarm Rate (%)")
+    ax.set_ylabel("Miss Rate (%)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"DET curve saved: {output_path}")
+
+
+def plot_confusion_matrix(genuine_scores, impostor_scores, threshold, title, output_path):
+    """Generate and export confusion matrix visualization at a calibrated decision threshold."""
+    labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
+    scores = np.concatenate([genuine_scores, impostor_scores])
+    preds = (scores >= threshold).astype(int)
+    cm = confusion_matrix(labels, preds)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks([0, 1])
+    ax.set_yticks([0, 1])
+    ax.set_xticklabels(["Forged", "Genuine"])
+    ax.set_yticklabels(["Forged", "Genuine"])
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_title(title)
+
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, str(cm[i, j]), ha="center", va="center",
+                    color="white" if cm[i, j] > cm.max()/2 else "black", fontsize=14)
+
+    fig.colorbar(im)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Confusion matrix saved: {output_path}")
+
+
+def alpha_grid_search(spatial_genuine, spatial_impostor,
+                      temporal_genuine, temporal_impostor,
+                      step=ALPHA_GRID_STEP, output_path=None):
+    """
+    Perform grid search over spatial weight α ∈ [0.0, 1.0] to minimize validation EER.
+    Returns: (best_alpha, best_eer, results: list of (alpha, eer))
+    """
+    results = []
+    for alpha_int in range(0, int(1.0 / step) + 1):
+        alpha = alpha_int * step
+        fused_genuine = alpha * spatial_genuine + (1 - alpha) * temporal_genuine
+        fused_impostor = alpha * spatial_impostor + (1 - alpha) * temporal_impostor
+        eer, _ = compute_eer(fused_genuine, fused_impostor)
+        results.append((alpha, eer))
+
+    best_alpha, best_eer = min(results, key=lambda x: x[1])
+
+    if output_path:
+        alphas = [r[0] for r in results]
+        eers = [r[1] for r in results]
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(alphas, eers, 'o-', linewidth=2, markersize=4)
+        ax.axvline(x=best_alpha, color='r', linestyle='--', label=f"Best α={best_alpha:.2f}")
+        ax.set_xlabel("α (spatial weight)")
+        ax.set_ylabel("EER")
+        ax.set_title("α vs EER — Fusion Weight Calibration")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+        print(f"α sweep plot saved: {output_path}")
+
+    return best_alpha, best_eer, results
+
+
+def tri_point_report(spatial_eer, temporal_eer, fused_eer, fused_is_provisional=True):
+    """Print tri-point EER report summarizing unimodal and multimodal branch metrics."""
+    print("\n" + "=" * 50)
+    print("TRI-POINT EER REPORT")
+    print("=" * 50)
+    print(f"  Spatial-only EER:   {spatial_eer*100:.2f}%  (target: <{TARGET_FAR*100:.0f}%)")
+    print(f"  Temporal-only EER:  {temporal_eer*100:.2f}%  (target: <{TARGET_FRR*100:.0f}%)")
+    label = "PROVISIONAL" if fused_is_provisional else "FINAL"
+    print(f"  Fused EER:          {fused_eer*100:.2f}%  [{label}]")
+    print("=" * 50)
+
+
+def similarity_from_distance(distance):
+    """
+    Convert an L2 embedding distance into a bounded similarity score.
+
+        S = 1 / (1 + d)
+
+    Maps d ∈ [0, ∞) onto S ∈ (0, 1], so identical signatures approach 1 and
+    wildly different ones approach 0. Every metric below consumes S, not d.
+    """
+    return 1.0 / (1.0 + distance)
+
+
+def build_eval_loader(corpus, writer_ids, branch, batch_size, num_workers, seed):
+    """Build a shuffle-free loader of skilled-forgery pairs over the given writers."""
+    subset = {w: corpus[w] for w in writer_ids}
+    pairs, labels = generate_skilled_pairs(subset, seed=seed)
+
+    if branch == "spatial":
+        dataset = SpatialSignatureDataset(pairs, labels)
+        collate = None
+    else:
+        dataset = TemporalSignatureDataset(pairs, labels)
+        collate = collate_temporal_pairs
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                      num_workers=num_workers, collate_fn=collate)
+
+
+def score_loader(model, dataloader, device):
+    """
+    Run inference over a loader and split the similarity scores by true label.
+
+    Returns: (genuine_scores, impostor_scores) as numpy arrays.
+    """
+    model.eval()
+    genuine, impostor = [], []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            if len(batch) == 5:
+                x1, lengths1, x2, lengths2, labels = batch
+                emb1, emb2 = model(x1.to(device), x2.to(device), lengths1, lengths2)
+            else:
+                x1, x2, labels = batch
+                emb1, emb2 = model(x1.to(device), x2.to(device))
+
+            scores = similarity_from_distance(
+                torch.nn.functional.pairwise_distance(emb1, emb2, p=2)
+            ).cpu().numpy()
+            labels = labels.numpy()
+
+            genuine.extend(scores[labels == 1])
+            impostor.extend(scores[labels == 0])
+
+    return np.array(genuine), np.array(impostor)
+
+
+def load_branch_model(branch, weights_path, device):
+    """Instantiate the requested backbone and load its trained weights."""
+    if branch == "spatial":
+        model = SpatialSiamese(embedding_dim=SPATIAL_EMBEDDING_DIM)
+    else:
+        model = TemporalSiamese(
+            hidden_size=TEMPORAL_HIDDEN_SIZE,
+            num_layers=TEMPORAL_NUM_LAYERS,
+            embedding_dim=TEMPORAL_EMBEDDING_DIM,
+        )
+    model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+    return model.to(device).eval()
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Evaluate signature verification models")
+    parser.add_argument("--branch", choices=["spatial", "temporal", "fused"], default="spatial",
+                        help="Which branch to evaluate")
+    parser.add_argument("--weights", type=str, help="Path to model weights (.pth)")
+    parser.add_argument("--spatial-weights", type=str, help="Spatial model weights for fused eval")
+    parser.add_argument("--temporal-weights", type=str, help="Temporal model weights for fused eval")
+    parser.add_argument("--data-dir", nargs="+", required=True,
+                        help="Dataset directories — must match the training run")
+    parser.add_argument("--output-dir", type=str, default=RESULTS_DIR,
+                        help="Output directory for plots")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Must match the training seed to reproduce the same split")
+    parser.add_argument("--alpha-sweep", action="store_true", help="Run α grid search")
+    return parser.parse_args(argv)
+
+
+def dataset_key(writer_id):
+    """
+    Group a namespaced writer ID back to its source corpus.
+
+    BHSig260 keeps its script (`bhsig_Bengali`, `bhsig_Hindi`) because Bengali
+    and Devanagari are the interesting cross-script comparison; everything else
+    collapses to the corpus name.
+    """
+    parts = writer_id.split("_")
+    return "_".join(parts[:2]) if parts[0] == "bhsig" else parts[0]
+
+
+def per_dataset_report(branch, model, corpus, test_ids, threshold, args, device):
+    """
+    Report EER per source corpus at the validation-tuned threshold.
+
+    A pooled EER can hide a corpus the model handles badly by averaging it
+    against one it handles well. Training merges CEDAR (Latin), BHSig260
+    (Bengali/Devanagari) and UTSig (Persian) into one model — this is the
+    breakdown that shows whether it actually generalizes across scripts or
+    just learned the majority script.
+    """
+    groups = {}
+    for writer in test_ids:
+        groups.setdefault(dataset_key(writer), []).append(writer)
+
+    if len(groups) < 2:
+        return {}
+
+    print("\n" + "=" * 50)
+    print(f"PER-DATASET BREAKDOWN — {branch} (τ={threshold:.4f} from validation)")
+    print("=" * 50)
+
+    breakdown = {}
+    for name, writers in sorted(groups.items()):
+        loader = build_eval_loader(corpus, writers, branch, args.batch_size,
+                                   args.num_workers, args.seed)
+        genuine, impostor = score_loader(model, loader, device)
+        if len(genuine) == 0 or len(impostor) == 0:
+            continue
+
+        eer, _ = compute_eer(genuine, impostor)
+        far, frr = compute_far_frr(genuine, impostor, threshold)
+        breakdown[name] = {"eer": eer, "far": far, "frr": frr, "writers": len(writers)}
+        print(f"  {name:<16} {len(writers):>3} writers   "
+              f"EER {eer*100:>6.2f}%   FAR {far*100:>6.2f}%   FRR {frr*100:>6.2f}%")
+
+    print("=" * 50)
+    return breakdown
+
+
+def evaluate_branch(branch, weights_path, corpus, val_ids, test_ids, args, device):
+    """
+    Score one branch: tune τ on validation, then report on the held-out test set.
+
+    Returns (report dict, test_genuine, test_impostor).
+    """
+    model = load_branch_model(branch, weights_path, device)
+
+    val_loader = build_eval_loader(corpus, val_ids, branch, args.batch_size,
+                                   args.num_workers, args.seed)
+    test_loader = build_eval_loader(corpus, test_ids, branch, args.batch_size,
+                                    args.num_workers, args.seed)
+
+    # τ is tuned on validation ONLY (AGENTS.md). Picking it on test would be
+    # reporting the best-case threshold rather than an honest operating point.
+    val_genuine, val_impostor = score_loader(model, val_loader, device)
+    _, threshold = compute_eer(val_genuine, val_impostor)
+
+    test_genuine, test_impostor = score_loader(model, test_loader, device)
+    eer, _ = compute_eer(test_genuine, test_impostor)
+    far, frr = compute_far_frr(test_genuine, test_impostor, threshold)
+
+    plot_roc(test_genuine, test_impostor, f"ROC — {branch}",
+             os.path.join(args.output_dir, f"roc_{branch}.png"))
+    plot_det(test_genuine, test_impostor, f"DET — {branch}",
+             os.path.join(args.output_dir, f"det_{branch}.png"))
+    plot_confusion_matrix(test_genuine, test_impostor, threshold, f"Confusion — {branch}",
+                          os.path.join(args.output_dir, f"confusion_{branch}.png"))
+
+    report = {
+        "branch": branch,
+        "eer": eer,
+        "far": far,
+        "frr": frr,
+        "threshold": threshold,
+        "threshold_tuned_on": "validation",
+        "reported_on": "test",
+        "num_genuine": len(test_genuine),
+        "num_impostor": len(test_impostor),
+    }
+
+    print(f"\n[{branch}]  EER {eer*100:.2f}%  |  at τ={threshold:.4f}: "
+          f"FAR {far*100:.2f}%  FRR {frr*100:.2f}%")
+    if far > TARGET_FAR:
+        # AGENTS.md: when the FAR target is missed, keeping FAR low outranks FRR.
+        print(f"  FAR target ({TARGET_FAR*100:.0f}%) MISSED — raise τ to trade FRR for FAR.")
+
+    report["per_dataset"] = per_dataset_report(branch, model, corpus, test_ids,
+                                               threshold, args, device)
+
+    return report, test_genuine, test_impostor
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Dynamic hardware selection for evaluation inference
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Evaluation mode: {args.branch}")
+    print(f"Hardware Device: {device}")
+    print(f"Output directory: {args.output_dir}")
+
+    corpus = {}
+    for directory in args.data_dir:
+        corpus.update(parse_dataset(directory))
+
+    # Re-derives the exact partition training used — same writer list, same seed.
+    train_ids, val_ids, test_ids = writer_independent_split(sorted(corpus), seed=args.seed)
+    print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
+
+    if args.branch in ("spatial", "temporal"):
+        weights = args.weights or (args.spatial_weights if args.branch == "spatial"
+                                   else args.temporal_weights)
+        if not weights:
+            raise ValueError(f"--weights is required for --branch {args.branch}")
+        report, _, _ = evaluate_branch(args.branch, weights, corpus,
+                                       val_ids, test_ids, args, device)
+        return report
+
+    # ─── Fused ────────────────────────────────────────────────────────
+    if not (args.spatial_weights and args.temporal_weights):
+        raise ValueError("--branch fused requires --spatial-weights and --temporal-weights")
+
+    spatial_report, spatial_genuine, spatial_impostor = evaluate_branch(
+        "spatial", args.spatial_weights, corpus, val_ids, test_ids, args, device)
+    temporal_report, temporal_genuine, temporal_impostor = evaluate_branch(
+        "temporal", args.temporal_weights, corpus, val_ids, test_ids, args, device)
+
+    # No writer has both an image and a trajectory yet, so the two score vectors
+    # describe different pairs. Truncating to a common length lets α be swept,
+    # but the resulting EER is an estimate — hence PROVISIONAL, per AGENTS.md.
+    n_genuine = min(len(spatial_genuine), len(temporal_genuine))
+    n_impostor = min(len(spatial_impostor), len(temporal_impostor))
+
+    best_alpha, best_eer, _ = alpha_grid_search(
+        spatial_genuine[:n_genuine], spatial_impostor[:n_impostor],
+        temporal_genuine[:n_genuine], temporal_impostor[:n_impostor],
+        output_path=(os.path.join(args.output_dir, "alpha_sweep.png")
+                     if args.alpha_sweep else None),
+    )
+
+    tri_point_report(spatial_report["eer"], temporal_report["eer"], best_eer,
+                     fused_is_provisional=True)
+
+    return {
+        "branch": "fused",
+        "spatial": spatial_report,
+        "temporal": temporal_report,
+        "alpha": best_alpha,
+        "eer": best_eer,
+        "provisional": True,
+        "threshold_tuned_on": "validation",
+        "reported_on": "test",
+    }
+
+
+if __name__ == "__main__":
+    main()
+

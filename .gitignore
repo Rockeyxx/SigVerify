@@ -11,10 +11,13 @@ build/
 venv/
 .venv/
 env/
+.claude/
 
 # IDE
 .idea/
 .vscode/
+pyrefly.toml
+.pyrefly/
 *.swp
 *.swo
 *~
@@ -27,8 +30,8 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
-data/
-datasets/
+/data/
+/datasets/
 models/weights/
 *.pth
 *.pt
@@ -40,7 +43,10 @@ models/weights/
 # Planning docs (local only, not repo content)
 Phase3_Master_Plan_Team06_Final.md
 rules.md
+docs/
 
 # Logs
 *.log
 logs/
+
+
