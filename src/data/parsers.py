@@ -91,6 +91,28 @@ def normalize_trajectory(xy, pressure):
     return np.column_stack([xy, pressure]).astype(np.float32)
 
 
+def merge_corpora(target, incoming):
+    """
+    Merge one parsed corpus into another, appending samples per writer.
+
+    A plain `dict.update` would replace a writer's whole record when two corpora
+    use the same ID, silently discarding one of them. That is not hypothetical:
+    SVC2004 Task1 and Task2 are separate recordings of the same 40 signers, so
+    both parse to `svc_1`..`svc_40`, and updating would drop 1600 signatures
+    without a word.
+
+    Writer IDs stay namespaced per corpus (`cedar_7`, `mobisig_3`), so an ID
+    collision means the same person, and appending is the correct reading.
+
+    Returns `target`, mutated in place, so calls can be chained.
+    """
+    for writer_id, record in incoming.items():
+        existing = target.setdefault(writer_id, _new_writer())
+        existing["genuine"].extend(record["genuine"])
+        existing["forged"].extend(record["forged"])
+    return target
+
+
 def parse_dataset(path):
     """
     Dispatch a dataset directory to its parser by directory name.

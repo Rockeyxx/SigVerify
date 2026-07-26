@@ -34,7 +34,7 @@ from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, writer_independent_split,
 )
-from src.data.parsers import parse_dataset
+from src.data.parsers import merge_corpora, parse_dataset
 from src.models.siamese import SpatialSiamese, TemporalSiamese
 
 
@@ -473,7 +473,7 @@ def main(argv=None):
 
     corpus = {}
     for directory in args.data_dir:
-        corpus.update(parse_dataset(directory))
+        merge_corpora(corpus, parse_dataset(directory))
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"

@@ -22,6 +22,7 @@ from config.settings import (
 )
 from src.data.parsers import (
     load_svc2004_file,
+    merge_corpora,
     parse_bhsig260,
     parse_cedar,
     parse_mobisig,
@@ -346,3 +347,36 @@ def test_real_mobisig_counts():
     assert np.all(np.isfinite(sample))
     # Capacitive screens report a real, varying contact pressure.
     assert sample[:, 2].std() > 0.0
+
+
+class TestMergeCorpora:
+    """Merging corpora that share writer IDs must append samples, not replace them."""
+
+    def test_disjoint_writers_are_unioned(self):
+        target = {"svc_1": {"genuine": ["a"], "forged": ["b"]}}
+        merge_corpora(target, {"mobisig_1": {"genuine": ["c"], "forged": ["d"]}})
+        assert set(target) == {"svc_1", "mobisig_1"}
+
+    def test_shared_writer_id_appends_rather_than_overwrites(self):
+        """
+        SVC2004 Task1 and Task2 are different recordings of the same 40 signers,
+        so both parse to `svc_1`..`svc_40`. A dict update would silently discard
+        one task's samples entirely.
+        """
+        target = {"svc_1": {"genuine": ["t1_g"], "forged": ["t1_f"]}}
+        merge_corpora(target, {"svc_1": {"genuine": ["t2_g"], "forged": ["t2_f"]}})
+        assert target["svc_1"]["genuine"] == ["t1_g", "t2_g"]
+        assert target["svc_1"]["forged"] == ["t1_f", "t2_f"]
+
+    def test_returns_the_target_for_chaining(self):
+        target = {}
+        assert merge_corpora(target, {"svc_1": {"genuine": [], "forged": []}}) is target
+
+    def test_merging_is_order_independent_in_count(self):
+        a = {"svc_1": {"genuine": ["g1"], "forged": ["f1"]}}
+        b = {"svc_1": {"genuine": ["g2", "g3"], "forged": ["f2"]}}
+        forward, backward = {}, {}
+        merge_corpora(merge_corpora(forward, a), b)
+        merge_corpora(merge_corpora(backward, b), a)
+        assert len(forward["svc_1"]["genuine"]) == len(backward["svc_1"]["genuine"]) == 3
+        assert len(forward["svc_1"]["forged"]) == len(backward["svc_1"]["forged"]) == 2

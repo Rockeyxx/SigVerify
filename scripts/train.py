@@ -30,12 +30,13 @@ from config.settings import (
     NUM_WORKERS, PIN_MEMORY,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
+    TEMPORAL_AUGMENT,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, writer_independent_split,
 )
-from src.data.parsers import parse_dataset, svc2004_has_pressure
+from src.data.parsers import merge_corpora, parse_dataset, svc2004_has_pressure
 from src.models.siamese import SpatialSiamese, TemporalSiamese, ContrastiveLoss
 
 
@@ -104,7 +105,7 @@ def build_writer_corpus(data_dirs):
     for directory in data_dirs:
         parsed = parse_dataset(directory)
         print(f"  {directory}: {len(parsed)} writers")
-        corpus.update(parsed)
+        merge_corpora(corpus, parsed)
     if not corpus:
         raise ValueError(f"No writers found in {data_dirs}")
     return corpus
@@ -130,7 +131,10 @@ def build_loader(corpus, writer_ids, branch, batch_size, num_workers, shuffle, s
         pairs, labels = generate_skilled_pairs(
             subset, TEMPORAL_PAIRS_GENUINE_PER_WRITER,
             TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed)
-        dataset = TemporalSignatureDataset(pairs, labels)
+        # `shuffle` is true only for the training loader, which is also the only
+        # split that may be augmented.
+        dataset = TemporalSignatureDataset(pairs, labels,
+                                           augment=shuffle and TEMPORAL_AUGMENT)
         collate = collate_temporal_pairs
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
