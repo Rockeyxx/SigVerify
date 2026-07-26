@@ -295,6 +295,61 @@ class SpatialSignatureDataset(Dataset):
         )
 
 
+def augment_trajectory(sequence, rng, max_rotation_deg=6.0, jitter=0.02,
+                       max_speed_change=0.15):
+    """
+    Perturb one [L, 3] trajectory for training-time augmentation.
+
+    Three perturbations, each chosen because it mimics variation a genuine
+    signer actually produces:
+
+      * **Speed change** — resample the sequence slightly faster or slower.
+        People do not sign at a fixed tempo, and speed is the feature family the
+        derived (dX, dY, dP) channels key on, so varying it teaches tolerance
+        where the model is most sensitive.
+      * **Small rotation** — nobody aligns the pen identically to the tablet
+        every time. Rotation applies to X/Y only, never pressure.
+      * **Coordinate jitter** — sensor noise and hand tremor.
+
+    Deliberately absent: mirroring, which produces a trajectory the signer could
+    never draw, and scaling, which is already normalized away because X/Y are
+    z-scored per signature by `normalize_trajectory`.
+
+    Sequences too short to resample are returned unchanged; perturbing three
+    points corrupts rather than varies them.
+    """
+    sequence = np.asarray(sequence, dtype=np.float32)
+    if len(sequence) < 8:
+        return sequence
+
+    xy = sequence[:, :2].copy()
+    pressure = sequence[:, 2].copy()
+
+    theta = np.deg2rad(rng.uniform(-max_rotation_deg, max_rotation_deg))
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    xy = xy @ np.array([[cos_t, -sin_t], [sin_t, cos_t]], dtype=np.float32)
+
+    xy += rng.normal(0.0, jitter, size=xy.shape).astype(np.float32)
+
+    # Resample onto a stretched or compressed timeline. Interpolating each
+    # channel against the original index keeps the stroke order intact.
+    scale = 1.0 + rng.uniform(-max_speed_change, max_speed_change)
+    new_length = max(8, int(round(len(sequence) * scale)))
+    source = np.arange(len(sequence), dtype=np.float32)
+    target = np.linspace(0, len(sequence) - 1, new_length, dtype=np.float32)
+
+    out = np.column_stack([
+        np.interp(target, source, xy[:, 0]),
+        np.interp(target, source, xy[:, 1]),
+        np.interp(target, source, pressure),
+    ]).astype(np.float32)
+
+    # Pressure is a physical quantity in [0, 1]; interpolation can drift it a
+    # hair outside on the endpoints.
+    out[:, 2] = np.clip(out[:, 2], 0.0, 1.0)
+    return out
+
+
 class TemporalSignatureDataset(Dataset):
     """
     PyTorch Dataset loading temporal (dynamic) signature pairs for Siamese training.
@@ -305,15 +360,25 @@ class TemporalSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels):
+    def __init__(self, pairs, labels, augment=False):
         self.pairs = pairs
         self.labels = labels
+        # Training only. Perturbing validation or test data would measure the
+        # model against inputs the deployed system never sees.
+        self.augment = augment
+        self._rng = np.random.RandomState(0)
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, index):
         seq1, seq2 = self.pairs[index]
+        if self.augment:
+            # Each side is perturbed independently: two recordings of the same
+            # signature differ by exactly this kind of variation, so the pair
+            # stays honest.
+            seq1 = augment_trajectory(seq1, self._rng)
+            seq2 = augment_trajectory(seq2, self._rng)
         return (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),

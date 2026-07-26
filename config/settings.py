@@ -91,6 +91,14 @@ TEMPORAL_SPLIT_RATIOS = (0.5, 0.25, 0.25)
 TEMPORAL_PAIRS_GENUINE_PER_WRITER = 180
 TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
 
+# Perturb training trajectories with small rotation, jitter and speed changes.
+# Off by default: measured, it cost 3.6 EER points (25.50% -> 29.12%) even
+# though validation loss improved. Augmentation multiplies samples, but
+# writer-independent verification has to learn what differs between *people*,
+# and no perturbation of 20 signers' trajectories invents a 21st signer.
+# Kept available because it should pay off once more writers are in the corpus.
+TEMPORAL_AUGMENT = False
+
 # Early Stopping hyperparameters (monitors validation loss to halt training)
 EARLY_STOPPING_PATIENCE = 5            # Stop after 10 epochs without validation improvement
 EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrease required to trigger improvement

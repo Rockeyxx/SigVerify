@@ -12,6 +12,7 @@ from src.data.dataset import (
     TemporalSignatureDataset,
     collate_temporal_pairs,
     generate_skilled_pairs,
+    augment_trajectory,
     preprocess_image,
     quality_gate,
     writer_independent_split,
@@ -227,3 +228,93 @@ class TestSpatialSignatureDataset:
         for p in imgs:
             os.unlink(p)
 
+
+
+class TestAugmentTrajectory:
+    """Training-time augmentation for online signatures."""
+
+    @staticmethod
+    def _traj(n=60):
+        t = np.linspace(0, 4 * np.pi, n, dtype=np.float32)
+        return np.column_stack([
+            np.sin(t), np.cos(t), np.full(n, 0.5, dtype=np.float32)
+        ]).astype(np.float32)
+
+    def test_shape_and_channel_count_survive(self):
+        out = augment_trajectory(self._traj(), np.random.RandomState(0))
+        assert out.ndim == 2 and out.shape[1] == 3
+        assert out.dtype == np.float32
+
+    def test_pressure_stays_in_range(self):
+        """Rotation and jitter apply to X/Y only; P must remain a valid pressure."""
+        traj = self._traj()
+        traj[:, 2] = np.linspace(0.0, 1.0, len(traj))
+        out = augment_trajectory(traj, np.random.RandomState(1))
+        assert out[:, 2].min() >= 0.0 and out[:, 2].max() <= 1.0
+
+    def test_output_differs_from_input(self):
+        traj = self._traj()
+        out = augment_trajectory(traj, np.random.RandomState(2))
+        assert not np.allclose(out[:, :2], traj[:len(out), :2])
+
+    def test_stroke_shape_is_broadly_preserved(self):
+        """
+        Augmentation must perturb, not destroy. A signature rotated a few degrees
+        with slight speed variation is still that person's signature; one that no
+        longer correlates with the original is a different object and teaches the
+        model something false.
+        """
+        traj = self._traj(200)
+        out = augment_trajectory(traj, np.random.RandomState(3))
+        # Speed change alters the length, so resample onto the original timeline
+        # before comparing; otherwise this measures the time warp, not the shape.
+        resampled = np.interp(
+            np.linspace(0, 1, len(traj)),
+            np.linspace(0, 1, len(out)),
+            out[:, 0],
+        )
+        corr = np.corrcoef(resampled, traj[:, 0])[0, 1]
+        assert corr > 0.9, f"X trajectory correlation {corr:.3f} is too low"
+
+    def test_is_deterministic_given_the_same_rng_seed(self):
+        a = augment_trajectory(self._traj(), np.random.RandomState(7))
+        b = augment_trajectory(self._traj(), np.random.RandomState(7))
+        assert np.allclose(a, b)
+
+    def test_short_sequences_are_returned_untouched(self):
+        """Too few points to resample; augmenting would corrupt rather than vary."""
+        tiny = np.array([[0.0, 0.0, 0.5], [1.0, 1.0, 0.5]], dtype=np.float32)
+        assert np.allclose(augment_trajectory(tiny, np.random.RandomState(0)), tiny)
+
+
+class TestTemporalDatasetAugmentation:
+    """Augmentation must be opt-in and confined to training."""
+
+    @staticmethod
+    def _pairs():
+        seq = np.column_stack([
+            np.linspace(0, 1, 50), np.linspace(1, 0, 50), np.full(50, 0.5)
+        ]).astype(np.float32)
+        return [(seq, seq.copy())], [1.0]
+
+    def test_off_by_default_is_reproducible(self):
+        pairs, labels = self._pairs()
+        ds = TemporalSignatureDataset(pairs, labels)
+        first, _, _ = ds[0]
+        second, _, _ = ds[0]
+        assert torch.allclose(first, second)
+
+    def test_enabled_augmentation_varies_between_reads(self):
+        pairs, labels = self._pairs()
+        ds = TemporalSignatureDataset(pairs, labels, augment=True)
+        reads = [ds[0][0] for _ in range(6)]
+        # A differing length is itself variation (the speed change resamples),
+        # so only compare values when the shapes happen to match.
+        varied = any(r.shape != reads[0].shape or not torch.allclose(reads[0], r)
+                     for r in reads[1:])
+        assert varied, "augment=True produced identical tensors every read"
+
+    def test_label_is_untouched_by_augmentation(self):
+        pairs, labels = self._pairs()
+        ds = TemporalSignatureDataset(pairs, labels, augment=True)
+        assert float(ds[0][2]) == 1.0
