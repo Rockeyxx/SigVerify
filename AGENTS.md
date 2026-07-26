@@ -205,6 +205,26 @@ Scopes: models, data, database, capture, gui, config, scripts
 - Tune `α` and `τ` on **validation only**, report on **held-out test**
 - If FAR target is missed, **prioritize keeping FAR low** over FRR
 - Label fused EER as **provisional** until in-house multimodal data exists
+- **Never report a pooled temporal EER on its own.** SVC2004 and SigComp2011 are
+  both pen-tablet corpora, and one training run scores 29.62% on the first and
+  10.92% on the second. A pooled figure averages those into a number that
+  describes neither. Same rule the spatial branch already follows for UTSig.
+
+### Merging a New Online Corpus
+
+Before a new online corpus is merged with SVC2004, **measure** these against it
+and align inside that corpus's loader, not in the model:
+
+| property | SVC2004 Task2 | why it matters |
+|---|---|---|
+| sample rate | 100 Hz (timestamp steps 10 ms) | The model derives `(dX, dY, dP)` from consecutive frames, so a 200 Hz corpus reports half the delta for the same pen speed |
+| pen-up samples | none — 0 of 100,494 points have `P = 0` | A corpus that records in-air travel gives the pressure channel a second meaning |
+| pressure scale | 0–1023 device units | A per-file max would make a light signature look heavy |
+
+This is not hypothetical bookkeeping. Merging SVC2004 Task1 into Task2 without
+reconciling the pressure channel collapsed the model to Cohen's d 0.279, and
+SigComp2011 differed on the first two rows above. Alignment belongs in the
+parser so the `[L, 3]` capture contract stays untouched.
 
 ### Pressure Ablation (temporal branch — two required runs)
 
