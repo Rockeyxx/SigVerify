@@ -114,17 +114,28 @@ data/
 │   ├── Bengali/
 │   └── Hindi/
 ├── utsig/                  # Offline UTSig dataset (115 writers)
-└── svc2004/                # Online SVC2004 dataset (40 writers)
-    └── Task1/              # Coordinates (X, Y, T, Button, Azimuth, Altitude, Pressure)
-        ├── User1.txt ... User40.txt
-        └── ...
+├── svc2004_task1/          # Online SVC2004 Task1 (40 writers, 4-col, no pressure)
+│   └── U1S1.TXT ... U40S40.TXT
+├── svc2004_task2/          # Online SVC2004 Task2 (40 writers, 7-col, real pressure)
+│   └── U1S1.TXT ... U40S40.TXT
+└── MOBISIG/                # Online MOBISIG (83 users) — temporal pre-training only
+    ├── USER1/
+    │   ├── SIGN_GEN_USER1_USER1_1.csv   (45 genuine)
+    │   └── SIGN_FOR_USER1_USER2_1.csv   (20 skilled forgeries)
+    └── ...
 ```
+
+Directory names are how parsers are selected (`src/data/parsers.py`), so an
+unrecognized name raises rather than silently training on zero writers.
 
 ### Writer-Independent Data Split Protocol
 
 All model training and validation routines follow an **open-set writer-independent split protocol** compliant with **ISO/IEC 23053:2022**:
 
-- **Partition Ratios**: 70% Train, 15% Validation, 15% Test.
+- **Partition Ratios**: 70/15/15 for the image corpora, which have 430 writers
+  between them. The temporal corpora use **50/25/25**, since SVC2004's 40 writers
+  would otherwise leave only 6 test writers and an EER too noisy to compare
+  configurations against.
 - **Zero Writer Overlap**: Writer IDs are partitioned such that $\text{Writers}_{\text{train}} \cap \text{Writers}_{\text{val}} \cap \text{Writers}_{\text{test}} = \emptyset$. No individual writer appears in more than one partition.
 - **Skilled Forgery Benchmark**: Impostor pairs are evaluated strictly using skilled forgeries rather than random signers.
 
@@ -134,7 +145,42 @@ All model training and validation routines follow an **open-set writer-independe
 | [BHSig260](https://drive.google.com/file/d/0B29vNACcjvzVc1RfVkg5dUh2b1E/view?resourcekey=0-MUNnTzBi4h_VE0J84NDF3Q) | Offline  | Bengali / Hindi  | Multi-script generalization               |
 | [UTSig](https://www.kaggle.com/datasets/sinjinir1999/utsignature-verification?resource=download)                   | Offline  | Persian / Arabic | Closest proxy to Arabic-script deployment |
 | [SVC2004](https://cse.hkust.edu.hk/svc2004/download.html)                                                          | Online   | —                | Temporal branch training                  |
+| [MOBISIG](https://www.ms.sapientia.ro/~manyi/mobisig.html)                                                         | Online   | —                | Temporal pre-training (see caveat below)  |
 | In-house collection                                                                                                | Both     | Arabic           | Fine-tuning, same-signer multimodal pairs |
+
+**Device targets are tiered.** The primary capture device is the **XPPen Deco 640
+pen tablet**, which must reach the 5% FAR/FRR spec. Mobile and iPad capture is
+supported as a secondary path where roughly 80% accuracy is acceptable.
+
+That ordering decides how the two online corpora are used. MOBISIG's 83 users
+signed with a **finger on a capacitive touchscreen**, so its pressure channel
+comes from contact area rather than a pen sensor: it is the proxy for the mobile
+and iPad path. SVC2004 is the pen-tablet proxy and therefore the corpus the
+headline number is measured on.
+
+SVC2004's 40 writers are too few to train a writer-independent LSTM from scratch,
+so MOBISIG supplies volume through **pre-training** and SVC2004 supplies the
+matching domain through **fine-tuning**. Training on both with equal weight is
+deliberately avoided: it optimizes the average and dilutes pen accuracy in
+service of a target that only needs ~20% EER.
+
+```bash
+# 1. Pre-train the temporal backbone on MOBISIG's 83 writers
+python scripts/train.py --branch temporal --data-dir ./data/MOBISIG \
+    --weights-dir models/pretrain
+
+# 2. Fine-tune on SVC2004, which matches the deployment device.
+#    --init-weights loads weights only; --resume would also restore optimizer
+#    state and the epoch counter, both of which belong to the MOBISIG run.
+python scripts/train.py --branch temporal --data-dir ./data/svc2004_task2 \
+    --init-weights models/pretrain/temporal_lstm.pth --lr 1e-4
+
+# 3. Measure each target against its own bar, never pooled
+python scripts/benchmark.py --branch temporal \
+    --weights models/weights/temporal_lstm.pth --data-dir ./data/svc2004_task2   # vs 5%
+python scripts/benchmark.py --branch temporal \
+    --weights models/weights/temporal_lstm.pth --data-dir ./data/MOBISIG         # vs ~20%
+```
 
 ---
 

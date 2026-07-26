@@ -39,9 +39,11 @@ from config.settings import (
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
 )
+from tqdm.auto import tqdm
+
 from scripts.evaluate import build_eval_loader, compute_eer, load_branch_model, score_pairs
 from src.data.dataset import writer_independent_split
-from src.data.parsers import parse_dataset
+from src.data.parsers import merge_corpora, parse_dataset
 
 
 def cohens_d(impostor_distances, genuine_distances):
@@ -180,7 +182,7 @@ def main(argv=None):
 
     corpus = {}
     for directory in args.data_dir:
-        corpus.update(parse_dataset(directory))
+        merge_corpora(corpus, parse_dataset(directory))
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
@@ -198,7 +200,59 @@ def main(argv=None):
     scores, labels = score_pairs(model, loader, device, desc=f"{args.branch} · benchmark")
     report = separation_report(scores, labels, margin=args.margin)
     print_separation_report(args.branch, report)
-    return report
+
+    per_corpus = per_corpus_report(args, corpus, test_ids, model, device)
+    return {**report, "per_corpus": per_corpus}
+
+
+def corpus_of(writer_id):
+    """
+    Map a namespaced writer ID back to the corpus it came from.
+
+    BHSig260 keeps its script (`bhsig_Bengali`) because Bengali and Devanagari
+    are the interesting comparison; everything else collapses to the prefix.
+    """
+    parts = writer_id.split("_")
+    return "_".join(parts[:2]) if parts[0] == "bhsig" else parts[0]
+
+
+def per_corpus_report(args, corpus, test_ids, model, device):
+    """
+    Break the pooled EER down by source corpus.
+
+    A single averaged number is the wrong summary when the goal is one model
+    that works across capture devices and scripts: it hides a corpus the model
+    handles badly behind one it handles well. On the spatial branch a pooled
+    19% concealed CEDAR at 3.4% alongside UTSig at 36%.
+    """
+    groups = {}
+    for writer in test_ids:
+        groups.setdefault(corpus_of(writer), []).append(writer)
+
+    if len(groups) < 2:
+        return {}
+
+    print(f"\n{'=' * 50}")
+    print(f"PER-CORPUS BREAKDOWN — {args.branch}")
+    print("=" * 50)
+
+    breakdown = {}
+    for name, writers in sorted(groups.items()):
+        loader = build_eval_loader(corpus, writers, args.branch, args.batch_size,
+                                   args.num_workers, args.seed)
+        loader = _limit_pairs(loader, args.limit_pairs, args.seed)
+        scores, labels = score_pairs(model, loader, device, desc=f"{args.branch} · {name}")
+        if not len(scores) or labels.min() == labels.max():
+            continue
+
+        r = separation_report(scores, labels, margin=args.margin)
+        breakdown[name] = r
+        tqdm.write(f"  {name:<16} {len(writers):>3} writers   "
+                   f"EER {r['eer'] * 100:>6.2f}%   Cohen's d {r['cohens_d']:>6.3f}   "
+                   f"{r['num_genuine'] + r['num_impostor']:>5} pairs")
+
+    print("=" * 50)
+    return breakdown
 
 
 if __name__ == "__main__":
