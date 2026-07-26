@@ -47,6 +47,37 @@ class TestPreprocessImage:
         assert result.max() <= 1.0
         os.unlink(path)
 
+    def test_background_is_zero_and_ink_is_high(self, tmp_path):
+        """
+        Published pipelines invert so background reads 0 and ink reads high, and
+        the reason is mechanical: ink covers about 1% of the canvas (measured —
+        cedar mean pixel 0.9496, bhsig260 0.9901), so an un-inverted image feeds
+        every convolution a large constant offset carrying no identity signal.
+
+        Asserted per region rather than on min/max, which are 0.0 and 1.0 either
+        way round and so cannot tell the two polarities apart.
+        """
+        path = str(tmp_path / "stroke.png")
+        img = np.full((200, 200), 255, dtype=np.uint8)
+        img[90:110, 40:160] = 0                      # a horizontal stroke
+        cv2.imwrite(path, img)
+
+        result = preprocess_image(path)[0]
+        height, width = result.shape
+
+        background = result[:height // 8, :width // 8]      # top-left corner
+        ink = result[height // 2, width // 2]               # centre of the stroke
+
+        assert background.max() == pytest.approx(0.0, abs=1e-6)
+        assert ink > 0.9
+
+    def test_blank_page_is_entirely_zero(self, tmp_path):
+        """Background and the square pad must both read as absence of ink."""
+        path = str(tmp_path / "blank.png")
+        cv2.imwrite(path, np.full((100, 200), 255, dtype=np.uint8))
+
+        assert preprocess_image(path).sum() == pytest.approx(0.0, abs=1e-4)
+
     def test_nonexistent_file_raises(self):
         """Verify FileNotFoundError is raised when image path is invalid."""
         with pytest.raises(FileNotFoundError):
