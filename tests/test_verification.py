@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import torch
 
+from scripts.evaluate import fit_writer_classifier, writer_dependent_scores
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 from src.verification import (
     bytes_to_embedding,
@@ -224,3 +225,107 @@ class TestVerify:
                         engine=FusionEngine(threshold=0.5))
         assert result["decision"] == "Genuine"
         os.unlink(path)
+
+
+def _embedded_writer(genuine, forged):
+    return {"genuine": np.asarray(genuine, dtype=np.float32),
+            "forged": np.asarray(forged, dtype=np.float32)}
+
+
+class TestWriterDependentClassifier:
+    """
+    A per-user decision boundary instead of one global distance threshold.
+
+    This is the stage published systems have and this project did not. On the
+    same features, SigNet-F reports 1.78% EER with a global threshold against
+    0.4% with per-user thresholds, and every "99%+ on CEDAR" result in the
+    literature is writer-dependent.
+
+    The classifier lives entirely downstream of the Siamese encoder — it reads
+    embeddings and never touches the model.
+    """
+
+    def test_separates_a_writer_from_random_others(self):
+        rng = np.random.default_rng(0)
+        references = rng.normal(0.0, 0.1, size=(6, 8)).astype(np.float32)
+        negatives = rng.normal(5.0, 0.1, size=(30, 8)).astype(np.float32)
+
+        classifier = fit_writer_classifier(references, negatives)
+
+        assert classifier.decision_function(references).min() > 0
+        assert classifier.decision_function(negatives).max() < 0
+
+    def test_writers_own_forgeries_do_not_affect_the_fitted_boundary(self):
+        """
+        Skilled forgeries of the enrolled user are the attack being measured, so
+        fitting on them leaks the evaluation — and the deployed system never
+        holds a labelled forgery of a real customer, so a result that needed
+        them could not ship.
+
+        Tested by moving the forgeries somewhere completely different and
+        asserting the *genuine* probe scores do not budge. Those scores depend
+        only on the fitted boundary, so if a forgery had entered the fit as a
+        negative the boundary would shift and they would change.
+        """
+        rng = np.random.default_rng(1)
+        w1_genuine = rng.normal(0.0, 0.05, size=(9, 4)).astype(np.float32)
+        w2 = _embedded_writer(rng.normal(9.0, 0.05, (9, 4)),
+                              rng.normal(9.4, 0.05, (4, 4)))
+
+        near = {"w1": _embedded_writer(w1_genuine, rng.normal(1.0, 0.05, (4, 4))),
+                "w2": w2}
+        far = {"w1": _embedded_writer(w1_genuine, rng.normal(-30.0, 0.05, (4, 4))),
+               "w2": w2}
+
+        near_scores, near_labels = writer_dependent_scores(near, num_references=5, seed=42)
+        far_scores, far_labels = writer_dependent_scores(far, num_references=5, seed=42)
+
+        assert np.allclose(near_scores[near_labels == 1], far_scores[far_labels == 1])
+
+    def test_scores_are_finite_and_ordered(self):
+        rng = np.random.default_rng(2)
+        embedded = {
+            f"w{i}": _embedded_writer(rng.normal(i * 10, 0.1, (9, 4)),
+                                      rng.normal(i * 10 + 3, 0.1, (4, 4)))
+            for i in range(4)
+        }
+
+        scores, labels = writer_dependent_scores(embedded, num_references=5, seed=42)
+
+        assert np.all(np.isfinite(scores))
+        assert set(labels.tolist()) == {0, 1}
+        assert scores[labels == 1].mean() > scores[labels == 0].mean()
+
+    def test_single_writer_corpus_is_skipped(self):
+        """With no other writers there are no random-forgery negatives to fit on."""
+        embedded = {"w1": _embedded_writer(np.zeros((9, 4)), np.ones((4, 4)))}
+
+        scores, labels = writer_dependent_scores(embedded, num_references=5, seed=42)
+
+        assert len(scores) == 0 and len(labels) == 0
+
+    def test_writer_without_enough_genuines_is_skipped(self):
+        """K references plus a probe, or the writer cannot contribute both arms."""
+        rng = np.random.default_rng(3)
+        embedded = {
+            "short": _embedded_writer(rng.normal(0, 0.1, (5, 4)), rng.normal(1, 0.1, (4, 4))),
+            "ok": _embedded_writer(rng.normal(9, 0.1, (9, 4)), rng.normal(10, 0.1, (4, 4))),
+        }
+
+        scores, labels = writer_dependent_scores(embedded, num_references=5, seed=42)
+
+        # Only "ok" contributes: 4 genuine probes (9 - 5) and 4 forgeries.
+        assert len(scores) == 8
+
+    def test_is_reproducible_for_a_seed(self):
+        rng = np.random.default_rng(4)
+        embedded = {
+            f"w{i}": _embedded_writer(rng.normal(i * 10, 0.1, (9, 4)),
+                                      rng.normal(i * 10 + 3, 0.1, (4, 4)))
+            for i in range(3)
+        }
+
+        a, _ = writer_dependent_scores(embedded, num_references=5, seed=7)
+        b, _ = writer_dependent_scores(embedded, num_references=5, seed=7)
+
+        assert np.allclose(a, b)

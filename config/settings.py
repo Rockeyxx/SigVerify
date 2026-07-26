@@ -34,6 +34,13 @@ SVC2004_DIR = SVC2004_TASK2_DIR                               # default: pressur
 # is a pen tablet. https://www.ms.sapientia.ro/~manyi/mobisig.html
 MOBISIG_DIR = os.path.join(DATA_DIR, "MOBISIG")
 
+# SigComp2011 (ICDAR competition corpus): 84 online writers — 64 Dutch, 20
+# Chinese — captured on a WACOM Intuos3 A3 pen tablet at 200 Hz with real 0–1023
+# pen force. Same capture family as SVC2004, so unlike MOBISIG these writers are
+# in the target pen domain. Both archives unzip straight into this directory and
+# the parser walks whatever is present. See README for the download recipe.
+SIGCOMP2011_DIR = os.path.join(DATA_DIR, "sigcomp2011")
+
 # ─── DataLoader ───────────────────────────────────────────────────────
 NUM_WORKERS = 4                         # 0 on Windows/notebook if workers hang
 PIN_MEMORY = False                      # CPU-only training — pinning buys nothing
@@ -58,8 +65,13 @@ PRESSURE_IMPUTATION_VALUE = 1.0
 # ─── Pair Generation ─────────────────────────────────────────────────
 # Per-writer pair budgets for a real training run (the 5/5 demo defaults are
 # far too small: 55 CEDAR writers × 5 would yield only ~550 pairs total).
-PAIRS_GENUINE_PER_WRITER = 40
-PAIRS_IMPOSTOR_PER_WRITER = 40
+# 276 = C(24,2), the number of distinct genuine pairs a 24-signature CEDAR writer
+# supports, and the value the Dey et al. Siamese CNN reference draws. The old 40
+# used 14% of the available supervision while the encoder memorised its training
+# writers by epoch 4 (train 0.067 against val 0.155). The temporal branch already
+# learned this lesson: 40 -> 180 pairs took it from 33.25% to 25.50% EER.
+PAIRS_GENUINE_PER_WRITER = 276
+PAIRS_IMPOSTOR_PER_WRITER = 276
 
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
@@ -90,6 +102,24 @@ TEMPORAL_SPLIT_RATIOS = (0.5, 0.25, 0.25)
 # sampling more of them costs nothing but time.
 TEMPORAL_PAIRS_GENUINE_PER_WRITER = 180
 TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
+
+# ─── Enrollment Evaluation Protocol ──────────────────────────────────
+# How the field measures online signature verification, and what
+# `src/verification.py` actually does at inference: a user enrolls K genuine
+# signatures and a probe is scored against the nearest of them.
+#
+# The SVC2004 competition enrolled exactly 5 genuine signatures per user, never
+# showed skilled forgeries during enrollment, and averaged over several random
+# enrollment draws. Its best Task 2 result was 2.89% EER under that protocol.
+# Scoring isolated pairs instead measures a different, harder task, so published
+# numbers were never comparable to this project's.
+NUM_ENROLLMENT_REFERENCES = 5
+
+# Independent reference draws to average. Which 5 signatures a user happens to
+# enroll moves the result, and with only 10-13 held-out SVC2004 writers a single
+# draw is a small sample. Averaging over draws — and reporting the spread —
+# separates a real effect from enrollment luck.
+ENROLLMENT_TRIALS = 10
 
 # Perturb training trajectories with small rotation, jitter and speed changes.
 # Off by default: measured, it cost 3.6 EER points (25.50% -> 29.12%) even

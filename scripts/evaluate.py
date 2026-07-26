@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 import matplotlib
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, det_curve, confusion_matrix
+from sklearn.svm import LinearSVC
 from tqdm.auto import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -29,10 +30,12 @@ from config.settings import (
     TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
+    ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
-    collate_temporal_pairs, generate_skilled_pairs, writer_independent_split,
+    collate_temporal_pairs, generate_skilled_pairs, preprocess_image,
+    writer_independent_split,
 )
 from src.data.parsers import merge_corpora, parse_dataset
 from src.models.siamese import SpatialSiamese, TemporalSiamese
@@ -306,6 +309,204 @@ def score_pairs(model, dataloader, device, desc="scoring"):
     return np.concatenate(all_scores), np.concatenate(all_labels)
 
 
+def embed_samples(model, samples, branch, device, batch_size=BATCH_SIZE):
+    """
+    Embed a flat list of samples — not pairs — returning [N, D] float32.
+
+    The enrollment protocol scores every probe against every reference, so
+    embedding each sample once and comparing in NumPy costs O(N) forward passes
+    instead of the O(N x K) a pair loader would run.
+
+    Spatial samples are image paths; temporal samples are [L, 3] trajectories,
+    padded per batch and packed so a padded batch yields the same embedding the
+    sample would produce alone.
+    """
+    if not samples:
+        return np.zeros((0, model.embedding_dim), dtype=np.float32)
+
+    model.eval()
+    out = []
+
+    with torch.no_grad():
+        for start in range(0, len(samples), batch_size):
+            chunk = samples[start:start + batch_size]
+
+            if branch == "spatial":
+                arrays = [s if isinstance(s, np.ndarray) else preprocess_image(s)
+                          for s in chunk]
+                batch = torch.tensor(np.stack(arrays), dtype=torch.float32).to(device)
+                embeddings = model.encode(batch)
+            else:
+                seqs = [torch.tensor(np.asarray(s, dtype=np.float32)) for s in chunk]
+                lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
+                padded = torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True).to(device)
+                embeddings = model.encode(padded, lengths)
+
+            out.append(embeddings.cpu().numpy())
+
+    return np.vstack(out).astype(np.float32)
+
+
+def embed_writers(model, corpus, writer_ids, branch, device, batch_size=BATCH_SIZE,
+                  desc="embedding"):
+    """
+    Embed every genuine and forged sample for each writer, once.
+
+    Reference draws are then re-sampled from these arrays rather than re-running
+    the encoder, so averaging over ten enrollment trials costs one forward pass
+    over the corpus instead of ten.
+
+    Returns: {writer_id: {"genuine": [N, D], "forged": [M, D]}}
+    """
+    embedded = {}
+
+    for writer in tqdm(sorted(writer_ids), desc=desc, leave=False):
+        record = corpus[writer]
+        embedded[writer] = {
+            "genuine": embed_samples(model, record.get("genuine", []), branch,
+                                     device, batch_size),
+            "forged": embed_samples(model, record.get("forged", []), branch,
+                                    device, batch_size),
+        }
+
+    return embedded
+
+
+def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
+                          seed=42):
+    """
+    Score one enrollment draw: K genuine references per writer, everything else a probe.
+
+    This is the protocol the field uses and the one `src/verification.py` runs.
+    SVC2004 enrolled exactly 5 genuine signatures per user and never showed a
+    skilled forgery during enrollment — forgeries appear only as probes, which
+    is why `references` is drawn from `genuine` alone.
+
+    Scoring is nearest-reference with `S = 1 / (1 + d)`, identical to
+    `src.verification._nearest_reference_score`. A person's signature varies, so
+    the closest enrolled sample is the fairest comparison.
+
+    A writer needs `num_references` + 1 genuines and at least one forgery, or it
+    cannot contribute both arms and is skipped rather than half-counted.
+
+    Returns: (scores, labels) as numpy arrays, genuine probes labelled 1.
+    """
+    rng = np.random.default_rng(seed)
+    all_scores, all_labels = [], []
+
+    for writer in sorted(embedded):
+        genuine = embedded[writer]["genuine"]
+        forged = embedded[writer]["forged"]
+
+        if len(genuine) < num_references + 1 or not len(forged):
+            continue
+
+        order = rng.permutation(len(genuine))
+        references = genuine[order[:num_references]]
+        genuine_probes = genuine[order[num_references:]]
+
+        for probes, label in ((genuine_probes, 1), (forged, 0)):
+            if not len(probes):
+                continue
+            distances = np.linalg.norm(
+                probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
+            all_scores.append(1.0 / (1.0 + distances))
+            all_labels.append(np.full(len(probes), label))
+
+    if not all_scores:
+        return np.array([]), np.array([])
+
+    return np.concatenate(all_scores), np.concatenate(all_labels)
+
+
+def fit_writer_classifier(references, negatives, C=1.0):
+    """
+    Fit one enrolled user's decision boundary.
+
+    Positives are that user's enrolled genuine signatures. Negatives are genuine
+    signatures belonging to **other** users — "random forgeries" in the
+    literature's terminology.
+
+    This is the stage published systems have and this project did not. On
+    identical features SigNet-F reports 1.78% EER with a single global threshold
+    against 0.4% with per-user boundaries, and every "99%+ on CEDAR" result is
+    writer-dependent. One global distance threshold asks every signer to be
+    equally consistent; a per-user boundary does not.
+
+    Negatives deliberately exclude this user's own skilled forgeries. Those are
+    the attack being measured, so fitting on them leaks the evaluation — and the
+    deployed system never holds a labelled forgery of a real customer, so a
+    result that needed them could not ship.
+
+    `class_weight="balanced"` because negatives outnumber positives heavily:
+    5 enrolled signatures against a pool drawn from every other writer.
+
+    The classifier reads embeddings only. It never touches the Siamese encoder.
+    """
+    x = np.vstack([references, negatives])
+    y = np.concatenate([np.ones(len(references)), np.zeros(len(negatives))])
+    return LinearSVC(C=C, class_weight="balanced").fit(x, y)
+
+
+def writer_dependent_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
+                            seed=42, max_negatives=200):
+    """
+    Score every probe with its own writer's fitted classifier.
+
+    Same enrolment draw as `enrolled_trial_scores` — K genuine references, the
+    rest of the genuines plus every forgery as probes — but the decision comes
+    from a per-user boundary instead of a distance to the nearest reference.
+
+    Returns SVM decision-function margins rather than similarities. They are
+    higher-is-genuine, which is all the downstream EER code requires, but they
+    are **not** on the `S = 1/(1+d)` scale, so a threshold tuned against one is
+    meaningless against the other.
+
+    A writer needs `num_references` + 1 genuines, at least one forgery, and at
+    least one other writer to draw negatives from, or it is skipped.
+    """
+    rng = np.random.default_rng(seed)
+    writers = sorted(embedded)
+    all_scores, all_labels = [], []
+
+    for writer in writers:
+        genuine = embedded[writer]["genuine"]
+        forged = embedded[writer]["forged"]
+        others = [w for w in writers if w != writer and len(embedded[w]["genuine"])]
+
+        if len(genuine) < num_references + 1 or not len(forged) or not others:
+            continue
+
+        order = rng.permutation(len(genuine))
+        references = genuine[order[:num_references]]
+        genuine_probes = genuine[order[num_references:]]
+
+        # Other writers' genuines only — never this writer's forgeries.
+        pool = np.vstack([embedded[w]["genuine"] for w in others])
+        if len(pool) > max_negatives:
+            pool = pool[rng.choice(len(pool), max_negatives, replace=False)]
+
+        classifier = fit_writer_classifier(references, pool)
+
+        for probes, label in ((genuine_probes, 1), (forged, 0)):
+            if not len(probes):
+                continue
+            all_scores.append(classifier.decision_function(probes))
+            all_labels.append(np.full(len(probes), label))
+
+    if not all_scores:
+        return np.array([]), np.array([])
+
+    return np.concatenate(all_scores), np.concatenate(all_labels)
+
+
+def enrolled_writer_count(embedded, num_references=NUM_ENROLLMENT_REFERENCES):
+    """How many writers can supply K references plus a probe of each class."""
+    return sum(1 for w in embedded
+               if len(embedded[w]["genuine"]) >= num_references + 1
+               and len(embedded[w]["forged"]))
+
+
 def score_loader(model, dataloader, device, desc="scoring"):
     """
     Run inference over a loader and split the similarity scores by true label.
@@ -353,12 +554,15 @@ def dataset_key(writer_id):
     """
     Group a namespaced writer ID back to its source corpus.
 
-    BHSig260 keeps its script (`bhsig_Bengali`, `bhsig_Hindi`) because Bengali
-    and Devanagari are the interesting cross-script comparison; everything else
-    collapses to the corpus name.
+    A corpus that splits its writers by script or language keeps that middle
+    token — `bhsig_Bengali`, `bhsig_Hindi`, `sigcomp_Dutch` — because the
+    cross-script comparison is the interesting one; corpora with a bare numeric
+    writer ID collapse to the corpus name.
     """
     parts = writer_id.split("_")
-    return "_".join(parts[:2]) if parts[0] == "bhsig" else parts[0]
+    if len(parts) > 2 and not parts[1].isdigit():
+        return "_".join(parts[:2])
+    return parts[0]
 
 
 def per_dataset_report(branch, model, corpus, test_ids, threshold, args, device):
