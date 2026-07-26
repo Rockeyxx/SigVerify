@@ -38,10 +38,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config.settings import (
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
+    ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
 )
 from tqdm.auto import tqdm
 
-from scripts.evaluate import build_eval_loader, compute_eer, load_branch_model, score_pairs
+from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
+                              enrolled_trial_scores, enrolled_writer_count,
+                              load_branch_model, score_pairs,
+                              writer_dependent_scores)
 from src.data.dataset import writer_independent_split
 from src.data.parsers import merge_corpora, parse_dataset
 
@@ -168,7 +172,69 @@ def parse_args(argv=None):
     parser.add_argument("--limit-pairs", type=int, default=None,
                         help="Subsample the test pairs to this many for a fast, reproducible "
                              "run instead of scoring the full held-out split")
-    return parser.parse_args(argv)
+    parser.add_argument("--enroll", type=int, nargs="?", const=NUM_ENROLLMENT_REFERENCES,
+                        default=None, metavar="K",
+                        help="Score under the enrollment protocol the field uses and "
+                             "src/verification.py runs: K genuine references per writer, "
+                             "probe matched against the nearest. SVC2004 used K=5. "
+                             "Without this the harness scores isolated pairs, which is a "
+                             "different and harder task")
+    parser.add_argument("--enroll-trials", type=int, default=ENROLLMENT_TRIALS,
+                        metavar="T",
+                        help="Independent reference draws to average, reported as "
+                             "mean +/- std. Which K signatures a user happens to enroll "
+                             "moves the result, so a single draw is not the protocol")
+    parser.add_argument("--wd-classifier", action="store_true",
+                        help="Fit a per-user linear SVM on the enrolled references, "
+                             "with other writers' genuines as negatives, instead of "
+                             "thresholding a distance to the nearest reference. This "
+                             "is the writer-dependent stage published systems use. "
+                             "Requires --enroll. Scores are SVM margins, not "
+                             "S = 1/(1+d), so thresholds do not carry across")
+    parser.add_argument("--writers", nargs="+", default=None,
+                        help="Score only these writer IDs instead of the whole held-out "
+                             "split. For comparing two models trained on different corpus "
+                             "lists, whose splits therefore differ: pass the writers both "
+                             "of them held out. Every ID given must be outside this run's "
+                             "own training set, or the run is rejected")
+    args = parser.parse_args(argv)
+
+    if args.wd_classifier and not args.enroll:
+        parser.error("--wd-classifier requires --enroll: the per-user classifier is "
+                     "fitted on the enrolled reference set, which single-pair scoring "
+                     "does not have")
+
+    return args
+
+
+def select_test_writers(requested, train_ids, val_ids, test_ids):
+    """
+    Narrow the held-out split to an explicit writer list.
+
+    Two temporal models trained on different corpus lists get different splits,
+    because the partition is derived from whichever writers were loaded. Their
+    reported EERs are then not comparable — SVC2004 scored 29.62% on one run's
+    10 test writers and 16.92% on another's 13, and only 5 writers were common
+    to both. This exists to score both models on those 5.
+
+    A requested writer that this run trained on is a hard error, not a warning.
+    Reporting a leaked number as a comparison is the failure being prevented.
+    """
+    requested = list(dict.fromkeys(requested))
+    known = set(train_ids) | set(val_ids) | set(test_ids)
+
+    unknown = [w for w in requested if w not in known]
+    if unknown:
+        raise ValueError(f"Unknown writer IDs, not present in this corpus: {unknown}")
+
+    leaked = [w for w in requested if w in set(train_ids)]
+    if leaked:
+        raise ValueError(
+            f"Refusing to score writers this run trained on: {leaked}. "
+            f"Restrict --writers to writers held out by every model being compared."
+        )
+
+    return [w for w in requested if w in set(test_ids) or w in set(val_ids)]
 
 
 def main(argv=None):
@@ -191,13 +257,21 @@ def main(argv=None):
         sorted(corpus), *ratios, seed=args.seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
-    model = load_branch_model(args.branch, args.weights, device)
-    loader = build_eval_loader(corpus, test_ids, args.branch, args.batch_size,
-                               args.num_workers, args.seed)
-    loader = _limit_pairs(loader, args.limit_pairs, args.seed)
-    print(f"Scoring {len(loader.dataset)} pairs from {len(test_ids)} held-out test writers")
+    if args.writers:
+        test_ids = select_test_writers(args.writers, train_ids, val_ids, test_ids)
+        print(f"Restricted to {len(test_ids)} explicitly requested held-out writers")
 
-    scores, labels = score_pairs(model, loader, device, desc=f"{args.branch} · benchmark")
+    model = load_branch_model(args.branch, args.weights, device)
+
+    if args.enroll:
+        scores, labels, spread = enrolled_scores(args, corpus, test_ids, model, device)
+    else:
+        loader = build_eval_loader(corpus, test_ids, args.branch, args.batch_size,
+                                   args.num_workers, args.seed)
+        loader = _limit_pairs(loader, args.limit_pairs, args.seed)
+        print(f"Scoring {len(loader.dataset)} pairs from {len(test_ids)} held-out test writers")
+        scores, labels = score_pairs(model, loader, device, desc=f"{args.branch} · benchmark")
+        spread = None
     report = separation_report(scores, labels, margin=args.margin)
     print_separation_report(args.branch, report)
 
@@ -205,15 +279,68 @@ def main(argv=None):
     return {**report, "per_corpus": per_corpus}
 
 
+def enrolled_scores(args, corpus, writer_ids, model, device, desc="benchmark"):
+    """
+    Score `writer_ids` under the enrollment protocol, averaged over reference draws.
+
+    Every sample is embedded once, then each trial re-draws which K genuines act
+    as the enrolled references. That makes T trials cost one forward pass over
+    the corpus rather than T, and it is the same averaging the SVC2004
+    competition ran ("multiple sets of five genuine signatures each").
+
+    The returned (scores, labels) come from the **median-EER** trial, so the
+    downstream separation report describes a representative draw rather than a
+    lucky one. `spread` carries the EER of every trial, because the spread is
+    the interesting part: it says how much of a result is enrollment luck.
+
+    Returns: (scores, labels, spread) where spread is a numpy array of per-trial EERs.
+    """
+    embedded = embed_writers(model, corpus, writer_ids, args.branch, device,
+                             args.batch_size, desc=f"{args.branch} · {desc} · embedding")
+
+    scoreable = enrolled_writer_count(embedded, args.enroll)
+    decision = "per-user SVM" if args.wd_classifier else "nearest-reference distance"
+    print(f"Enrollment protocol: {args.enroll} references x {args.enroll_trials} draws, "
+          f"{decision}, {scoreable} of {len(writer_ids)} writers scoreable")
+
+    scorer = writer_dependent_scores if args.wd_classifier else enrolled_trial_scores
+
+    trials = []
+    for trial in range(args.enroll_trials):
+        scores, labels = scorer(embedded, args.enroll, seed=args.seed + trial)
+        if not len(scores) or labels.min() == labels.max():
+            continue
+        eer, _ = compute_eer(scores[labels == 1], scores[labels == 0])
+        trials.append((eer, scores, labels))
+
+    if not trials:
+        return np.array([]), np.array([]), np.array([])
+
+    trials.sort(key=lambda t: t[0])
+    spread = np.array([t[0] for t in trials])
+    _, scores, labels = trials[len(trials) // 2]
+
+    print(f"  EER over {len(trials)} draws: mean {spread.mean() * 100:.2f}%  "
+          f"std {spread.std() * 100:.2f}%  "
+          f"min {spread.min() * 100:.2f}%  max {spread.max() * 100:.2f}%")
+
+    return scores, labels, spread
+
+
 def corpus_of(writer_id):
     """
     Map a namespaced writer ID back to the corpus it came from.
 
-    BHSig260 keeps its script (`bhsig_Bengali`) because Bengali and Devanagari
-    are the interesting comparison; everything else collapses to the prefix.
+    A corpus that splits its writers by script or language keeps that middle
+    token — `bhsig_Bengali`, `sigcomp_Dutch` — because the cross-script gap is
+    the interesting comparison and pooling it away is exactly the mistake the
+    per-corpus breakdown exists to prevent. Corpora with a bare numeric writer
+    ID (`svc_11`, `cedar_7`) collapse to the prefix.
     """
     parts = writer_id.split("_")
-    return "_".join(parts[:2]) if parts[0] == "bhsig" else parts[0]
+    if len(parts) > 2 and not parts[1].isdigit():
+        return "_".join(parts[:2])
+    return parts[0]
 
 
 def per_corpus_report(args, corpus, test_ids, model, device):
@@ -238,10 +365,15 @@ def per_corpus_report(args, corpus, test_ids, model, device):
 
     breakdown = {}
     for name, writers in sorted(groups.items()):
-        loader = build_eval_loader(corpus, writers, args.branch, args.batch_size,
-                                   args.num_workers, args.seed)
-        loader = _limit_pairs(loader, args.limit_pairs, args.seed)
-        scores, labels = score_pairs(model, loader, device, desc=f"{args.branch} · {name}")
+        if args.enroll:
+            scores, labels, _ = enrolled_scores(args, corpus, writers, model, device,
+                                                desc=name)
+        else:
+            loader = build_eval_loader(corpus, writers, args.branch, args.batch_size,
+                                       args.num_workers, args.seed)
+            loader = _limit_pairs(loader, args.limit_pairs, args.seed)
+            scores, labels = score_pairs(model, loader, device,
+                                         desc=f"{args.branch} · {name}")
         if not len(scores) or labels.min() == labels.max():
             continue
 

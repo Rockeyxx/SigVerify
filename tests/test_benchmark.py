@@ -8,7 +8,7 @@ reading FAR/FRR at a fixed tau is what masked the P-001 accuracy failure.
 import numpy as np
 import pytest
 
-from scripts.benchmark import cohens_d, separation_report
+from scripts.benchmark import cohens_d, corpus_of, select_test_writers, separation_report
 
 
 class TestCohensD:
@@ -91,3 +91,45 @@ class TestSeparationReport:
         r = separation_report(scores, labels, margin=1.0)
         assert r["num_impostor"] == 0
         assert np.isnan(r["cohens_d"])
+
+
+class TestCorpusOf:
+    """Writer IDs carry a script or language only when it is worth splitting on."""
+
+    def test_language_scoped_corpora_keep_their_middle_token(self):
+        assert corpus_of("bhsig_Bengali_001") == "bhsig_Bengali"
+        assert corpus_of("sigcomp_Dutch_013") == "sigcomp_Dutch"
+        assert corpus_of("sigcomp_Chinese_011") == "sigcomp_Chinese"
+
+    def test_numeric_writer_ids_collapse_to_the_corpus_name(self):
+        assert corpus_of("svc_11") == "svc"
+        assert corpus_of("cedar_7") == "cedar"
+        assert corpus_of("mobisig_3") == "mobisig"
+
+
+class TestSelectTestWriters:
+    """
+    Comparing two models whose corpus lists differ means scoring them on the
+    writers both held out — and refusing anything else.
+    """
+
+    SPLIT = (["svc_1", "svc_2"], ["svc_3"], ["svc_4", "svc_5"])
+
+    def test_keeps_only_the_requested_held_out_writers(self):
+        assert select_test_writers(["svc_4"], *self.SPLIT) == ["svc_4"]
+
+    def test_validation_writers_are_allowed(self):
+        """They are outside training, which is the property that matters."""
+        assert select_test_writers(["svc_3", "svc_5"], *self.SPLIT) == ["svc_3", "svc_5"]
+
+    def test_training_writer_is_refused(self):
+        """Silently scoring a memorized writer is the failure this prevents."""
+        with pytest.raises(ValueError, match="trained on"):
+            select_test_writers(["svc_4", "svc_1"], *self.SPLIT)
+
+    def test_unknown_writer_is_refused(self):
+        with pytest.raises(ValueError, match="Unknown writer IDs"):
+            select_test_writers(["svc_99"], *self.SPLIT)
+
+    def test_duplicates_are_collapsed(self):
+        assert select_test_writers(["svc_4", "svc_4"], *self.SPLIT) == ["svc_4"]
