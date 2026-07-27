@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from config.settings import SPATIAL_INPUT_SIZE
 from src.data.dataset import (
     SpatialSignatureDataset,
     TemporalSignatureDataset,
@@ -33,10 +34,17 @@ class TestPreprocessImage:
         return tmp.name
 
     def test_output_shape(self):
-        """Verify preprocessed image tensor yields standard shape (1, 256, 256)."""
+        """
+        Verify the preprocessed tensor matches the configured input geometry.
+
+        Read from config rather than hardcoded: SPATIAL_INPUT_SIZE is a measured
+        choice (155x220 direct resize beat 256x256 square-pad on every writer_samples),
+        so a test that pins 256 would fail the next time it is measured again.
+        """
         path = self._make_test_image()
         result = preprocess_image(path)
-        assert result.shape == (1, 256, 256)
+        width, height = SPATIAL_INPUT_SIZE
+        assert result.shape == (1, height, width)
         os.unlink(path)
 
     def test_output_normalized(self):
@@ -150,7 +158,7 @@ class TestGenerateSkilledPairs:
     """Test suite for skilled-forgery-aware pairing (AGENTS.md evaluation protocol)."""
 
     def _writers(self, n=4, n_genuine=6, n_forged=6):
-        """Build a synthetic {writer: {genuine: [...], forged: [...]}} corpus."""
+        """Build a synthetic {writer: {genuine: [...], forged: [...]}} mapping."""
         return {
             f"w{w}": {
                 "genuine": [f"w{w}_g{i}" for i in range(n_genuine)],
@@ -252,8 +260,9 @@ class TestSpatialSignatureDataset:
         assert len(ds) == 2
 
         img1, img2, label = ds[0]
-        assert img1.shape == (1, 256, 256)
-        assert img2.shape == (1, 256, 256)
+        width, height = SPATIAL_INPUT_SIZE
+        assert img1.shape == (1, height, width)
+        assert img2.shape == (1, height, width)
         assert label.item() == 1.0
 
         for p in imgs:
@@ -349,3 +358,89 @@ class TestTemporalDatasetAugmentation:
         pairs, labels = self._pairs()
         ds = TemporalSignatureDataset(pairs, labels, augment=True)
         assert float(ds[0][2]) == 1.0
+
+
+class TestSkilledPairBalance:
+    """
+    A writer must contribute equal numbers of positives and negatives.
+
+    UTSig ships 27 genuine but only 6 skilled forgeries per writer, so it
+    supports C(27,2)=351 genuine combinations against 27*6=162 impostor ones.
+    Capping each arm only by its own supply gave UTSig a 1.70:1 genuine-heavy
+    batch at a 276 budget while every other dataset stayed 1:1 — and UTSig's EER
+    rose 38.83% -> 43.43% when the budget was raised.
+    """
+
+    def _dataset(self, num_genuine, num_forged):
+        return {"utsig_1": {"genuine": [f"g{i}" for i in range(num_genuine)],
+                            "forged": [f"f{i}" for i in range(num_forged)]}}
+
+    def test_scarce_forgeries_cap_the_genuine_arm_too(self):
+        pairs, labels = generate_skilled_pairs(
+            self._dataset(27, 6), num_genuine_per_writer=276,
+            num_forged_per_writer=276, seed=42)
+        assert labels.count(1) == labels.count(0)
+
+    def test_balanced_datasets_are_unaffected(self):
+        """CEDAR's 24/24 supports 276 of each; this must not reduce it."""
+        pairs, labels = generate_skilled_pairs(
+            self._dataset(24, 24), num_genuine_per_writer=276,
+            num_forged_per_writer=276, seed=42)
+        assert labels.count(1) == labels.count(0) == 276
+
+    def test_small_budget_still_honoured(self):
+        pairs, labels = generate_skilled_pairs(
+            self._dataset(27, 6), num_genuine_per_writer=40,
+            num_forged_per_writer=40, seed=42)
+        assert labels.count(1) == labels.count(0) == 40
+
+
+class TestSpatialInputGeometry:
+    """
+    Square-pad versus direct resize. Which one wins is a measurement, not a
+    preference — see docs/SOLUTIONS.md for the numbers.
+    """
+
+    def _wide_image(self, tmp_path):
+        """A 1:3.5 ribbon, the shape BHSig260 ships."""
+        path = str(tmp_path / "ribbon.png")
+        img = np.full((100, 350), 255, dtype=np.uint8)
+        img[45:55, 20:330] = 0
+        cv2.imwrite(path, img)
+        return path
+
+    def test_square_pad_preserves_aspect(self, tmp_path, monkeypatch):
+        """Padded, a 1:3.5 ribbon keeps its shape and the frame is mostly empty."""
+        import src.data.dataset as ds
+        monkeypatch.setattr(ds, "SPATIAL_SQUARE_PAD", True)
+        out = ds.preprocess_image(self._wide_image(tmp_path), target_size=(256, 256))[0]
+        rows_with_ink = (out.max(axis=1) > 0.5).sum()
+        assert rows_with_ink < out.shape[0] // 3      # ink confined to a band
+
+    def test_direct_resize_gives_the_stroke_more_pixels_than_padding(
+            self, tmp_path, monkeypatch):
+        """
+        The trade this measurement is about. Padding a 1:3.5 ribbon to square
+        spends ~70% of the canvas on blank and shrinks the stroke to roughly a
+        third of the vertical resolution a direct resize would give it.
+
+        Compared against each other rather than a fixed threshold, since the
+        ratio is the meaningful quantity and it follows from the aspect ratio.
+        """
+        import src.data.dataset as ds
+        path = self._wide_image(tmp_path)
+
+        monkeypatch.setattr(ds, "SPATIAL_SQUARE_PAD", True)
+        padded = (ds.preprocess_image(path, target_size=(256, 256))[0].max(axis=1) > 0.5).sum()
+
+        monkeypatch.setattr(ds, "SPATIAL_SQUARE_PAD", False)
+        direct = (ds.preprocess_image(path, target_size=(256, 256))[0].max(axis=1) > 0.5).sum()
+
+        assert direct > 2 * padded
+
+    def test_non_square_target_shape_is_honoured(self, tmp_path, monkeypatch):
+        """155x220 is the reference geometry; cv2 takes (width, height)."""
+        import src.data.dataset as ds
+        monkeypatch.setattr(ds, "SPATIAL_SQUARE_PAD", False)
+        out = ds.preprocess_image(self._wide_image(tmp_path), target_size=(220, 155))
+        assert out.shape == (1, 155, 220)

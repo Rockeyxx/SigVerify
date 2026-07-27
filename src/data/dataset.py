@@ -41,6 +41,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     SPATIAL_INPUT_SIZE,
+    SPATIAL_SQUARE_PAD,
     MIN_BBOX_PIXELS,
     MIN_LAPLACIAN_VARIANCE,
     PAIRS_GENUINE_PER_WRITER,
@@ -71,13 +72,20 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     # absolute size. Measured, that trade lost about 1.8 points of held-out EER,
     # so overall scale is worth more here than the extra detail.
 
-    # Pad image to a square canvas while keeping original aspect ratio intact
-    h, w = img.shape
-    max_dim = max(h, w)
-    padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
-    y_off = (max_dim - h) // 2
-    x_off = (max_dim - w) // 2
-    padded[y_off:y_off + h, x_off:x_off + w] = img
+    if SPATIAL_SQUARE_PAD:
+        # Pad image to a square canvas while keeping original aspect ratio intact
+        h, w = img.shape
+        max_dim = max(h, w)
+        padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
+        y_off = (max_dim - h) // 2
+        x_off = (max_dim - w) // 2
+        padded[y_off:y_off + h, x_off:x_off + w] = img
+    else:
+        # Resize straight onto the target, as the Siamese reference does at
+        # 155x220. Aspect is distorted but consistently so, and every signature
+        # fills the frame instead of spending most of it on pad — BHSig260's
+        # ribbons are roughly 1:3.5, so square padding leaves them ~70% blank.
+        padded = img
 
     # Resize to standard spatial input size (256x256), then invert onto [0.0, 1.0]
     # so **background is 0 and ink is high**.
@@ -226,15 +234,31 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         if len(genuine) < 2 or not forged:
             continue
 
+        # A writer contributes equal numbers of positives and negatives, so the
+        # scarcer arm caps both. Capping each arm only by its own supply silently
+        # reweights datasets that ship few forgeries: UTSig has 27 genuine but 6
+        # skilled forgeries per writer, giving C(27,2)=351 genuine combinations
+        # against 27x6=162 impostor ones. At a 276 budget that produced a 1.70:1
+        # genuine-heavy batch for UTSig while every other dataset stayed 1:1, and
+        # UTSig's held-out EER rose 38.83% -> 43.43% when the budget was raised.
+        # At the old budget of 40 everything was balanced by accident, which is
+        # why this only surfaced once the budget went up.
+        num_pairs = min(
+            num_genuine_per_writer,
+            num_forged_per_writer,
+            len(genuine) * (len(genuine) - 1) // 2,   # available genuine combinations
+            len(genuine) * len(forged),               # available impostor combinations
+        )
+
         # Genuine pairs: two authentic signatures from the same writer
-        num_genuine = min(num_genuine_per_writer, len(genuine) * (len(genuine) - 1) // 2)
+        num_genuine = num_pairs
         for _ in range(num_genuine):
             s1, s2 = rng.sample(genuine, 2)
             pairs.append((s1, s2))
             labels.append(1)
 
         # Skilled-forgery pairs: authentic vs. an imitation of this same writer
-        num_forged = min(num_forged_per_writer, len(genuine) * len(forged))
+        num_forged = num_pairs
         for _ in range(num_forged):
             pairs.append((rng.choice(genuine), rng.choice(forged)))
             labels.append(0)

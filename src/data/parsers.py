@@ -2,12 +2,12 @@
 Real-Dataset Parsers — Signature Verification System
 
 Each parser returns the same shape, so downstream code never branches on which
-corpus it is looking at:
+writer_samples it is looking at:
 
     {writer_id: {"genuine": [...], "forged": [...]}}
 
 Writer IDs are namespaced (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
-so several corpora can be merged into one writer-independent split without two
+so several datasets can be merged into one writer-independent split without two
 different people colliding on the same integer.
 
 Spatial parsers yield file paths (images are loaded lazily by the Dataset).
@@ -40,13 +40,13 @@ SVC_PRESSURE_MAX = 1023.0
 
 # SigComp2011 was captured on a WACOM Intuos3, which reports pen force on the
 # same 0–1023 scale as the SVC2004 tablet. Kept as its own name so that a
-# future corpus on a different scale cannot silently inherit the wrong divisor.
+# future dataset on a different scale cannot silently inherit the wrong divisor.
 SIGCOMP_PRESSURE_MAX = 1023.0
 
 # SigComp2011 sampled at 200 Hz; SVC2004 sampled at 100 Hz (measured: its
 # timestamp column steps by 10 ms). The model derives its velocity channels from
 # consecutive-frame deltas, so at 200 Hz the *same* physical pen speed produces
-# half the delta. Keeping every second sample puts both corpora on one time base
+# half the delta. Keeping every second sample puts both datasets on one time base
 # rather than asking one encoder to read the velocity channel two ways.
 SIGCOMP_DECIMATION = 2
 
@@ -104,17 +104,17 @@ def normalize_trajectory(xy, pressure):
     return np.column_stack([xy, pressure]).astype(np.float32)
 
 
-def merge_corpora(target, incoming):
+def merge_datasets(target, incoming):
     """
-    Merge one parsed corpus into another, appending samples per writer.
+    Merge one parsed writer_samples into another, appending samples per writer.
 
-    A plain `dict.update` would replace a writer's whole record when two corpora
+    A plain `dict.update` would replace a writer's whole record when two datasets
     use the same ID, silently discarding one of them. That is not hypothetical:
     SVC2004 Task1 and Task2 are separate recordings of the same 40 signers, so
     both parse to `svc_1`..`svc_40`, and updating would drop 1600 signatures
     without a word.
 
-    Writer IDs stay namespaced per corpus (`cedar_7`, `mobisig_3`), so an ID
+    Writer IDs stay namespaced per writer_samples (`cedar_7`, `mobisig_3`), so an ID
     collision means the same person, and appending is the correct reading.
 
     Returns `target`, mutated in place, so calls can be chained.
@@ -385,7 +385,7 @@ def load_sigcomp2011_file(path):
     The format is three whitespace-separated columns per line — X, Y, Z — with
     no header, where Z is WACOM pen force on the same 0–1023 scale SVC2004 uses.
 
-    Two corpus-level alignments are applied here, both of which exist because
+    Two writer_samples-level alignments are applied here, both of which exist because
     these trajectories are merged with SVC2004 and read by a single encoder.
     Neither widens the [L, 3] contract.
 
@@ -395,13 +395,13 @@ def load_sigcomp2011_file(path):
        preprinted boxes, so about 30% of raw points are in-air moves in runs
        averaging 19 samples. SVC2004 Task2 contains **no** zero-pressure points
        at all (measured: 0 of 100,494). Mixing the two unfiltered would make the
-       pressure channel and its derivative mean different things per corpus,
+       pressure channel and its derivative mean different things per writer_samples,
        which is precisely what collapsed the earlier SVC2004 Task1 + Task2 merge
        (see `docs/SOLUTIONS.md`).
 
     The cost is stated plainly: in-air trajectory is discriminative in the
     online-verification literature, and this discards it. It is discarded
-    because the corpus the deployment device matches does not have it.
+    because the dataset the deployment device matches does not have it.
     """
     rows = np.loadtxt(path, dtype=np.float32, ndmin=2)
     if rows.size == 0:
@@ -422,9 +422,9 @@ def _sigcomp_parts(dirpath, root):
     """
     Lowercased path components of `dirpath` *below* `root`.
 
-    Only the components inside the corpus are examined. Matching against the
+    Only the components inside the dataset are examined. Matching against the
     absolute path would let a directory anywhere above it decide the label —
-    a checkout under `~/forgeries/` would classify the whole corpus as forged.
+    a checkout under `~/forgeries/` would classify the whole writer_samples as forged.
     """
     relative = os.path.relpath(dirpath, root)
     if relative == os.curdir:
@@ -512,11 +512,11 @@ def _sigcomp_test_entry(filename, writer_dir):
 
 def parse_sigcomp2011(root=SIGCOMP2011_DIR):
     """
-    Parse the SigComp2011 **online** corpus into the standard writer dict.
+    Parse the SigComp2011 **online** writer_samples into the standard writer dict.
 
     84 pen-tablet writers — 64 Dutch, 20 Chinese — recorded on a WACOM Intuos3
     A3 at 200 Hz with real 0–1023 pen force. That capture stack is the same
-    family as SVC2004's, which is the reason this corpus is worth having: the
+    family as SVC2004's, which is the reason this dataset is worth having: the
     measured result on this project is that pen accuracy only improves with more
     *pen-domain* writers, and touchscreen writers do not substitute at any
     quantity. It more than triples the pen-domain writer count.

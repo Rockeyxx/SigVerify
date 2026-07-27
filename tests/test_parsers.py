@@ -3,7 +3,7 @@ Tests for the real-dataset parsers.
 
 Two layers:
   1. Synthetic-fixture tests — always run, pin the naming/label logic.
-  2. Real-corpus tests — skipped unless ./data is populated, and assert the
+  2. Real-dataset tests — skipped unless ./data is populated, and assert the
      exact writer/sample counts each dataset is documented to have.
 """
 
@@ -23,7 +23,7 @@ from config.settings import (
 )
 from src.data.parsers import (
     load_svc2004_file,
-    merge_corpora,
+    merge_datasets,
     parse_bhsig260,
     parse_cedar,
     parse_mobisig,
@@ -213,11 +213,11 @@ class TestParseSVC2004:
         assert sample.shape[1] == 3
 
     def test_pressure_detection(self, tmp_path):
-        """Task1 corpora must be reported as pressure-less so training can warn."""
+        """Task1 datasets must be reported as pressure-less so training can warn."""
         assert svc2004_has_pressure(self._fixture(str(tmp_path))) is False
 
 
-# ─── Real-corpus validation (skipped when ./data is not populated) ──────
+# ─── Real-dataset validation (skipped when ./data is not populated) ──────
 
 _have = os.path.isdir
 
@@ -453,9 +453,9 @@ class TestParseSigComp2011:
 
     def test_drops_pen_up_samples(self, tmp_path):
         """
-        SVC2004 Task2 has no zero-pressure points, so neither may this corpus.
+        SVC2004 Task2 has no zero-pressure points, so neither may this dataset.
         A surviving P = 0 would make pressure mean something different per
-        corpus for the one encoder that reads both.
+        writer_samples for the one encoder that reads both.
         """
         writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
         for record in writers.values():
@@ -487,7 +487,7 @@ class TestParseSigComp2011:
 @pytest.mark.skipif(not _have(SIGCOMP2011_DIR), reason="SigComp2011 not downloaded")
 def test_real_sigcomp2011_counts():
     """
-    The online corpus ships 84 writers and 3695 signatures: 64 Dutch (10 in the
+    The online writer_samples ships 84 writers and 3695 signatures: 64 Dutch (10 in the
     training archive, 54 in the test archive) and 20 Chinese (10 + 10).
     """
     writers = parse_sigcomp2011(SIGCOMP2011_DIR)
@@ -507,17 +507,17 @@ def test_real_sigcomp2011_counts():
     sample = writers["sigcomp_Dutch_013"]["genuine"][0]
     assert sample.ndim == 2 and sample.shape[1] == 3
     assert np.all(np.isfinite(sample))
-    # A real pen sensor, not the flat P = 1.0 of a pressure-blind corpus.
+    # A real pen sensor, not the flat P = 1.0 of a pressure-blind dataset.
     assert sample[:, 2].std() > 0.0
     assert not np.allclose(sample[:, 2], 1.0)
 
 
-class TestMergeCorpora:
-    """Merging corpora that share writer IDs must append samples, not replace them."""
+class TestMergeDatasets:
+    """Merging datasets that share writer IDs must append samples, not replace them."""
 
     def test_disjoint_writers_are_unioned(self):
         target = {"svc_1": {"genuine": ["a"], "forged": ["b"]}}
-        merge_corpora(target, {"mobisig_1": {"genuine": ["c"], "forged": ["d"]}})
+        merge_datasets(target, {"mobisig_1": {"genuine": ["c"], "forged": ["d"]}})
         assert set(target) == {"svc_1", "mobisig_1"}
 
     def test_shared_writer_id_appends_rather_than_overwrites(self):
@@ -527,19 +527,19 @@ class TestMergeCorpora:
         one task's samples entirely.
         """
         target = {"svc_1": {"genuine": ["t1_g"], "forged": ["t1_f"]}}
-        merge_corpora(target, {"svc_1": {"genuine": ["t2_g"], "forged": ["t2_f"]}})
+        merge_datasets(target, {"svc_1": {"genuine": ["t2_g"], "forged": ["t2_f"]}})
         assert target["svc_1"]["genuine"] == ["t1_g", "t2_g"]
         assert target["svc_1"]["forged"] == ["t1_f", "t2_f"]
 
     def test_returns_the_target_for_chaining(self):
         target = {}
-        assert merge_corpora(target, {"svc_1": {"genuine": [], "forged": []}}) is target
+        assert merge_datasets(target, {"svc_1": {"genuine": [], "forged": []}}) is target
 
     def test_merging_is_order_independent_in_count(self):
         a = {"svc_1": {"genuine": ["g1"], "forged": ["f1"]}}
         b = {"svc_1": {"genuine": ["g2", "g3"], "forged": ["f2"]}}
         forward, backward = {}, {}
-        merge_corpora(merge_corpora(forward, a), b)
-        merge_corpora(merge_corpora(backward, b), a)
+        merge_datasets(merge_datasets(forward, a), b)
+        merge_datasets(merge_datasets(backward, b), a)
         assert len(forward["svc_1"]["genuine"]) == len(backward["svc_1"]["genuine"]) == 3
         assert len(forward["svc_1"]["forged"]) == len(backward["svc_1"]["forged"]) == 2

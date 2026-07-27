@@ -34,7 +34,7 @@ SVC2004_DIR = SVC2004_TASK2_DIR                               # default: pressur
 # is a pen tablet. https://www.ms.sapientia.ro/~manyi/mobisig.html
 MOBISIG_DIR = os.path.join(DATA_DIR, "MOBISIG")
 
-# SigComp2011 (ICDAR competition corpus): 84 online writers — 64 Dutch, 20
+# SigComp2011 (ICDAR competition dataset): 84 online writers — 64 Dutch, 20
 # Chinese — captured on a WACOM Intuos3 A3 pen tablet at 200 Hz with real 0–1023
 # pen force. Same capture family as SVC2004, so unlike MOBISIG these writers are
 # in the target pen domain. Both archives unzip straight into this directory and
@@ -46,9 +46,18 @@ NUM_WORKERS = 4                         # 0 on Windows/notebook if workers hang
 PIN_MEMORY = False                      # CPU-only training — pinning buys nothing
 
 # ─── Spatial Branch (Offline — Siamese CNN) ───────────────────────────
-SPATIAL_INPUT_SIZE = (256, 256)          # H × W → [1, 1, 256, 256] tensor
+SPATIAL_INPUT_SIZE = (220, 155)          # cv2 (width, height) → [1, 1, 155, 220] tensor
 SPATIAL_EMBEDDING_DIM = 512
 SPATIAL_CHANNELS = 1                    # Grayscale
+
+# How a scan is mapped onto the network input.
+#   True  — pad to a square first, then resize. Preserves aspect ratio; a wide
+#           BHSig260 ribbon keeps its shape but spends most of the canvas on pad.
+#   False — resize straight to SPATIAL_INPUT_SIZE. Distorts aspect, but every
+#           signature fills the frame. This is what the Dey et al. Siamese CNN
+#           reference does at 155x220.
+# Measured rather than assumed — see docs/SOLUTIONS.md for the comparison.
+SPATIAL_SQUARE_PAD = False
 
 # Quality gate thresholds (effective-resolution proxies)
 MIN_BBOX_PIXELS = 64                    # Minimum signature bounding-box dimension
@@ -81,14 +90,36 @@ BATCH_SIZE = 32
 NUM_EPOCHS = 50
 WEIGHT_DECAY = 1e-4
 
-# Dropout on the 8192-d pooled vector feeding the spatial embedding projection.
+# Dropout on the pooled vector feeding the spatial embedding projection.
 # Off by default. At 0.4 it costs about a point of held-out EER and barely
 # narrows the train/validation gap, so head capacity is not what limits
 # generalization here.
 SPATIAL_HEAD_DROPOUT = 0.0
 
+# Which convolutional trunk the spatial branch is built from — see
+# `src/models/siamese.py::SPATIAL_TRUNKS`. "compact" is this project's own
+# 32-64-128-256-256 stack; "wide" is the Dey et al. Siamese reference
+# (96x11x11 stem, then 256, 384, 256). `SPATIAL_CONV_DROPOUT` and
+# `SPATIAL_FC_HIDDEN` are the reference's other two departures: Dropout2d after
+# the second and fourth stages, and an FC-1024 layer before the embedding.
+#
+# These are training-time settings only. Benchmarking and inference recover the
+# architecture from the checkpoint itself via `SpatialSiamese.from_state_dict`,
+# so changing them here can never mis-score an existing weights file.
+SPATIAL_TRUNK = "compact"
+SPATIAL_CONV_DROPOUT = 0.0
+SPATIAL_FC_HIDDEN = 0
+
+# Segments to recompute the trunk in during the backward pass instead of storing
+# its activations. 0 is off. This is a memory/compute trade, not a modelling
+# choice — the gradients are identical. The compact trunk peaks at 1.5 GB at
+# batch 32 and does not need it; the wide trunk needs 4 segments to fit the same
+# batch on a 4 GB card, which it must, since batch size sets how many impostors
+# hard-negative mining has to choose from.
+SPATIAL_GRAD_CHECKPOINT = 0
+
 # Writer-independent split ratios (train, val, test).
-# The image corpora have 430 writers between them, so 70/15/15 still leaves 65
+# The image datasets have 430 writers between them, so 70/15/15 still leaves 65
 # test writers. SVC2004 has only 40, where the same ratio yields 6 test writers
 # and roughly 480 pairs, far too few to rank configurations on. Halving the
 # training share buys 10 validation and 10 test writers instead.
@@ -126,7 +157,7 @@ ENROLLMENT_TRIALS = 10
 # though validation loss improved. Augmentation multiplies samples, but
 # writer-independent verification has to learn what differs between *people*,
 # and no perturbation of 20 signers' trajectories invents a 21st signer.
-# Kept available because it should pay off once more writers are in the corpus.
+# Kept available because it should pay off once more writers are in the dataset.
 TEMPORAL_AUGMENT = False
 
 # Early Stopping hyperparameters (monitors validation loss to halt training)
