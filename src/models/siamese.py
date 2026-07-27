@@ -16,6 +16,49 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint_sequential
+
+
+# Convolutional trunks the spatial branch can be built with. Each stage is
+# (out_channels, kernel_size, pool_after, dropout_after) and expands to
+# Conv2d → GroupNorm → ReLU → [MaxPool2d] → [Dropout2d].
+#
+#   compact — the project's own trunk. Five narrow stages, every one pooled, so
+#             a 155x220 input reaches 256x4x6 before the pooling grid.
+#   wide    — the Dey et al. Siamese reference (SigNet): a 96-filter 11x11 stem,
+#             then 256x5x5, 384x3x3 and 256x3x3, with dropout after the second
+#             and fourth stages. Four stages instead of five and only three
+#             pools, so the map stays larger and far wider through the trunk.
+#
+# Adding a trunk here is enough to train with it; `from_state_dict` recovers
+# which one a checkpoint was trained with from the convolution shapes alone.
+SPATIAL_TRUNKS = {
+    "compact": (
+        (32, 5, True, False),
+        (64, 5, True, False),
+        (128, 3, True, False),
+        (256, 3, True, False),
+        (256, 3, True, False),
+    ),
+    "wide": (
+        (96, 11, True, False),
+        (256, 5, True, True),
+        (384, 3, False, False),
+        (256, 3, True, True),
+    ),
+}
+
+
+def _group_norm(channels):
+    """
+    GroupNorm sized to keep four channels per group, capped at 32 groups.
+
+    Reproduces the hand-written groups the compact trunk shipped with (8 for 32
+    channels, 16 for 64, 32 for 128 and 256) and extends the same rule to the
+    wider trunks, where 96 -> 24 groups and 384 -> 32.
+    """
+    groups = min(32, channels // 4)
+    return nn.GroupNorm(groups, channels)
 
 
 class SpatialSiamese(nn.Module):
@@ -24,52 +67,58 @@ class SpatialSiamese(nn.Module):
 
     Uses GroupNorm instead of BatchNorm to ensure stable normalization
     when processing small, pair-sampled batches during metric learning.
-    
-    Forward pass accepts two grayscale images [B, 1, 256, 256] and extracts
+
+    Forward pass accepts two grayscale images [B, 1, H, W] and extracts
     their 512-dimensional continuous embeddings for distance comparison.
+
+    `trunk` selects a convolutional stack from SPATIAL_TRUNKS; `conv_dropout`
+    and `head_dropout` are training-time regularizers that leave the parameter
+    shapes untouched, and `fc_hidden` inserts the reference's FC-1024 layer
+    ahead of the embedding projection.
     """
 
-    def __init__(self, embedding_dim=512, head_dropout=0.0):
+    def __init__(self, embedding_dim=512, head_dropout=0.0,
+                 trunk="compact", conv_dropout=0.0, fc_hidden=0,
+                 grad_checkpoint=0):
         super().__init__()
+        if trunk not in SPATIAL_TRUNKS:
+            raise ValueError(f"Unknown trunk '{trunk}' — expected one of {sorted(SPATIAL_TRUNKS)}")
+
         self.embedding_dim = embedding_dim
+        self.trunk = trunk
+        self.fc_hidden = fc_hidden
+        self.grad_checkpoint = grad_checkpoint
 
-        # 5-stage feature extractor: downsamples input from [B, 1, 256, 256] down to [B, 256, 8, 8]
-        self.features = nn.Sequential(
-            # Block 1: [B, 1, 256, 256] → [B, 32, 128, 128]
-            nn.Conv2d(1, 32, kernel_size=5, padding=2),
-            nn.GroupNorm(8, 32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            # Block 2: [B, 32, 128, 128] → [B, 64, 64, 64]
-            nn.Conv2d(32, 64, kernel_size=5, padding=2),
-            nn.GroupNorm(16, 64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            # Block 3: [B, 64, 64, 64] → [B, 128, 32, 32]
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(32, 128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            # Block 4: [B, 128, 32, 32] → [B, 256, 16, 16]
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.GroupNorm(32, 256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            # Block 5: [B, 256, 16, 16] → [B, 256, 8, 8]
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.GroupNorm(32, 256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-        )
+        layers: list[nn.Module] = []
+        in_channels = 1
+        for out_channels, kernel, pool, drop in SPATIAL_TRUNKS[trunk]:
+            layers += [
+                nn.Conv2d(in_channels, out_channels, kernel_size=kernel, padding=kernel // 2),
+                _group_norm(out_channels),
+                # In-place is a free memory saving normally, but under gradient
+                # checkpointing a ReLU that lands on a segment boundary has its
+                # output overwritten before the recompute reads it, which autograd
+                # reports as "a variable needed for gradient computation has been
+                # modified". Whether that happens depends on the module count
+                # lining up with the segment count, so do not rely on it.
+                nn.ReLU(inplace=not grad_checkpoint),
+            ]
+            if pool:
+                layers.append(nn.MaxPool2d(2))
+            if drop:
+                # Dropout2d, not Dropout: zeroing whole feature maps is what
+                # regularizes a convnet, since neighbouring pixels in one map are
+                # correlated enough that dropping them individually barely
+                # removes information. The module is built whatever the rate, so
+                # the layer indices — and therefore the state_dict keys — do not
+                # depend on whether dropout happens to be switched on.
+                layers.append(nn.Dropout2d(conv_dropout))
+            in_channels = out_channels
+        self.features = nn.Sequential(*layers)
 
         # A 4x4 grid keeps 16 regions per channel, which preserves the coarse
-        # stroke geometry that identifies a signer. Pooling all 64 positions into
+        # stroke geometry that identifies a signer. Pooling every position into
         # one channel mean would describe ink density instead of shape.
-        # 8 divides evenly by 4, so these are exact non-overlapping 2x2 windows.
         self.pool_grid = 4
         self.pool_avg = nn.AdaptiveAvgPool2d((self.pool_grid, self.pool_grid))
         self.pool_max = nn.AdaptiveMaxPool2d((self.pool_grid, self.pool_grid))
@@ -78,27 +127,102 @@ class SpatialSiamese(nn.Module):
         # Ink covers roughly 1% of the canvas, so averaging on its own dilutes the
         # stroke evidence against a background level that is nearly identical for
         # every signer. The max branch ignores that floor.
-        pooled_features = 2 * 256 * self.pool_grid * self.pool_grid   # 8192
+        pooled_features = 2 * in_channels * self.pool_grid * self.pool_grid
 
-        # One linear projection, no hidden ReLU. A ReLU here would confine every
-        # embedding to a single convex cone, capping angular spread and pushing
-        # discrimination into vector magnitude instead of direction.
-        self.embedding = nn.Sequential(
-            nn.Dropout(head_dropout),
-            nn.Linear(pooled_features, embedding_dim),
+        # The projection ends on a plain Linear, with or without the hidden
+        # layer. A ReLU on the *output* would confine every embedding to a single
+        # convex cone, capping angular spread and pushing discrimination into
+        # vector magnitude instead of direction. A ReLU on a hidden layer before
+        # it is fine — the final linear map can still reach the whole space.
+        head: list[nn.Module] = [nn.Dropout(head_dropout)]
+        if fc_hidden:
+            head += [
+                nn.Linear(pooled_features, fc_hidden),
+                nn.ReLU(inplace=True),
+                nn.Dropout(head_dropout),
+                nn.Linear(fc_hidden, embedding_dim),
+            ]
+        else:
+            head.append(nn.Linear(pooled_features, embedding_dim))
+        self.embedding = nn.Sequential(*head)
+
+    @classmethod
+    def from_state_dict(cls, state_dict, **overrides):
+        """
+        Rebuild the architecture a checkpoint was trained with, then load it.
+
+        Trunk width, embedding width and the presence of the FC hidden layer are
+        all readable off the saved parameter shapes, so a checkpoint carries its
+        own architecture and no caller has to remember which config produced it.
+        Without this, benchmarking an archived run means editing `config/` first,
+        and scoring a checkpoint against the wrong architecture is a silent
+        wrong number rather than an error.
+
+        `overrides` pass through to __init__ for the settings that leave no trace
+        in the parameters — the dropout rates, which are inert at eval time.
+        """
+        convs = sorted(
+            (int(key.split(".")[1]), tuple(value.shape))
+            for key, value in state_dict.items()
+            if key.startswith("features.") and key.endswith(".weight") and value.dim() == 4
         )
+        signature = tuple((shape[0], shape[2]) for _, shape in convs)
+
+        trunk = next(
+            (name for name, spec in SPATIAL_TRUNKS.items()
+             if tuple((channels, kernel) for channels, kernel, _, _ in spec) == signature),
+            None,
+        )
+        if trunk is None:
+            raise ValueError(
+                f"Checkpoint convolution signature {signature} matches no trunk in "
+                f"SPATIAL_TRUNKS. It was trained with an architecture this code no "
+                f"longer defines — re-add the trunk rather than scoring it as another."
+            )
+
+        # Head shapes: an FC-1024 variant carries a second Linear at index 4.
+        if "embedding.4.weight" in state_dict:
+            fc_hidden, embedding_dim = state_dict["embedding.4.weight"].shape[::-1]
+        elif "embedding.1.weight" in state_dict:
+            fc_hidden, embedding_dim = 0, state_dict["embedding.1.weight"].shape[0]
+        else:
+            # Pre-dating the Dropout-wrapped head, so the projection was a bare
+            # `embedding.weight`. Those checkpoints also pre-date the 4x4 pooling
+            # grid and the inverted preprocessing, so there is no version of this
+            # code they are valid under — say so instead of raising a KeyError.
+            raise ValueError(
+                "Checkpoint has no recognizable embedding head. It was saved before "
+                "the head became a Sequential, which also means before the 4x4 pooling "
+                "grid and the inverted preprocessing — it cannot be scored against "
+                "the current pipeline at all."
+            )
+
+        model = cls(embedding_dim=int(embedding_dim), trunk=trunk,
+                    fc_hidden=int(fc_hidden), **overrides)
+        model.load_state_dict(state_dict)
+        return model
 
     def encode(self, x):
         """
         Extract the raw (un-normalized) embedding from a single image.
-        Tensor flow: [B, 1, 256, 256] → [B, 256, 8, 8] → 2x [B, 256, 4, 4]
-                     → [B, 8192] → [B, 512].
+        Tensor flow (compact trunk at 155x220): [B, 1, 155, 220] → [B, 256, 4, 6]
+                     → 2x [B, 256, 4, 4] → [B, 8192] → [B, 512].
 
         Embeddings are NOT L2-normalized. Projecting onto the unit sphere makes
         CONTRASTIVE_MARGIN scale-free, which is tidier, but it measured slightly
         worse on held-out EER, so the raw projection stands. Do not assume ‖e‖ = 1.
         """
-        x = self.features(x)
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            # Trade compute for memory: store only the segment boundaries and
+            # recompute each segment during the backward pass. The arithmetic is
+            # unchanged — checkpointing restores the RNG state before recomputing,
+            # so dropout draws the same masks — which is what lets the wide trunk
+            # be compared against the compact one at the same batch size on a
+            # 4 GB card instead of at a batch size only it could afford.
+            x = checkpoint_sequential(self.features, self.grad_checkpoint, x,
+                                      use_reentrant=False)
+        else:
+            x = self.features(x)
         pooled = torch.cat(
             [torch.flatten(self.pool_avg(x), 1), torch.flatten(self.pool_max(x), 1)],
             dim=1,

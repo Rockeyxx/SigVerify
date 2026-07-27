@@ -5,6 +5,7 @@ import torch
 import torch.optim as optim
 
 from src.models.siamese import (
+    SPATIAL_TRUNKS,
     ContrastiveLoss,
     FusionEngine,
     SpatialSiamese,
@@ -45,6 +46,90 @@ class TestSpatialSiamese:
         model = SpatialSiamese()
         for module in model.modules():
             assert not isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d))
+
+
+class TestSpatialTrunks:
+    """
+    Test suite for the selectable convolutional trunks and the checkpoint-driven
+    architecture recovery that lets archived runs be re-scored without a config edit.
+    """
+
+    @pytest.mark.parametrize("trunk", sorted(SPATIAL_TRUNKS))
+    def test_every_trunk_encodes_at_the_real_input_size(self, trunk):
+        """Each trunk maps a 155x220 signature onto the configured embedding width."""
+        model = SpatialSiamese(embedding_dim=512, trunk=trunk).eval()
+        out = model.encode(torch.randn(2, 1, 155, 220))
+        assert out.shape == (2, 512)
+
+    def test_wide_trunk_matches_the_reference_channel_widths(self):
+        """The wide trunk is the Dey et al. 96/256/384/256 stack with an 11x11 stem."""
+        convs = [m for m in SpatialSiamese(trunk="wide").features
+                 if isinstance(m, torch.nn.Conv2d)]
+        assert [c.out_channels for c in convs] == [96, 256, 384, 256]
+        assert [c.kernel_size[0] for c in convs] == [11, 5, 3, 3]
+
+    def test_group_norm_divides_every_trunk_width(self):
+        """GroupNorm groups must divide the channel count, or construction throws."""
+        for trunk in SPATIAL_TRUNKS:
+            for module in SpatialSiamese(trunk=trunk).features:
+                if isinstance(module, torch.nn.GroupNorm):
+                    assert module.num_channels % module.num_groups == 0
+
+    def test_unknown_trunk_rejected(self):
+        """A typo'd trunk name fails loudly instead of silently falling back."""
+        with pytest.raises(ValueError, match="Unknown trunk"):
+            SpatialSiamese(trunk="signet")
+
+    def test_fc_hidden_inserts_one_layer_and_keeps_a_linear_output(self):
+        """
+        The FC head adds a hidden ReLU layer but must still END on a plain Linear —
+        a ReLU on the output would confine every embedding to one convex cone.
+        """
+        model = SpatialSiamese(embedding_dim=512, fc_hidden=1024)
+        linears = [m for m in model.embedding if isinstance(m, torch.nn.Linear)]
+        assert [l.out_features for l in linears] == [1024, 512]
+        assert isinstance(model.embedding[-1], torch.nn.Linear)
+
+    @pytest.mark.parametrize("trunk,fc_hidden,embedding_dim", [
+        ("compact", 0, 512),
+        ("compact", 0, 128),
+        ("wide", 0, 512),
+        ("wide", 1024, 512),
+    ])
+    def test_from_state_dict_recovers_the_architecture(self, trunk, fc_hidden, embedding_dim):
+        """A checkpoint carries its own architecture — no config lookup involved."""
+        original = SpatialSiamese(embedding_dim=embedding_dim, trunk=trunk,
+                                  fc_hidden=fc_hidden).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict()).eval()
+
+        assert restored.trunk == trunk
+        assert restored.fc_hidden == fc_hidden
+        assert restored.embedding_dim == embedding_dim
+
+        x = torch.randn(2, 1, 155, 220)
+        assert torch.allclose(original.encode(x), restored.encode(x))
+
+    def test_from_state_dict_rejects_an_unknown_architecture(self):
+        """
+        Weights from a trunk this code no longer defines must raise, not load
+        partially. A near-miss architecture would otherwise produce a plausible
+        EER that describes nothing.
+        """
+        state_dict = SpatialSiamese(trunk="compact").state_dict()
+        state_dict["features.0.weight"] = torch.randn(48, 1, 5, 5)   # 32 -> 48 filters
+        with pytest.raises(ValueError, match="matches no trunk"):
+            SpatialSiamese.from_state_dict(state_dict)
+
+    def test_dropout_rates_do_not_move_the_parameter_shapes(self):
+        """
+        Dropout is inert at eval time, so it must not change the state_dict —
+        otherwise a checkpoint could not be reloaded without knowing the rate
+        it happened to be trained with.
+        """
+        dry = SpatialSiamese(trunk="wide", conv_dropout=0.0, head_dropout=0.0)
+        wet = SpatialSiamese(trunk="wide", conv_dropout=0.3, head_dropout=0.5)
+        assert {k: v.shape for k, v in dry.state_dict().items()} == \
+               {k: v.shape for k, v in wet.state_dict().items()}
 
 
 class TestTemporalSiamese:
@@ -348,3 +433,39 @@ class TestWeightsSaveLoad:
         model2.load_state_dict(checkpoint["model_state_dict"])
         assert sum(p.numel() for p in model2.parameters()) == sum(p.numel() for p in model.parameters())
 
+
+
+class TestSpatialGradientCheckpointing:
+    """
+    Gradient checkpointing is a memory/compute trade, not a modelling change.
+    These tests hold it to that: same gradients, same parameters, same weights file.
+    """
+
+    def test_checkpointed_gradients_match_the_plain_backward(self):
+        """Recomputing the trunk must reproduce the gradients storing it produces."""
+        torch.manual_seed(0)
+        plain = SpatialSiamese(embedding_dim=64, trunk="wide")
+        checkpointed = SpatialSiamese(embedding_dim=64, trunk="wide", grad_checkpoint=4)
+        checkpointed.load_state_dict(plain.state_dict())
+
+        x = torch.randn(2, 1, 155, 220)
+        for model in (plain, checkpointed):
+            model.train()
+            model.encode(x).sum().backward()
+
+        for (name, a), (_, b) in zip(plain.named_parameters(),
+                                     checkpointed.named_parameters()):
+            assert torch.allclose(a.grad, b.grad, atol=1e-5), name
+
+    def test_checkpointing_leaves_no_trace_in_the_state_dict(self):
+        """A checkpointed run's weights load into a plain model and vice versa."""
+        saved = SpatialSiamese(trunk="wide", grad_checkpoint=4).state_dict()
+        restored = SpatialSiamese.from_state_dict(saved)
+        assert restored.grad_checkpoint == 0
+
+    def test_eval_mode_skips_checkpointing(self):
+        """Inference has no backward pass to save memory for, so it pays nothing."""
+        model = SpatialSiamese(embedding_dim=64, trunk="wide", grad_checkpoint=4).eval()
+        with torch.no_grad():
+            out = model.encode(torch.randn(2, 1, 155, 220))
+        assert out.shape == (2, 64)
