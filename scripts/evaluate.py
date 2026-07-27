@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
     ALPHA_GRID_STEP, TARGET_FAR, TARGET_FRR,
-    SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
+    TEMPORAL_EMBEDDING_DIM,
     TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
@@ -37,7 +37,7 @@ from src.data.dataset import (
     collate_temporal_pairs, generate_skilled_pairs, preprocess_image,
     writer_independent_split,
 )
-from src.data.parsers import merge_corpora, parse_dataset
+from src.data.parsers import merge_datasets, parse_dataset
 from src.models.siamese import SpatialSiamese, TemporalSiamese
 
 
@@ -258,9 +258,9 @@ def similarity_from_distance(distance):
     return 1.0 / (1.0 + distance)
 
 
-def build_eval_loader(corpus, writer_ids, branch, batch_size, num_workers, seed):
+def build_eval_loader(writer_samples, writer_ids, branch, batch_size, num_workers, seed):
     """Build a shuffle-free loader of skilled-forgery pairs over the given writers."""
-    subset = {w: corpus[w] for w in writer_ids}
+    subset = {w: writer_samples[w] for w in writer_ids}
     pairs, labels = generate_skilled_pairs(subset, seed=seed)
 
     if branch == "spatial":
@@ -347,21 +347,21 @@ def embed_samples(model, samples, branch, device, batch_size=BATCH_SIZE):
     return np.vstack(out).astype(np.float32)
 
 
-def embed_writers(model, corpus, writer_ids, branch, device, batch_size=BATCH_SIZE,
+def embed_writers(model, writer_samples, writer_ids, branch, device, batch_size=BATCH_SIZE,
                   desc="embedding"):
     """
     Embed every genuine and forged sample for each writer, once.
 
     Reference draws are then re-sampled from these arrays rather than re-running
     the encoder, so averaging over ten enrollment trials costs one forward pass
-    over the corpus instead of ten.
+    over the dataset instead of ten.
 
     Returns: {writer_id: {"genuine": [N, D], "forged": [M, D]}}
     """
     embedded = {}
 
     for writer in tqdm(sorted(writer_ids), desc=desc, leave=False):
-        record = corpus[writer]
+        record = writer_samples[writer]
         embedded[writer] = {
             "genuine": embed_samples(model, record.get("genuine", []), branch,
                                      device, batch_size),
@@ -518,16 +518,26 @@ def score_loader(model, dataloader, device, desc="scoring"):
 
 
 def load_branch_model(branch, weights_path, device):
-    """Instantiate the requested backbone and load its trained weights."""
+    """
+    Instantiate the requested backbone and load its trained weights.
+
+    The spatial architecture is read back out of the checkpoint rather than out
+    of `config/`, so an archived run trained with a different trunk or embedding
+    width still benchmarks correctly while config points at whatever is being
+    trained now. Scoring a checkpoint under the wrong architecture would either
+    raise a shape error or, worse, load a subset of the weights and report a
+    number that means nothing.
+    """
+    state_dict = torch.load(weights_path, map_location="cpu")
     if branch == "spatial":
-        model = SpatialSiamese(embedding_dim=SPATIAL_EMBEDDING_DIM)
+        model = SpatialSiamese.from_state_dict(state_dict)
     else:
         model = TemporalSiamese(
             hidden_size=TEMPORAL_HIDDEN_SIZE,
             num_layers=TEMPORAL_NUM_LAYERS,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
         )
-    model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+        model.load_state_dict(state_dict)
     return model.to(device).eval()
 
 
@@ -552,12 +562,12 @@ def parse_args(argv=None):
 
 def dataset_key(writer_id):
     """
-    Group a namespaced writer ID back to its source corpus.
+    Group a namespaced writer ID back to its source writer_samples.
 
-    A corpus that splits its writers by script or language keeps that middle
+    A writer_samples that splits its writers by script or language keeps that middle
     token — `bhsig_Bengali`, `bhsig_Hindi`, `sigcomp_Dutch` — because the
-    cross-script comparison is the interesting one; corpora with a bare numeric
-    writer ID collapse to the corpus name.
+    cross-script comparison is the interesting one; datasets with a bare numeric
+    writer ID collapse to the dataset name.
     """
     parts = writer_id.split("_")
     if len(parts) > 2 and not parts[1].isdigit():
@@ -565,11 +575,11 @@ def dataset_key(writer_id):
     return parts[0]
 
 
-def per_dataset_report(branch, model, corpus, test_ids, threshold, args, device):
+def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args, device):
     """
-    Report EER per source corpus at the validation-tuned threshold.
+    Report EER per source writer_samples at the validation-tuned threshold.
 
-    A pooled EER can hide a corpus the model handles badly by averaging it
+    A pooled EER can hide a dataset the model handles badly by averaging it
     against one it handles well. Training merges CEDAR (Latin), BHSig260
     (Bengali/Devanagari) and UTSig (Persian) into one model — this is the
     breakdown that shows whether it actually generalizes across scripts or
@@ -588,7 +598,7 @@ def per_dataset_report(branch, model, corpus, test_ids, threshold, args, device)
 
     breakdown = {}
     for name, writers in sorted(groups.items()):
-        loader = build_eval_loader(corpus, writers, branch, args.batch_size,
+        loader = build_eval_loader(writer_samples, writers, branch, args.batch_size,
                                    args.num_workers, args.seed)
         genuine, impostor = score_loader(model, loader, device, desc=f"{branch} · {name}")
         if len(genuine) == 0 or len(impostor) == 0:
@@ -604,7 +614,7 @@ def per_dataset_report(branch, model, corpus, test_ids, threshold, args, device)
     return breakdown
 
 
-def evaluate_branch(branch, weights_path, corpus, val_ids, test_ids, args, device):
+def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, args, device):
     """
     Score one branch: tune τ on validation, then report on the held-out test set.
 
@@ -612,9 +622,9 @@ def evaluate_branch(branch, weights_path, corpus, val_ids, test_ids, args, devic
     """
     model = load_branch_model(branch, weights_path, device)
 
-    val_loader = build_eval_loader(corpus, val_ids, branch, args.batch_size,
+    val_loader = build_eval_loader(writer_samples, val_ids, branch, args.batch_size,
                                    args.num_workers, args.seed)
-    test_loader = build_eval_loader(corpus, test_ids, branch, args.batch_size,
+    test_loader = build_eval_loader(writer_samples, test_ids, branch, args.batch_size,
                                     args.num_workers, args.seed)
 
     # τ is tuned on validation ONLY (AGENTS.md). Picking it on test would be
@@ -653,7 +663,7 @@ def evaluate_branch(branch, weights_path, corpus, val_ids, test_ids, args, devic
         # AGENTS.md: when the FAR target is missed, keeping FAR low outranks FRR.
         print(f"  FAR target ({TARGET_FAR*100:.0f}%) MISSED — raise τ to trade FRR for FAR.")
 
-    report["per_dataset"] = per_dataset_report(branch, model, corpus, test_ids,
+    report["per_dataset"] = per_dataset_report(branch, model, writer_samples, test_ids,
                                                threshold, args, device)
 
     return report, test_genuine, test_impostor
@@ -675,15 +685,15 @@ def main(argv=None):
     print(f"Hardware Device: {device}")
     print(f"Output directory: {args.output_dir}")
 
-    corpus = {}
+    writer_samples = {}
     for directory in args.data_dir:
-        merge_corpora(corpus, parse_dataset(directory))
+        merge_datasets(writer_samples, parse_dataset(directory))
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
               else SPATIAL_SPLIT_RATIOS)
     train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(corpus), *ratios, seed=args.seed)
+        sorted(writer_samples), *ratios, seed=args.seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.branch in ("spatial", "temporal"):
@@ -691,7 +701,7 @@ def main(argv=None):
                                    else args.temporal_weights)
         if not weights:
             raise ValueError(f"--weights is required for --branch {args.branch}")
-        report, _, _ = evaluate_branch(args.branch, weights, corpus,
+        report, _, _ = evaluate_branch(args.branch, weights, writer_samples,
                                        val_ids, test_ids, args, device)
         return report
 
@@ -700,9 +710,9 @@ def main(argv=None):
         raise ValueError("--branch fused requires --spatial-weights and --temporal-weights")
 
     spatial_report, spatial_genuine, spatial_impostor = evaluate_branch(
-        "spatial", args.spatial_weights, corpus, val_ids, test_ids, args, device)
+        "spatial", args.spatial_weights, writer_samples, val_ids, test_ids, args, device)
     temporal_report, temporal_genuine, temporal_impostor = evaluate_branch(
-        "temporal", args.temporal_weights, corpus, val_ids, test_ids, args, device)
+        "temporal", args.temporal_weights, writer_samples, val_ids, test_ids, args, device)
 
     # No writer has both an image and a trajectory yet, so the two score vectors
     # describe different pairs. Truncating to a common length lets α be swept,

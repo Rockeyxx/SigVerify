@@ -8,7 +8,7 @@ reading FAR/FRR at a fixed tau is what masked the P-001 accuracy failure.
 import numpy as np
 import pytest
 
-from scripts.benchmark import cohens_d, corpus_of, select_test_writers, separation_report
+from scripts.benchmark import cohens_d, dataset_of, select_test_writers, separation_report
 
 
 class TestCohensD:
@@ -93,23 +93,23 @@ class TestSeparationReport:
         assert np.isnan(r["cohens_d"])
 
 
-class TestCorpusOf:
+class TestDatasetOf:
     """Writer IDs carry a script or language only when it is worth splitting on."""
 
-    def test_language_scoped_corpora_keep_their_middle_token(self):
-        assert corpus_of("bhsig_Bengali_001") == "bhsig_Bengali"
-        assert corpus_of("sigcomp_Dutch_013") == "sigcomp_Dutch"
-        assert corpus_of("sigcomp_Chinese_011") == "sigcomp_Chinese"
+    def test_language_scoped_datasets_keep_their_middle_token(self):
+        assert dataset_of("bhsig_Bengali_001") == "bhsig_Bengali"
+        assert dataset_of("sigcomp_Dutch_013") == "sigcomp_Dutch"
+        assert dataset_of("sigcomp_Chinese_011") == "sigcomp_Chinese"
 
-    def test_numeric_writer_ids_collapse_to_the_corpus_name(self):
-        assert corpus_of("svc_11") == "svc"
-        assert corpus_of("cedar_7") == "cedar"
-        assert corpus_of("mobisig_3") == "mobisig"
+    def test_numeric_writer_ids_collapse_to_the_dataset_name(self):
+        assert dataset_of("svc_11") == "svc"
+        assert dataset_of("cedar_7") == "cedar"
+        assert dataset_of("mobisig_3") == "mobisig"
 
 
 class TestSelectTestWriters:
     """
-    Comparing two models whose corpus lists differ means scoring them on the
+    Comparing two models whose writer_samples lists differ means scoring them on the
     writers both held out — and refusing anything else.
     """
 

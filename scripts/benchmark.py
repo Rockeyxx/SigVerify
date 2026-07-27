@@ -47,7 +47,7 @@ from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               load_branch_model, score_pairs,
                               writer_dependent_scores)
 from src.data.dataset import writer_independent_split
-from src.data.parsers import merge_corpora, parse_dataset
+from src.data.parsers import merge_datasets, parse_dataset
 
 
 def cohens_d(impostor_distances, genuine_distances):
@@ -193,7 +193,7 @@ def parse_args(argv=None):
                              "S = 1/(1+d), so thresholds do not carry across")
     parser.add_argument("--writers", nargs="+", default=None,
                         help="Score only these writer IDs instead of the whole held-out "
-                             "split. For comparing two models trained on different corpus "
+                             "split. For comparing two models trained on different dataset "
                              "lists, whose splits therefore differ: pass the writers both "
                              "of them held out. Every ID given must be outside this run's "
                              "own training set, or the run is rejected")
@@ -211,7 +211,7 @@ def select_test_writers(requested, train_ids, val_ids, test_ids):
     """
     Narrow the held-out split to an explicit writer list.
 
-    Two temporal models trained on different corpus lists get different splits,
+    Two temporal models trained on different dataset lists get different splits,
     because the partition is derived from whichever writers were loaded. Their
     reported EERs are then not comparable — SVC2004 scored 29.62% on one run's
     10 test writers and 16.92% on another's 13, and only 5 writers were common
@@ -225,7 +225,7 @@ def select_test_writers(requested, train_ids, val_ids, test_ids):
 
     unknown = [w for w in requested if w not in known]
     if unknown:
-        raise ValueError(f"Unknown writer IDs, not present in this corpus: {unknown}")
+        raise ValueError(f"Unknown writer IDs, not present in this dataset: {unknown}")
 
     leaked = [w for w in requested if w in set(train_ids)]
     if leaked:
@@ -246,15 +246,15 @@ def main(argv=None):
     print(f"Benchmark branch: {args.branch}")
     print(f"Hardware device: {device}")
 
-    corpus = {}
+    writer_samples = {}
     for directory in args.data_dir:
-        merge_corpora(corpus, parse_dataset(directory))
+        merge_datasets(writer_samples, parse_dataset(directory))
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
               else SPATIAL_SPLIT_RATIOS)
     train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(corpus), *ratios, seed=args.seed)
+        sorted(writer_samples), *ratios, seed=args.seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.writers:
@@ -264,9 +264,9 @@ def main(argv=None):
     model = load_branch_model(args.branch, args.weights, device)
 
     if args.enroll:
-        scores, labels, spread = enrolled_scores(args, corpus, test_ids, model, device)
+        scores, labels, spread = enrolled_scores(args, writer_samples, test_ids, model, device)
     else:
-        loader = build_eval_loader(corpus, test_ids, args.branch, args.batch_size,
+        loader = build_eval_loader(writer_samples, test_ids, args.branch, args.batch_size,
                                    args.num_workers, args.seed)
         loader = _limit_pairs(loader, args.limit_pairs, args.seed)
         print(f"Scoring {len(loader.dataset)} pairs from {len(test_ids)} held-out test writers")
@@ -275,17 +275,17 @@ def main(argv=None):
     report = separation_report(scores, labels, margin=args.margin)
     print_separation_report(args.branch, report)
 
-    per_corpus = per_corpus_report(args, corpus, test_ids, model, device)
-    return {**report, "per_corpus": per_corpus}
+    per_dataset = per_dataset_report(args, writer_samples, test_ids, model, device)
+    return {**report, "per_dataset": per_dataset}
 
 
-def enrolled_scores(args, corpus, writer_ids, model, device, desc="benchmark"):
+def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="benchmark"):
     """
     Score `writer_ids` under the enrollment protocol, averaged over reference draws.
 
     Every sample is embedded once, then each trial re-draws which K genuines act
     as the enrolled references. That makes T trials cost one forward pass over
-    the corpus rather than T, and it is the same averaging the SVC2004
+    the dataset rather than T, and it is the same averaging the SVC2004
     competition ran ("multiple sets of five genuine signatures each").
 
     The returned (scores, labels) come from the **median-EER** trial, so the
@@ -295,7 +295,7 @@ def enrolled_scores(args, corpus, writer_ids, model, device, desc="benchmark"):
 
     Returns: (scores, labels, spread) where spread is a numpy array of per-trial EERs.
     """
-    embedded = embed_writers(model, corpus, writer_ids, args.branch, device,
+    embedded = embed_writers(model, writer_samples, writer_ids, args.branch, device,
                              args.batch_size, desc=f"{args.branch} · {desc} · embedding")
 
     scoreable = enrolled_writer_count(embedded, args.enroll)
@@ -327,14 +327,14 @@ def enrolled_scores(args, corpus, writer_ids, model, device, desc="benchmark"):
     return scores, labels, spread
 
 
-def corpus_of(writer_id):
+def dataset_of(writer_id):
     """
-    Map a namespaced writer ID back to the corpus it came from.
+    Map a namespaced writer ID back to the dataset it came from.
 
-    A corpus that splits its writers by script or language keeps that middle
+    A writer_samples that splits its writers by script or language keeps that middle
     token — `bhsig_Bengali`, `sigcomp_Dutch` — because the cross-script gap is
     the interesting comparison and pooling it away is exactly the mistake the
-    per-corpus breakdown exists to prevent. Corpora with a bare numeric writer
+    per-dataset breakdown exists to prevent. Datasets with a bare numeric writer
     ID (`svc_11`, `cedar_7`) collapse to the prefix.
     """
     parts = writer_id.split("_")
@@ -343,33 +343,33 @@ def corpus_of(writer_id):
     return parts[0]
 
 
-def per_corpus_report(args, corpus, test_ids, model, device):
+def per_dataset_report(args, writer_samples, test_ids, model, device):
     """
-    Break the pooled EER down by source corpus.
+    Break the pooled EER down by source writer_samples.
 
     A single averaged number is the wrong summary when the goal is one model
-    that works across capture devices and scripts: it hides a corpus the model
+    that works across capture devices and scripts: it hides a dataset the model
     handles badly behind one it handles well. On the spatial branch a pooled
     19% concealed CEDAR at 3.4% alongside UTSig at 36%.
     """
     groups = {}
     for writer in test_ids:
-        groups.setdefault(corpus_of(writer), []).append(writer)
+        groups.setdefault(dataset_of(writer), []).append(writer)
 
     if len(groups) < 2:
         return {}
 
     print(f"\n{'=' * 50}")
-    print(f"PER-CORPUS BREAKDOWN — {args.branch}")
+    print(f"PER-DATASET BREAKDOWN — {args.branch}")
     print("=" * 50)
 
     breakdown = {}
     for name, writers in sorted(groups.items()):
         if args.enroll:
-            scores, labels, _ = enrolled_scores(args, corpus, writers, model, device,
+            scores, labels, _ = enrolled_scores(args, writer_samples, writers, model, device,
                                                 desc=name)
         else:
-            loader = build_eval_loader(corpus, writers, args.branch, args.batch_size,
+            loader = build_eval_loader(writer_samples, writers, args.branch, args.batch_size,
                                        args.num_workers, args.seed)
             loader = _limit_pairs(loader, args.limit_pairs, args.seed)
             scores, labels = score_pairs(model, loader, device,

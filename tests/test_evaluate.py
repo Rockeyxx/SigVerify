@@ -131,7 +131,7 @@ class TestEnrolledTrialScores:
         scores, labels = enrolled_trial_scores(embedded, num_references=5, seed=42)
         assert len(scores) == 0
 
-    def test_empty_corpus_returns_empty_arrays(self):
+    def test_empty_dataset_returns_empty_arrays(self):
         scores, labels = enrolled_trial_scores({}, num_references=5, seed=42)
         assert len(scores) == 0 and len(labels) == 0
 

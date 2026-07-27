@@ -296,7 +296,7 @@ class TestWriterDependentClassifier:
         assert set(labels.tolist()) == {0, 1}
         assert scores[labels == 1].mean() > scores[labels == 0].mean()
 
-    def test_single_writer_corpus_is_skipped(self):
+    def test_single_writer_dataset_is_skipped(self):
         """With no other writers there are no random-forgery negatives to fit on."""
         embedded = {"w1": _embedded_writer(np.zeros((9, 4)), np.ones((4, 4)))}
 
