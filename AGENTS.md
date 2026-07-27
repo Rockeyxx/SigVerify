@@ -45,8 +45,33 @@ them, even if they appear in the literature review or older drafts:
 
 ### Spatial Branch (Offline)
 
-- Input tensor: **`[1, 1, 256, 256]`** (8-bit grayscale)
-- Backbone: **Siamese CNN** → **512-d** embedding
+- Input tensor: **`[1, 1, 155, 220]`** (8-bit grayscale), resized **directly** onto
+  the target — no square pad. Measured 2026-07-26: this beat the previous
+  `[1, 1, 256, 256]` square-padded geometry on **every** dataset (utsig −3.38,
+  pooled −1.41 EER points) and trains about twice as fast. BHSig260's ribbons are
+  roughly 1:3.5, so square padding left ~70% of the canvas blank and cost more
+  stroke resolution than the aspect distortion costs. `SPATIAL_SQUARE_PAD` in
+  `config/settings.py` keeps both paths available for re-measurement.
+- Pixel polarity: **inverted — background 0, ink high.** Measured: CEDAR
+  4.86% → 0.00% EER. Ink covers ~1% of the canvas, so an un-inverted image feeds
+  every convolution a large constant offset carrying no identity signal.
+- Backbone: **Siamese CNN** → **512-d** embedding. The *model type* is fixed;
+  the embedding width is a tunable measured on held-out EER. Changing it is also
+  a **database contract change** — 512-d stores as 2048 bytes, 128-d as 512 —
+  so it requires re-enrolling every stored template.
+- Trunk width is a **tunable**, the model class is not. `SPATIAL_TRUNKS` in
+  `src/models/siamese.py` holds the convolutional stacks (`compact` is this
+  project's 32-64-128-256-256; `wide` is the Dey et al. reference's 96×11×11 stem
+  into 256, 384, 256). Selecting one is still a Siamese CNN with contrastive
+  loss, so it is inside the architecture constraint. Run trunk, dropout and FC
+  head as **separate** runs — bundled, their attribution is lost.
+- **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
+  recovers trunk, embedding width and FC head from the saved parameter shapes,
+  and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
+  through it. Never add a load path that builds the model from `config/` instead:
+  config points at whatever is being trained *now*, and scoring an archived
+  checkpoint under the wrong architecture yields a plausible number that means
+  nothing.
 - Normalization: **GroupNorm or LayerNorm** — never BatchNorm (pair-sampled batches)
 - Quality gate: effective-resolution proxies (bounding-box pixel size +
   Laplacian-variance sharpness). Do **not** gate on the file's DPI tag
@@ -72,7 +97,7 @@ them, even if they appear in the literature review or older drafts:
 
 A signature pad emits more channels than the model accepts. Tablets typically
 report **7**: `X, Y, timestamp, button/contact, azimuth, altitude, pressure` —
-the same shape as SVC2004 Task2, which is why Task2 is the corpus that matches
+the same shape as SVC2004 Task2, which is why Task2 is the dataset that matches
 the deployment device.
 
 The target device is an **XPPen Deco 640**, which reports position and pressure
@@ -206,19 +231,19 @@ Scopes: models, data, database, capture, gui, config, scripts
 - If FAR target is missed, **prioritize keeping FAR low** over FRR
 - Label fused EER as **provisional** until in-house multimodal data exists
 - **Never report a pooled temporal EER on its own.** SVC2004 and SigComp2011 are
-  both pen-tablet corpora, and one training run scores 29.62% on the first and
+  both pen-tablet datasets, and one training run scores 29.62% on the first and
   10.92% on the second. A pooled figure averages those into a number that
   describes neither. Same rule the spatial branch already follows for UTSig.
 
-### Merging a New Online Corpus
+### Merging a New Online Dataset
 
-Before a new online corpus is merged with SVC2004, **measure** these against it
-and align inside that corpus's loader, not in the model:
+Before a new online dataset is merged with SVC2004, **measure** these against it
+and align inside that dataset's loader, not in the model:
 
 | property | SVC2004 Task2 | why it matters |
 |---|---|---|
-| sample rate | 100 Hz (timestamp steps 10 ms) | The model derives `(dX, dY, dP)` from consecutive frames, so a 200 Hz corpus reports half the delta for the same pen speed |
-| pen-up samples | none — 0 of 100,494 points have `P = 0` | A corpus that records in-air travel gives the pressure channel a second meaning |
+| sample rate | 100 Hz (timestamp steps 10 ms) | The model derives `(dX, dY, dP)` from consecutive frames, so a 200 Hz dataset reports half the delta for the same pen speed |
+| pen-up samples | none — 0 of 100,494 points have `P = 0` | A dataset that records in-air travel gives the pressure channel a second meaning |
 | pressure scale | 0–1023 device units | A per-file max would make a light signature look heavy |
 
 This is not hypothetical bookkeeping. Merging SVC2004 Task1 into Task2 without
@@ -233,7 +258,7 @@ results are reported. The tasks share filenames, writer count, and split seed,
 so the only variable between the runs is the pressure channel — which makes the
 difference in EER a direct measurement of what pressure contributes.
 
-| Run | Corpus | Channel 3 | Pressure dropout | Role |
+| Run | Dataset | Channel 3 | Pressure dropout | Role |
 |---|---|---|---|---|
 | **A — baseline** | `data/svc2004_task1` | `P = 1.0` imputed (4-col source) | Disabled — it is a no-op when every P is already 1.0 | Pressure-blind control. Also the honest lower bound for any device that reports no pressure |
 | **B — headline** | `data/svc2004_task2` | Real pressure, scaled to `[0, 1]` (7-col source) | **Active at `PRESSURE_DROPOUT_RATE`** | The shipped temporal model — matches the capture device's channel set |
