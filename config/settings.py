@@ -106,7 +106,14 @@ SPATIAL_HEAD_DROPOUT = 0.0
 # These are training-time settings only. Benchmarking and inference recover the
 # architecture from the checkpoint itself via `SpatialSiamese.from_state_dict`,
 # so changing them here can never mis-score an existing weights file.
-SPATIAL_TRUNK = "compact"
+# Measured 2026-07-28 as three separate arms, all at --enroll 5 on the same 65
+# held-out writers: "wide" alone reached 11.78% pooled against "compact"'s
+# 12.31% (utsig 33.76% → 30.41%), and is what ships. Adding the reference's
+# dropout cost 6.78 points and adding its FC-1024 head on top collapsed the
+# model. Leave the next two at 0: at 301 training writers the failure is data
+# scarcity, not excess capacity, so regularizing removes capacity the model
+# needs. Dey et al. can afford it because they train on GPDS300.
+SPATIAL_TRUNK = "wide"
 SPATIAL_CONV_DROPOUT = 0.0
 SPATIAL_FC_HIDDEN = 0
 
@@ -116,7 +123,7 @@ SPATIAL_FC_HIDDEN = 0
 # batch 32 and does not need it; the wide trunk needs 4 segments to fit the same
 # batch on a 4 GB card, which it must, since batch size sets how many impostors
 # hard-negative mining has to choose from.
-SPATIAL_GRAD_CHECKPOINT = 0
+SPATIAL_GRAD_CHECKPOINT = 4
 
 # Writer-independent split ratios (train, val, test).
 # The image datasets have 430 writers between them, so 70/15/15 still leaves 65

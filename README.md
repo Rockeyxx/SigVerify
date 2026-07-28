@@ -48,6 +48,13 @@ A multimodal biometric verification system that authenticates handwritten signat
 
 ---
 
+## Input Specifications
+
+- **Spatial (offline):** any image format (JPG, PNG, etc.); app resizes to 155×220, inverts, normalizes internally.
+- **Temporal (online):** trajectory at 100 Hz with X, Y, Pressure channels; app z-scores X/Y per signature and scales pressure to [0.0, 1.0].
+
+---
+
 ## Features
 
 - **Dual-modality verification** — offline image analysis + online pen-trajectory analysis
@@ -484,13 +491,23 @@ own tables:
 | --- | --- | --- |
 | input | 155×220, inverted, ÷ std | 155×220, inverted, ÷ 255 |
 | pairs per writer | 276 genuine + 276 forged | 276 + 276 |
-| conv stack | 96×11×11 → 256×5×5 → 384×3×3 → 256×3×3 | 32×5×5 → 64 → 128 → 256 → 256 |
+| conv stack | 96×11×11 → 256×5×5 → 384×3×3 → 256×3×3 | 32×5×5 → 64 → 128 → 256 → 256 (their stack is selectable, measured below) |
 | normalization | local response norm | GroupNorm |
 | head | FC-1024 (dropout 0.5) → FC-128 | 4×4 avg+max pool (8192) → FC-512 |
 | dropout | 0.3 after pools 2 and 4, 0.5 after FC1 | none |
 | optimizer | RMSprop 1e-4, momentum 0.9, wd 5e-4 | Adam 1e-3, wd 1e-4 |
 | batch / epochs | 128 / 20 | 32 / early-stopped |
 | loss | contrastive, margin 1 | contrastive, margin 1 + hard-negative mining |
+
+The reference trunk was measured against ours as three separate arms, and only
+the first paid off: the wide stack alone reached 11.78% pooled EER against the
+compact stack's 12.31% (UTSig −3.35), while adding their dropout schedule cost
+6.78 points and adding their FC-1024 head on top of it collapsed the model
+outright. At 301 training writers the failure mode is data scarcity rather than
+excess capacity, so the regularization Dey et al. need at GPDS300 scale removes
+capacity this project cannot spare. The compact stack stays shipped: 0.53 points
+does not pay for roughly 11× the training compute. Full table in
+`docs/SOLUTIONS.md`.
 
 **No published Siamese system reaches 95% accuracy on all of these datasets.**
 SigNet's own GPDS300 result is 76.83% (23.17% EER) and its Bengali result 86.11%.

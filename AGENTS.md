@@ -65,6 +65,15 @@ them, even if they appear in the literature review or older drafts:
   into 256, 384, 256). Selecting one is still a Siamese CNN with contrastive
   loss, so it is inside the architecture constraint. Run trunk, dropout and FC
   head as **separate** runs — bundled, their attribution is lost.
+- **Measured 2026-07-28, all three arms.** `wide` alone reached 11.78% pooled
+  against `compact`'s 12.31% (utsig −3.35, its first movement in five changes).
+  Adding Dey's dropout cost 6.78 points, and adding their FC-1024 head on top of
+  that collapsed the model to one embedding before it partly recovered. **Do not
+  set `SPATIAL_CONV_DROPOUT` or `SPATIAL_FC_HIDDEN` without a new reason** — at
+  301 writers the failure is data scarcity, not excess capacity, so regularizing
+  removes capacity the model needs. `compact` remains shipped: 0.53 points does
+  not pay for ~11× the training compute plus mandatory gradient checkpointing.
+  Full table in `docs/SOLUTIONS.md`.
 - **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
