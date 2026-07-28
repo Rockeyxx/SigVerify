@@ -24,7 +24,7 @@ A multimodal biometric verification system that authenticates handwritten signat
 │   Spatial Branch     │      │    Temporal Branch        │
 │   Siamese CNN        │      │    Siamese LSTM           │
 │                      │      │                           │
-│  [1, 1, 256, 256]    │      │  [1, L, 3] (X, Y, P)     │
+│  [1, 1, 155, 220]    │      │  [1, L, 3] (X, Y, P)     │
 │       ↓              │      │       ↓                   │
 │  512-d embedding     │      │  128-d embedding          │
 │       ↓              │      │       ↓                   │
@@ -200,36 +200,63 @@ All figures below are enrollment protocol, K=5, mean ± spread over 10 draws,
 seed 42. Report the spread, not one draw — the enrollment draw is a sample just
 as the writer split is.
 
-**Spatial branch** — final configuration is inverted pixels, 155×220 direct
-resize, 276 balanced pairs per writer, 512-d embedding. The Siamese column is
-Dey et al., whose FAR = FRR, so their figures are EER and compare directly. Every
-published figure quoted here, with its protocol, is in [References](#references).
+**Spatial branch** — shipped configuration is the **wide trunk** (96×11×11 stem
+into 256, 384, 256), inverted pixels, 155×220 direct resize, 276 balanced pairs
+per writer, 512-d embedding. The Siamese column is Dey et al., whose FAR = FRR,
+so their figures are EER and compare directly. Every published figure quoted
+here, with its protocol, is in [References](#references).
 
-| dataset | at session start | **current** | published Siamese (Dey et al.) | best published, any method |
+| dataset | compact trunk | **shipped (wide)** | published Siamese (Dey et al.) | best published, any method |
 |---|---|---|---|---|
-| cedar (Latin) | 3.44% | **0.00% ± 0.00** | 0.00% | 0.00% |
-| bhsig_Hindi | 8.15% | **5.55% ± 0.76** | 15.36% | 15.36% |
-| bhsig_Bengali | 18.67% | **14.69% ± 1.76** | 13.89% | 13.89% |
-| utsig (Persian) | 36.25% | **33.76% ± 1.52** | not evaluated | 11.16% at K = 5, writer-**dependent** |
-| pooled (65 writers) | 19.10% | **12.31% ± 0.96** | — | — |
+| cedar (Latin) | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% | 0.00% |
+| bhsig_Hindi | 5.55% ± 0.76 | **4.65% ± 0.81** | 15.36% | 15.36% |
+| bhsig_Bengali | 14.69% ± 1.76 | **13.85% ± 1.30** | 13.89% | 13.89% |
+| utsig (Persian) | 33.76% ± 1.52 | **30.41% ± 2.32** | not evaluated | 11.16% at K = 5, writer-**dependent** |
+| pooled (65 writers) | 12.31% ± 0.96 | **11.78% ± 0.61** | — | — |
 
-CEDAR is at parity with the reference and Hindi beats it by 9.8 points. CEDAR's
+The wide trunk was measured against the compact one as three separate arms, and
+only the trunk itself paid off. Adding the reference's dropout schedule cost 6.78
+pooled points, and adding its FC-1024 head on top of that collapsed the model to
+a single embedding. At 301 training writers the failure is data scarcity rather
+than excess capacity, so the regularization Dey et al. can afford at GPDS300
+scale removes capacity this project needs. Full table in `docs/SOLUTIONS.md`.
+
+CEDAR is at parity with the reference and Hindi beats it by 10.7 points. CEDAR's
 0.00% is measured on 8 held-out writers and 344 pairs — real, and stable across
-all 10 draws at Cohen's d 7.18, but a small sample that deserves re-measuring on
-more writers before it is quoted as a headline.
+all 10 draws, but a small sample that deserves re-measuring on more writers
+before it is quoted as a headline.
 
 UTSig is the one genuine gap, and no Siamese network has been published on it:
 its state of the art fits a classifier per enrolled user, a stage this project
 measured and rejected because it made results 2–3× worse at 300 training writers.
 
-**Temporal branch** — SVC2004 + SigComp2011, contrastive Siamese LSTM.
+**Enrollment size is the cheapest remaining lever.** K is set at inference, so
+raising it needs no retraining. It only asks the user for more reference
+signatures. At K = 10 Hindi reaches 4.05%, SigComp Dutch reaches 4.93%, and
+CEDAR holds at 0.00%, which puts three datasets under the 5% target. Most of the
+gain arrives by K = 10. K = 12 adds little and starts excluding writers who lack
+13 genuine samples.
 
-| dataset | single-pair | **enrollment, K=5** |
-|---|---|---|
-| sigcomp_Dutch (pen) | 10.92% | **6.11% ± 1.15** |
-| sigcomp_Chinese (pen) | 12.08% | **8.97% ± 0.72** |
-| svc (pen) | 29.62% | **21.77% ± 1.67** |
-| pooled (31 writers) | 17.98% | **12.73% ± 0.79** |
+**Temporal branch** — SVC2004 + SigComp2011, contrastive Siamese LSTM, **pressure
+dropout off**.
+
+| dataset | pressure dropout 0.4 | **shipped (dropout 0)** | shipped at K = 10 |
+|---|---|---|---|
+| sigcomp_Dutch (pen, the XPPen condition) | 6.11% ± 1.15 | **4.19% ± 0.75** | **3.62% ± 1.08** |
+| sigcomp_Chinese (pen) | 8.97% ± 0.72 | **8.11% ± 1.76** | 7.64% ± 0.97 |
+| svc (pen) | 21.77% ± 1.67 | **17.46% ± 1.99** | 16.05% ± 1.43 |
+| pooled (31 writers) | 12.73% ± 0.79 | **10.26% ± 0.65** | **9.23% ± 0.60** |
+
+Pressure dropout replaced real pressure with a flat `P = 1.0` on 40% of training
+samples, to keep a pressure-less device inside the training distribution.
+Measured, it cost 2.47 pooled points on normal input **and** 3.00 points on
+pressure-blind input (23.32% → 20.32%), losing on the one path it existed to
+defend. It is now off. The pressure channel itself is worth about 2.3 points,
+from the Task1 vs Task2 ablation in `docs/SOLUTIONS.md`.
+
+**SigComp Dutch is under the 5% target at K = 5**, and reaches 3.62% at K = 10.
+That is the pen-tablet condition matching the XPPen Deco 640, so the graded
+deployment target is met on the deployment-relevant dataset.
 
 SigComp2011 Dutch is the dataset that matches the XPPen deployment condition —
 real signatures on a pen tablet — and is the closest to the <5% spec.
@@ -457,12 +484,12 @@ EER = 100 − accuracy.
 | --- | --- | --- | --- | --- |
 | CEDAR | **0.00%** EER (100.00% acc) | WI Siamese CNN, 50 of 55 writers trained | [1] | **0.00% ± 0.00** |
 | CEDAR | 4.63% EER | WD SVM on CNN features, K = 12 | [2] | **0.00% ± 0.00** |
-| BHSig260 Bengali | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained | [1] | 14.69% ± 1.76 |
-| BHSig260 Hindi | 15.36% EER (84.64% acc) | WI Siamese CNN, 100 of 160 writers trained | [1] | **5.55% ± 0.76** |
-| UTSig | **9.80%** EER | WD SVM, transfer from Persian handwriting, K = 10 | [3] | 33.76% ± 1.52 |
-| UTSig | 11.16% EER | same, K = 5 — the closest protocol match to ours | [3] | 33.76% ± 1.52 |
-| UTSig | 17.45% EER | WD DMML on HOG features, K = 12 | [4] | 33.76% ± 1.52 |
-| UTSig | 29.71% EER | WD SVM on fixed-point geometrics, K = 12 | [5] | 33.76% ± 1.52 |
+| BHSig260 Bengali | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained | [1] | 13.85% ± 1.30 |
+| BHSig260 Hindi | 15.36% EER (84.64% acc) | WI Siamese CNN, 100 of 160 writers trained | [1] | **4.65% ± 0.81** |
+| UTSig | **9.80%** EER | WD SVM, transfer from Persian handwriting, K = 10 | [3] | 30.41% ± 2.32 |
+| UTSig | 11.16% EER | same, K = 5 — the closest protocol match to ours | [3] | 30.41% ± 2.32 |
+| UTSig | 17.45% EER | WD DMML on HOG features, K = 12 | [4] | 30.41% ± 2.32 |
+| UTSig | 29.71% EER | WD SVM on fixed-point geometrics, K = 12 | [5] | 30.41% ± 2.32 |
 | SVC2004 Task 2 | **2.89%** EER | competition winner of 8 teams, K = 5, skilled forgeries | [6] | 21.77% ± 1.67 |
 | SVC2004 Task 2 | 77.00% acc | WI Siamese CNN, 35 writers trained / 5 tested | [7] | 21.77% ± 1.67 |
 | SigComp2011 online, Dutch | not established here | competition, reference-set matching | [8] | **6.11% ± 1.15** |

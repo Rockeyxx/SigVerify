@@ -123,6 +123,10 @@ def parse_args(argv=None):
     parser.add_argument("--weights-name", type=str, default=None,
                         help="Filename for the saved weights, so an ablation run "
                              "cannot overwrite the shipped spatial_cnn.pth")
+    parser.add_argument("--pressure-dropout", type=float, default=None,
+                        help="Override PRESSURE_DROPOUT_RATE for this run (temporal "
+                             "branch only). A Task1 dataset still forces 0, since "
+                             "there is no real pressure to drop")
     return parser.parse_args(argv)
 
 
@@ -342,7 +346,8 @@ def main(argv=None):
         # Pressure-channel dropout only teaches robustness if real pressure exists
         # to drop. A Task1 (4-column) dataset has none, so the branch would train
         # permanently pressure-blind — surface that rather than let it pass silently.
-        pressure_dropout = PRESSURE_DROPOUT_RATE
+        pressure_dropout = (args.pressure_dropout if args.pressure_dropout is not None
+                            else PRESSURE_DROPOUT_RATE)
         has_pressure = True
         for directory in args.data_dir:
             if os.path.basename(os.path.normpath(directory)).lower().startswith("svc2004"):

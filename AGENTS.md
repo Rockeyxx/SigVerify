@@ -97,8 +97,13 @@ them, even if they appear in the literature review or older drafts:
   produced a collapsed model with train loss pinned at the theoretical
   no-discrimination value (see `docs/PROBLEMS_FACED.md` P-002)
 - Backbone: **Siamese LSTM** → **128-d** embedding
-- **Training:** pressure-channel dropout (~30–50% of samples replace real
-  pressure with `P = 1.0`)
+- **Training:** pressure-channel dropout is **off** (`PRESSURE_DROPOUT_RATE = 0`).
+  This rule previously mandated 30–50% and was **measured wrong on 2026-07-29**.
+  Dropout at 0.4 cost 2.47 pooled EER points on normal input (12.73% → 10.26%)
+  and, against its own justification, 3.00 points on pressure-blind input
+  (23.32% → 20.32%). It lost on both paths at once, so no robustness argument
+  survives. Re-enabling it requires a measurement that beats these numbers, not
+  an appeal to robustness.
 - **Inference:** if no pressure available, impute `P = 1.0` and set the
   degraded-mode flag in the GUI
 
@@ -276,6 +281,11 @@ Rules:
 
 - **Run B is the deployed model.** Run A exists to quantify the delta and to
   bound degraded-mode performance; it is never the shipped weights.
+- **Both runs were executed 2026-07-29** on the same 20/10/10 writer split,
+  seed 42, K=5: Run A (pressure-blind) **23.62% ± 2.18**, Run B (real pressure)
+  **21.32% ± 1.50**. Pressure is worth roughly 2.3 EER points, though on 10 test
+  writers that sits near one standard deviation — directionally consistent at
+  K=10 (22.02% vs 19.55%) but not a tight measurement.
 - Both runs use the **same `--seed`**, so the writer split is identical and the
   two EERs are directly comparable. A different seed invalidates the comparison.
 - Report both EERs side by side. Do **not** report only the better number.

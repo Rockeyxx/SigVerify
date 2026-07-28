@@ -68,7 +68,12 @@ TEMPORAL_INPUT_FEATURES = 3             # (X, Y, Pressure)
 TEMPORAL_EMBEDDING_DIM = 128
 TEMPORAL_HIDDEN_SIZE = 256
 TEMPORAL_NUM_LAYERS = 2
-PRESSURE_DROPOUT_RATE = 0.4             # Replace P with 1.0 for 40% of training samples
+# Measured 2026-07-29 and set to 0. Pressure dropout was meant to buy degraded-mode
+# robustness by training on flat P for a share of samples. It bought the opposite:
+# at 0.4 it cost 2.47 pooled EER points on normal input (12.73% → 10.26%) *and* 3.00
+# points on pressure-blind input (23.32% → 20.32%). It lost on both paths at once.
+# Raising it again needs a measurement, not an argument from robustness.
+PRESSURE_DROPOUT_RATE = 0.0
 PRESSURE_IMPUTATION_VALUE = 1.0
 
 # ─── Pair Generation ─────────────────────────────────────────────────
