@@ -28,7 +28,6 @@ from config.settings import (
     ALPHA_DEFAULT,
     DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
-    SPATIAL_EMBEDDING_DIM,
     TEMPORAL_EMBEDDING_DIM,
     TEMPORAL_HIDDEN_SIZE,
     TEMPORAL_NUM_LAYERS,
@@ -53,18 +52,24 @@ def load_model(branch, weights_path, device="cpu"):
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights not found: {weights_path}")
 
+    state_dict = torch.load(weights_path, map_location="cpu")
+
     if branch == "spatial":
-        model = SpatialSiamese(embedding_dim=SPATIAL_EMBEDDING_DIM)
+        # Architecture comes from the checkpoint, not from config: a deployed
+        # weights file outlives the config that trained it, and an embedding
+        # whose width silently disagreed with the enrolled templates would be
+        # unrecoverable once encrypted into the database.
+        model = SpatialSiamese.from_state_dict(state_dict)
     elif branch == "temporal":
         model = TemporalSiamese(
             hidden_size=TEMPORAL_HIDDEN_SIZE,
             num_layers=TEMPORAL_NUM_LAYERS,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
         )
+        model.load_state_dict(state_dict)
     else:
         raise ValueError(f"Unknown branch '{branch}' — expected 'spatial' or 'temporal'")
 
-    model.load_state_dict(torch.load(weights_path, map_location="cpu"))
     return model.to(device).eval()
 
 

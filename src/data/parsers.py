@@ -2,12 +2,12 @@
 Real-Dataset Parsers — Signature Verification System
 
 Each parser returns the same shape, so downstream code never branches on which
-corpus it is looking at:
+writer_samples it is looking at:
 
     {writer_id: {"genuine": [...], "forged": [...]}}
 
 Writer IDs are namespaced (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
-so several corpora can be merged into one writer-independent split without two
+so several datasets can be merged into one writer-independent split without two
 different people colliding on the same integer.
 
 Spatial parsers yield file paths (images are loaded lazily by the Dataset).
@@ -15,6 +15,7 @@ Temporal parsers yield [L, 3] float32 arrays — trajectories are small enough
 to hold in memory, and eager loading keeps the collate path simple.
 """
 
+import csv
 import os
 import re
 
@@ -25,7 +26,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
     CEDAR_DIR,
+    MOBISIG_DIR,
     PRESSURE_IMPUTATION_VALUE,
+    SIGCOMP2011_DIR,
     SVC2004_DIR,
     UTSIG_DIR,
 )
@@ -35,10 +38,26 @@ from config.settings import (
 # across signatures — a light signature must stay light.
 SVC_PRESSURE_MAX = 1023.0
 
+# SigComp2011 was captured on a WACOM Intuos3, which reports pen force on the
+# same 0–1023 scale as the SVC2004 tablet. Kept as its own name so that a
+# future dataset on a different scale cannot silently inherit the wrong divisor.
+SIGCOMP_PRESSURE_MAX = 1023.0
+
+# SigComp2011 sampled at 200 Hz; SVC2004 sampled at 100 Hz (measured: its
+# timestamp column steps by 10 ms). The model derives its velocity channels from
+# consecutive-frame deltas, so at 200 Hz the *same* physical pen speed produces
+# half the delta. Keeping every second sample puts both datasets on one time base
+# rather than asking one encoder to read the velocity channel two ways.
+SIGCOMP_DECIMATION = 2
+
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _CEDAR_FORGED = re.compile(r"^forgeries_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _BHSIG_FILE = re.compile(r"^[BH]-S-(\d+)-([GF])-(\d+)\.tif$", re.IGNORECASE)
 _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
+# SIGN_GEN_USER7_USER7_3.csv  -> genuine, writer 7
+# SIGN_FOR_USER7_USER2_3.csv  -> forgery of writer 7, drawn by user 2
+_MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
+                           re.IGNORECASE)
 
 
 def _require_dir(path, label):
@@ -83,6 +102,28 @@ def normalize_trajectory(xy, pressure):
         pressure = np.clip(np.asarray(pressure, dtype=np.float32), 0.0, 1.0)
 
     return np.column_stack([xy, pressure]).astype(np.float32)
+
+
+def merge_datasets(target, incoming):
+    """
+    Merge one parsed writer_samples into another, appending samples per writer.
+
+    A plain `dict.update` would replace a writer's whole record when two datasets
+    use the same ID, silently discarding one of them. That is not hypothetical:
+    SVC2004 Task1 and Task2 are separate recordings of the same 40 signers, so
+    both parse to `svc_1`..`svc_40`, and updating would drop 1600 signatures
+    without a word.
+
+    Writer IDs stay namespaced per writer_samples (`cedar_7`, `mobisig_3`), so an ID
+    collision means the same person, and appending is the correct reading.
+
+    Returns `target`, mutated in place, so calls can be chained.
+    """
+    for writer_id, record in incoming.items():
+        existing = target.setdefault(writer_id, _new_writer())
+        existing["genuine"].extend(record["genuine"])
+        existing["forged"].extend(record["forged"])
+    return target
 
 
 def parse_dataset(path):
@@ -280,6 +321,248 @@ def parse_svc2004(root=SVC2004_DIR):
     return writers
 
 
+def load_mobisig_file(path):
+    """
+    Load one MOBISIG CSV into the model's [L, 3] input.
+
+    The file carries 13 columns, including velocity, accelerometer and gyroscope
+    channels. Only x, y and pressure are read: the capture contract is three
+    channels, and the model derives its own dynamics from them.
+    """
+    xs, ys, ps = [], [], []
+    with open(path, newline="") as handle:
+        for row in csv.DictReader(handle):
+            xs.append(float(row["x"]))
+            ys.append(float(row["y"]))
+            ps.append(float(row["pressure"]))
+
+    # MOBISIG pressure already arrives in [0, 1]; normalize_trajectory clips it.
+    return normalize_trajectory(np.column_stack([xs, ys]), np.asarray(ps))
+
+
+def parse_mobisig(root=MOBISIG_DIR):
+    """
+    Parse MOBISIG: `USER{n}/SIGN_{GEN,FOR}_USER{owner}_USER{signer}_{k}.csv`.
+
+    83 users x 45 genuine + 20 skilled forgeries. A forgery filename names two
+    users: the one being imitated and the one who drew it. The signature belongs
+    to the **owner** being imitated, since that is whose identity the system
+    would be deciding on. Filing it under the forger instead would put an
+    impostor attempt in that person's genuine reference set.
+
+    These are finger-drawn signatures on a capacitive touchscreen, so pressure
+    derives from contact area rather than a pen sensor. Suitable for pre-training
+    the temporal branch, not for training the shipped pen-tablet model.
+    """
+    _require_dir(root, "MOBISIG")
+    writers = {}
+
+    for user_dir in sorted(os.listdir(root)):
+        user_path = os.path.join(root, user_dir)
+        if not os.path.isdir(user_path):
+            continue
+
+        for filename in sorted(os.listdir(user_path)):
+            match = _MOBISIG_FILE.match(filename)
+            if not match:
+                continue
+
+            kind, owner = match.group(1), int(match.group(2))
+            writer_id = f"mobisig_{owner}"
+            label = "genuine" if kind == "GEN" else "forged"
+
+            writers.setdefault(writer_id, _new_writer())
+            writers[writer_id][label].append(
+                load_mobisig_file(os.path.join(user_path, filename)))
+
+    return writers
+
+
+def load_sigcomp2011_file(path):
+    """
+    Load one SigComp2011 `.HWR` file into the model's [L, 3] input.
+
+    The format is three whitespace-separated columns per line — X, Y, Z — with
+    no header, where Z is WACOM pen force on the same 0–1023 scale SVC2004 uses.
+
+    Two writer_samples-level alignments are applied here, both of which exist because
+    these trajectories are merged with SVC2004 and read by a single encoder.
+    Neither widens the [L, 3] contract.
+
+    1. **Decimate 200 Hz to 100 Hz** — see `SIGCOMP_DECIMATION`.
+    2. **Drop pen-up samples (Z = 0).** These writers signed on paper laid over
+       the tablet, which keeps sensing while the pen travels between the twelve
+       preprinted boxes, so about 30% of raw points are in-air moves in runs
+       averaging 19 samples. SVC2004 Task2 contains **no** zero-pressure points
+       at all (measured: 0 of 100,494). Mixing the two unfiltered would make the
+       pressure channel and its derivative mean different things per writer_samples,
+       which is precisely what collapsed the earlier SVC2004 Task1 + Task2 merge
+       (see `docs/SOLUTIONS.md`).
+
+    The cost is stated plainly: in-air trajectory is discriminative in the
+    online-verification literature, and this discards it. It is discarded
+    because the dataset the deployment device matches does not have it.
+    """
+    rows = np.loadtxt(path, dtype=np.float32, ndmin=2)
+    if rows.size == 0:
+        raise ValueError(f"No trajectory points in {path}")
+
+    rows = rows[::SIGCOMP_DECIMATION]
+    rows = rows[rows[:, 2] > 0]
+    if len(rows) < 2:
+        raise ValueError(
+            f"{path} has fewer than 2 pen-down samples after alignment — "
+            f"the file carries no usable trajectory."
+        )
+
+    return normalize_trajectory(rows[:, :2], rows[:, 2] / SIGCOMP_PRESSURE_MAX)
+
+
+def _sigcomp_parts(dirpath, root):
+    """
+    Lowercased path components of `dirpath` *below* `root`.
+
+    Only the components inside the dataset are examined. Matching against the
+    absolute path would let a directory anywhere above it decide the label —
+    a checkout under `~/forgeries/` would classify the whole writer_samples as forged.
+    """
+    relative = os.path.relpath(dirpath, root)
+    if relative == os.curdir:
+        return []
+    return [p.lower() for p in relative.split(os.sep)]
+
+
+def _sigcomp_kind(parts):
+    """
+    Classify a SigComp2011 directory by the archive layout it belongs to.
+
+    The two shipped archives name their signatures with the *same* tokens in
+    *opposite* order — a training genuine is `writer_index` while a test genuine
+    is `index_writer` — so `001_23.HWR` and `01_011.HWR` cannot be told apart
+    from the filename alone. The containing folder is what disambiguates them,
+    and it is a structural fact of the archives rather than a heuristic.
+
+    Returns "train_genuine", "train_forged", "test", or None.
+    """
+    if any("genuine" in p for p in parts):
+        return "train_genuine"
+    if any("forg" in p for p in parts):
+        return "train_forged"
+    # Test signatures sit one level deeper, in a per-writer directory under
+    # `Questioned(1259)/` or `Reference(648)/`.
+    if any(p.startswith("questioned") or p.startswith("ref") for p in parts):
+        return "test"
+    return None
+
+
+def _sigcomp_language(parts):
+    """Recover 'Dutch' or 'Chinese' from the path, or None outside both trees."""
+    for language in ("Dutch", "Chinese"):
+        if language.lower() in parts:
+            return language
+    return None
+
+
+def _sigcomp_train_writer(filename, kind):
+    """
+    Writer ID for a training-set file, or None if the name does not fit.
+
+    Genuine files are `III_NN.HWR`. Forgeries name the forger first, in one of
+    two conventions the archive mixes: Dutch splits them (`170_001_02.HWR`)
+    while Chinese runs them together (`0120001_1.HWR`, forger 0120, writer 001).
+    Taking the last three digits of the second-to-last token covers both.
+    """
+    tokens = os.path.splitext(filename)[0].split("_")
+    if len(tokens) < 2 or not all(t.isdigit() for t in tokens):
+        return None
+
+    if kind == "train_genuine":
+        return tokens[0] if len(tokens) == 2 and len(tokens[0]) == 3 else None
+
+    writer = tokens[-2][-3:]
+    return writer if len(tokens[-2]) in (3, 7) else None
+
+
+def _sigcomp_test_entry(filename, writer_dir):
+    """
+    (writer, label) for a test-set file, or None if the name does not fit.
+
+    Genuine is `NN_III.HWR`; a forgery inserts the forger, either as a third
+    token (Dutch `01_182_013.HWR`) or glued to the writer (Chinese
+    `01_0130011.HWR`). So a two-token name whose second token is the bare
+    three-digit writer is the only genuine shape.
+
+    The writer directory is the authority on identity — it is checked against
+    the filename rather than trusted blindly, since a mismatch would mean the
+    archive was rearranged and every label below it is suspect.
+    """
+    tokens = os.path.splitext(filename)[0].split("_")
+    if len(tokens) < 2 or not all(t.isdigit() for t in tokens):
+        return None
+
+    genuine = len(tokens) == 2 and len(tokens[1]) == 3
+    writer = tokens[1] if genuine else tokens[-1][-3:]
+    if writer != writer_dir:
+        raise ValueError(
+            f"SigComp2011 file '{filename}' names writer {writer} but sits in "
+            f"directory '{writer_dir}'. The archive layout is not as expected."
+        )
+    return writer, "genuine" if genuine else "forged"
+
+
+def parse_sigcomp2011(root=SIGCOMP2011_DIR):
+    """
+    Parse the SigComp2011 **online** writer_samples into the standard writer dict.
+
+    84 pen-tablet writers — 64 Dutch, 20 Chinese — recorded on a WACOM Intuos3
+    A3 at 200 Hz with real 0–1023 pen force. That capture stack is the same
+    family as SVC2004's, which is the reason this dataset is worth having: the
+    measured result on this project is that pen accuracy only improves with more
+    *pen-domain* writers, and touchscreen writers do not substitute at any
+    quantity. It more than triples the pen-domain writer count.
+
+    Both shipped archives extract into `root` and this walks whatever is there,
+    so a partial download (training set only) parses fine and simply yields
+    fewer writers. Offline PNGs, if extracted alongside, are ignored.
+
+    Writer IDs carry the language (`sigcomp_Dutch_013`) because Dutch writer 013
+    and Chinese writer 013 are different people. Within a language the training
+    and test author IDs are disjoint, so no further namespacing is needed.
+    """
+    _require_dir(root, "SigComp2011")
+    writers = {}
+
+    for dirpath, _, filenames in os.walk(root):
+        parts = _sigcomp_parts(dirpath, root)
+        kind = _sigcomp_kind(parts)
+        language = _sigcomp_language(parts)
+        if kind is None or language is None:
+            continue
+
+        writer_dir = os.path.basename(dirpath)
+        for filename in sorted(filenames):
+            if not filename.lower().endswith(".hwr"):
+                continue
+
+            if kind == "test":
+                entry = _sigcomp_test_entry(filename, writer_dir)
+                if entry is None:
+                    continue
+                writer, label = entry
+            else:
+                writer = _sigcomp_train_writer(filename, kind)
+                if writer is None:
+                    continue
+                label = "genuine" if kind == "train_genuine" else "forged"
+
+            writer_id = f"sigcomp_{language}_{writer}"
+            writers.setdefault(writer_id, _new_writer())
+            writers[writer_id][label].append(
+                load_sigcomp2011_file(os.path.join(dirpath, filename)))
+
+    return writers
+
+
 # Registered after definition so parse_dataset can dispatch by directory name.
 _PARSERS = {
     "cedar": parse_cedar,
@@ -290,7 +573,9 @@ _PARSERS = {
     "svc2004": parse_svc2004,
     "svc2004_task1": parse_svc2004,
     "svc2004_task2": parse_svc2004,
+    "mobisig": parse_mobisig,
+    "sigcomp2011": parse_sigcomp2011,
 }
 
 SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig")
-TEMPORAL_DATASETS = ("svc2004",)
+TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011")

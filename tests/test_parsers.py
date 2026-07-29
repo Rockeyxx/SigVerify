@@ -3,7 +3,7 @@ Tests for the real-dataset parsers.
 
 Two layers:
   1. Synthetic-fixture tests — always run, pin the naming/label logic.
-  2. Real-corpus tests — skipped unless ./data is populated, and assert the
+  2. Real-dataset tests — skipped unless ./data is populated, and assert the
      exact writer/sample counts each dataset is documented to have.
 """
 
@@ -15,14 +15,19 @@ import pytest
 from config.settings import (
     BHSIG260_DIR,
     CEDAR_DIR,
+    MOBISIG_DIR,
+    SIGCOMP2011_DIR,
     SVC2004_TASK1_DIR,
     SVC2004_TASK2_DIR,
     UTSIG_DIR,
 )
 from src.data.parsers import (
     load_svc2004_file,
+    merge_datasets,
     parse_bhsig260,
     parse_cedar,
+    parse_mobisig,
+    parse_sigcomp2011,
     parse_svc2004,
     parse_utsig,
     svc2004_has_pressure,
@@ -208,11 +213,11 @@ class TestParseSVC2004:
         assert sample.shape[1] == 3
 
     def test_pressure_detection(self, tmp_path):
-        """Task1 corpora must be reported as pressure-less so training can warn."""
+        """Task1 datasets must be reported as pressure-less so training can warn."""
         assert svc2004_has_pressure(self._fixture(str(tmp_path))) is False
 
 
-# ─── Real-corpus validation (skipped when ./data is not populated) ──────
+# ─── Real-dataset validation (skipped when ./data is not populated) ──────
 
 _have = os.path.isdir
 
@@ -279,3 +284,262 @@ def test_real_task2_has_real_pressure():
     assert pressure.min() >= 0.0 and pressure.max() <= 1.0
     assert pressure.std() > 0.0, "pressure is constant — the channel carries no signal"
     assert not np.allclose(pressure, 1.0)
+
+
+class TestParseMobisig:
+    """MOBISIG: USER<n>/SIGN_{GEN,FOR}_USER<owner>_USER<signer>_<k>.csv."""
+
+    HEADER = ("x,y,timestamp,pressure,fingerarea,velocityx,velocityy,"
+              "accelx,accely,accelz,gyrox,gyroy,gyroz")
+
+    def _write(self, path, rows):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(self.HEADER + "\n")
+            for x, y, p in rows:
+                fh.write(f"{x},{y},1000,{p},0.1,0,0,0,0,0,0,0,0\n")
+        return path
+
+    def _fixture(self, root):
+        rows = [(10.0, 20.0, 0.5), (11.0, 22.0, 0.6), (13.0, 25.0, 0.4)]
+        for owner in (1, 2):
+            for k in (1, 2):
+                self._write(os.path.join(
+                    root, f"USER{owner}", f"SIGN_GEN_USER{owner}_USER{owner}_{k}.csv"), rows)
+            # A forgery of `owner`, produced by a different user.
+            self._write(os.path.join(
+                root, f"USER{owner}", f"SIGN_FOR_USER{owner}_USER9_1.csv"), rows)
+        return root
+
+    def test_groups_by_owner_not_by_forger(self, tmp_path):
+        """A forgery belongs to the writer being imitated, never to whoever drew it."""
+        writers = parse_mobisig(self._fixture(str(tmp_path)))
+        assert set(writers) == {"mobisig_1", "mobisig_2"}
+        assert len(writers["mobisig_1"]["genuine"]) == 2
+        assert len(writers["mobisig_1"]["forged"]) == 1
+        assert "mobisig_9" not in writers
+
+    def test_returns_normalized_l3_trajectories(self, tmp_path):
+        sample = parse_mobisig(self._fixture(str(tmp_path)))["mobisig_1"]["genuine"][0]
+        assert sample.ndim == 2 and sample.shape[1] == 3
+        assert np.allclose(sample[:, :2].mean(axis=0), 0.0, atol=1e-5)
+        assert sample[:, 2].min() >= 0.0 and sample[:, 2].max() <= 1.0
+
+    def test_ignores_non_signature_files(self, tmp_path):
+        root = self._fixture(str(tmp_path))
+        _touch(os.path.join(root, "users.csv"))
+        _touch(os.path.join(root, "statistics.txt"))
+        assert set(parse_mobisig(root)) == {"mobisig_1", "mobisig_2"}
+
+    def test_missing_root_raises(self):
+        with pytest.raises(FileNotFoundError):
+            parse_mobisig("/nonexistent/mobisig")
+
+
+@pytest.mark.skipif(not _have(MOBISIG_DIR), reason="MOBISIG not downloaded")
+def test_real_mobisig_counts():
+    """MOBISIG ships 83 users, each with 45 genuine and 20 skilled forgeries."""
+    writers = parse_mobisig(MOBISIG_DIR)
+    assert len(writers) == 83
+    assert all(len(v["genuine"]) == 45 and len(v["forged"]) == 20
+               for v in writers.values())
+
+    sample = writers["mobisig_1"]["genuine"][0]
+    assert sample.ndim == 2 and sample.shape[1] == 3
+    assert np.all(np.isfinite(sample))
+    # Capacitive screens report a real, varying contact pressure.
+    assert sample[:, 2].std() > 0.0
+
+
+class TestParseSigComp2011:
+    """
+    SigComp2011 online: two archives whose filename conventions are mirror
+    images of each other, disambiguated only by the folder they sit in.
+    """
+
+    # Six raw 200 Hz rows. Decimation keeps indices 0, 2, 4; of those, index 0
+    # is a pen-up sample (Z = 0) and is dropped, leaving two pen-down points.
+    ROWS = [(27353, 24570, 0), (27349, 24574, 999),
+            (27345, 24584, 512), (27341, 24590, 999),
+            (27337, 24600, 1023), (27333, 24610, 999)]
+
+    def _write(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            for x, y, z in self.ROWS:
+                fh.write(f"{x} {y} {z}\n")
+
+    def _fixture(self, root):
+        train = os.path.join(root, "trainingSet", "OnlineSignatures")
+        # Training layout: writer first, and two different forgery conventions.
+        self._write(os.path.join(train, "Dutch", "TrainingSet",
+                                 "Online Genuine", "001_01.HWR"))
+        self._write(os.path.join(train, "Dutch", "TrainingSet",
+                                 "Online Forgeries", "170_001_02.HWR"))
+        self._write(os.path.join(train, "Chinese", "TrainingSet",
+                                 "Online Genuine", "001_1.HWR"))
+        self._write(os.path.join(train, "Chinese", "TrainingSet",
+                                 "Online Forgeries", "0120001_1.HWR"))
+
+        # Test layout: index first, writer resolved from its own directory.
+        test = os.path.join(root, "Testdata_SigComp2011", "SigComp11-Onlinetestset")
+        self._write(os.path.join(test, "Dutch", "Reference(648)", "013", "13_013.HWR"))
+        self._write(os.path.join(test, "Dutch", "Questioned(1259)", "013", "01_013.HWR"))
+        self._write(os.path.join(test, "Dutch", "Questioned(1259)", "013",
+                                 "01_182_013.HWR"))
+        self._write(os.path.join(test, "Chinese", "Questioned(586)", "011",
+                                 "01_011.HWR"))
+        self._write(os.path.join(test, "Chinese", "Questioned(586)", "011",
+                                 "01_0130011.HWR"))
+        return root
+
+    def test_writer_ids_are_language_scoped(self, tmp_path):
+        """Dutch 013 and Chinese 013 are different people."""
+        writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
+        assert set(writers) == {
+            "sigcomp_Dutch_001", "sigcomp_Chinese_001",
+            "sigcomp_Dutch_013", "sigcomp_Chinese_011",
+        }
+
+    def test_training_layout_reads_writer_before_index(self, tmp_path):
+        writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
+        assert len(writers["sigcomp_Dutch_001"]["genuine"]) == 1
+        assert len(writers["sigcomp_Dutch_001"]["forged"]) == 1
+
+    def test_glued_chinese_forger_id_resolves_to_the_imitated_writer(self, tmp_path):
+        """`0120001_1` is forger 0120 imitating writer 001, not writer 0120001."""
+        writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
+        assert len(writers["sigcomp_Chinese_001"]["forged"]) == 1
+        assert "sigcomp_Chinese_0120001" not in writers
+
+    def test_test_layout_reads_index_before_writer(self, tmp_path):
+        """
+        `01_013.HWR` is genuine while the training set's `001_01.HWR` is also
+        genuine with the tokens reversed — only the folder tells them apart.
+        """
+        writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
+        dutch = writers["sigcomp_Dutch_013"]
+        assert len(dutch["genuine"]) == 2      # one Reference, one Questioned
+        assert len(dutch["forged"]) == 1       # 01_182_013
+
+    def test_questioned_forgeries_are_labelled_from_the_filename(self, tmp_path):
+        chinese = parse_sigcomp2011(self._fixture(str(tmp_path)))["sigcomp_Chinese_011"]
+        assert len(chinese["genuine"]) == 1
+        assert len(chinese["forged"]) == 1
+
+    def test_rearranged_test_directory_raises(self, tmp_path):
+        """A file under the wrong writer directory means every label is suspect."""
+        root = self._fixture(str(tmp_path))
+        self._write(os.path.join(root, "Testdata_SigComp2011",
+                                 "SigComp11-Onlinetestset", "Dutch",
+                                 "Reference(648)", "013", "13_099.HWR"))
+        with pytest.raises(ValueError, match="not as expected"):
+            parse_sigcomp2011(root)
+
+    def test_returns_normalized_l3_trajectories(self, tmp_path):
+        sample = parse_sigcomp2011(self._fixture(str(tmp_path)))[
+            "sigcomp_Dutch_001"]["genuine"][0]
+        assert sample.ndim == 2 and sample.shape[1] == 3
+        assert np.allclose(sample[:, :2].mean(axis=0), 0.0, atol=1e-5)
+        # Z = 0..1023 device units scaled onto [0, 1], not renormalized per file.
+        assert np.allclose(sample[:, 2], [512 / 1023.0, 1.0], atol=1e-6)
+
+    def test_decimates_to_svc2004s_sample_rate(self, tmp_path):
+        """200 Hz halved to 100 Hz, so the derived velocity channels agree."""
+        sample = parse_sigcomp2011(self._fixture(str(tmp_path)))[
+            "sigcomp_Dutch_001"]["genuine"][0]
+        # 6 raw rows -> 3 after decimation -> 2 after the pen-up row is dropped.
+        assert len(sample) == 2
+
+    def test_drops_pen_up_samples(self, tmp_path):
+        """
+        SVC2004 Task2 has no zero-pressure points, so neither may this dataset.
+        A surviving P = 0 would make pressure mean something different per
+        writer_samples for the one encoder that reads both.
+        """
+        writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
+        for record in writers.values():
+            for sample in record["genuine"] + record["forged"]:
+                assert sample[:, 2].min() > 0.0
+
+    def test_file_with_no_pen_down_samples_raises(self, tmp_path):
+        """Silently yielding an empty trajectory would poison a training pair."""
+        root = self._fixture(str(tmp_path))
+        path = os.path.join(root, "trainingSet", "OnlineSignatures", "Dutch",
+                            "TrainingSet", "Online Genuine", "002_01.HWR")
+        with open(path, "w") as fh:
+            fh.write("100 200 0\n101 201 0\n102 202 0\n")
+        with pytest.raises(ValueError, match="fewer than 2 pen-down samples"):
+            parse_sigcomp2011(root)
+
+    def test_ignores_offline_images_and_stray_files(self, tmp_path):
+        root = self._fixture(str(tmp_path))
+        _touch(os.path.join(root, "trainingSet", "OfflineSignatures", "Dutch",
+                            "TrainingSet", "Offline Genuine", "001_01.png"))
+        _touch(os.path.join(root, "readme.txt"))
+        assert len(parse_sigcomp2011(root)) == 4
+
+    def test_missing_root_raises(self):
+        with pytest.raises(FileNotFoundError):
+            parse_sigcomp2011("/nonexistent/sigcomp2011")
+
+
+@pytest.mark.skipif(not _have(SIGCOMP2011_DIR), reason="SigComp2011 not downloaded")
+def test_real_sigcomp2011_counts():
+    """
+    The online writer_samples ships 84 writers and 3695 signatures: 64 Dutch (10 in the
+    training archive, 54 in the test archive) and 20 Chinese (10 + 10).
+    """
+    writers = parse_sigcomp2011(SIGCOMP2011_DIR)
+    assert len(writers) == 84
+
+    dutch = [w for w in writers if w.startswith("sigcomp_Dutch_")]
+    chinese = [w for w in writers if w.startswith("sigcomp_Chinese_")]
+    assert len(dutch) == 64 and len(chinese) == 20
+
+    total = sum(len(v["genuine"]) + len(v["forged"]) for v in writers.values())
+    assert total == 3695
+
+    # Every writer must be scoreable: skilled pairing needs two genuines and a forgery.
+    assert all(len(v["genuine"]) >= 2 and len(v["forged"]) >= 1
+               for v in writers.values())
+
+    sample = writers["sigcomp_Dutch_013"]["genuine"][0]
+    assert sample.ndim == 2 and sample.shape[1] == 3
+    assert np.all(np.isfinite(sample))
+    # A real pen sensor, not the flat P = 1.0 of a pressure-blind dataset.
+    assert sample[:, 2].std() > 0.0
+    assert not np.allclose(sample[:, 2], 1.0)
+
+
+class TestMergeDatasets:
+    """Merging datasets that share writer IDs must append samples, not replace them."""
+
+    def test_disjoint_writers_are_unioned(self):
+        target = {"svc_1": {"genuine": ["a"], "forged": ["b"]}}
+        merge_datasets(target, {"mobisig_1": {"genuine": ["c"], "forged": ["d"]}})
+        assert set(target) == {"svc_1", "mobisig_1"}
+
+    def test_shared_writer_id_appends_rather_than_overwrites(self):
+        """
+        SVC2004 Task1 and Task2 are different recordings of the same 40 signers,
+        so both parse to `svc_1`..`svc_40`. A dict update would silently discard
+        one task's samples entirely.
+        """
+        target = {"svc_1": {"genuine": ["t1_g"], "forged": ["t1_f"]}}
+        merge_datasets(target, {"svc_1": {"genuine": ["t2_g"], "forged": ["t2_f"]}})
+        assert target["svc_1"]["genuine"] == ["t1_g", "t2_g"]
+        assert target["svc_1"]["forged"] == ["t1_f", "t2_f"]
+
+    def test_returns_the_target_for_chaining(self):
+        target = {}
+        assert merge_datasets(target, {"svc_1": {"genuine": [], "forged": []}}) is target
+
+    def test_merging_is_order_independent_in_count(self):
+        a = {"svc_1": {"genuine": ["g1"], "forged": ["f1"]}}
+        b = {"svc_1": {"genuine": ["g2", "g3"], "forged": ["f2"]}}
+        forward, backward = {}, {}
+        merge_datasets(merge_datasets(forward, a), b)
+        merge_datasets(merge_datasets(backward, b), a)
+        assert len(forward["svc_1"]["genuine"]) == len(backward["svc_1"]["genuine"]) == 3
+        assert len(forward["svc_1"]["forged"]) == len(backward["svc_1"]["forged"]) == 2

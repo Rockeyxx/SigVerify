@@ -24,7 +24,7 @@ from scripts.evaluate import (
 
 
 def _make_cedar_fixture(root, num_writers=10, num_genuine=3, num_forged=2):
-    """Generate a CEDAR-shaped corpus of small synthetic signature images."""
+    """Generate a CEDAR-shaped dataset of small synthetic signature images."""
     org = os.path.join(root, "full_org")
     forg = os.path.join(root, "full_forg")
     os.makedirs(org, exist_ok=True)
@@ -47,7 +47,7 @@ def _make_cedar_fixture(root, num_writers=10, num_genuine=3, num_forged=2):
 
 def _make_svc_fixture(root, num_writers=10, num_each=3, with_pressure=False):
     """
-    Generate an SVC2004-shaped corpus of variable-length trajectories.
+    Generate an SVC2004-shaped writer_samples of variable-length trajectories.
 
     `with_pressure=False` emits Task1 (4-column); True emits Task2 (7-column).
     """
@@ -140,7 +140,7 @@ class TestTrainMain:
         assert history_a["split"] == history_b["split"]
 
     def test_unknown_dataset_directory_raises(self, tmp_path):
-        """An unrecognized corpus name must fail loudly, not train on nothing."""
+        """An unrecognized dataset name must fail loudly, not train on nothing."""
         mystery = tmp_path / "mystery_dataset"
         mystery.mkdir()
         with pytest.raises(ValueError, match="Unrecognized dataset"):
