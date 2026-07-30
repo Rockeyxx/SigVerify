@@ -41,6 +41,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     SPATIAL_INPUT_SIZE,
+    SPATIAL_SQUARE_PAD,
     MIN_BBOX_PIXELS,
     MIN_LAPLACIAN_VARIANCE,
     PAIRS_GENUINE_PER_WRITER,
@@ -65,17 +66,38 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     if img is None:
         raise FileNotFoundError(f"Cannot load image: {image_path}")
 
-    # Pad image to a square canvas while keeping original aspect ratio intact
-    h, w = img.shape
-    max_dim = max(h, w)
-    padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
-    y_off = (max_dim - h) // 2
-    x_off = (max_dim - w) // 2
-    padded[y_off:y_off + h, x_off:x_off + w] = img
+    # The full scan is padded, not cropped to the ink bounding box. Cropping
+    # raises stroke resolution (BHSig260 ink spans only ~13% of the canvas
+    # height) but rescales every signature to the same extent, discarding
+    # absolute size. Measured, that trade lost about 1.8 points of held-out EER,
+    # so overall scale is worth more here than the extra detail.
 
-    # Resize to standard spatial input size (256x256) and scale intensity to [0.0, 1.0]
+    if SPATIAL_SQUARE_PAD:
+        # Pad image to a square canvas while keeping original aspect ratio intact
+        h, w = img.shape
+        max_dim = max(h, w)
+        padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
+        y_off = (max_dim - h) // 2
+        x_off = (max_dim - w) // 2
+        padded[y_off:y_off + h, x_off:x_off + w] = img
+    else:
+        # Resize straight onto the target, as the Siamese reference does at
+        # 155x220. Aspect is distorted but consistently so, and every signature
+        # fills the frame instead of spending most of it on pad — BHSig260's
+        # ribbons are roughly 1:3.5, so square padding leaves them ~70% blank.
+        padded = img
+
+    # Resize to standard spatial input size (256x256), then invert onto [0.0, 1.0]
+    # so **background is 0 and ink is high**.
+    #
+    # Every published offline pipeline inverts here, and the reason is mechanical
+    # rather than cosmetic: ink covers about 1% of the canvas (measured — mean
+    # pixel 0.9496 on CEDAR, 0.9901 on BHSig260), so an un-inverted image hands
+    # every convolution a large constant offset that carries no information about
+    # who signed. It is also why the encoder needed a *max* pooling branch to
+    # recover strokes that average pooling had buried under that offset.
     resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
-    normalized = resized.astype(np.float32) / 255.0
+    normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
 
 
@@ -212,15 +234,31 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         if len(genuine) < 2 or not forged:
             continue
 
+        # A writer contributes equal numbers of positives and negatives, so the
+        # scarcer arm caps both. Capping each arm only by its own supply silently
+        # reweights datasets that ship few forgeries: UTSig has 27 genuine but 6
+        # skilled forgeries per writer, giving C(27,2)=351 genuine combinations
+        # against 27x6=162 impostor ones. At a 276 budget that produced a 1.70:1
+        # genuine-heavy batch for UTSig while every other dataset stayed 1:1, and
+        # UTSig's held-out EER rose 38.83% -> 43.43% when the budget was raised.
+        # At the old budget of 40 everything was balanced by accident, which is
+        # why this only surfaced once the budget went up.
+        num_pairs = min(
+            num_genuine_per_writer,
+            num_forged_per_writer,
+            len(genuine) * (len(genuine) - 1) // 2,   # available genuine combinations
+            len(genuine) * len(forged),               # available impostor combinations
+        )
+
         # Genuine pairs: two authentic signatures from the same writer
-        num_genuine = min(num_genuine_per_writer, len(genuine) * (len(genuine) - 1) // 2)
+        num_genuine = num_pairs
         for _ in range(num_genuine):
             s1, s2 = rng.sample(genuine, 2)
             pairs.append((s1, s2))
             labels.append(1)
 
         # Skilled-forgery pairs: authentic vs. an imitation of this same writer
-        num_forged = min(num_forged_per_writer, len(genuine) * len(forged))
+        num_forged = num_pairs
         for _ in range(num_forged):
             pairs.append((rng.choice(genuine), rng.choice(forged)))
             labels.append(0)
@@ -289,6 +327,61 @@ class SpatialSignatureDataset(Dataset):
         )
 
 
+def augment_trajectory(sequence, rng, max_rotation_deg=6.0, jitter=0.02,
+                       max_speed_change=0.15):
+    """
+    Perturb one [L, 3] trajectory for training-time augmentation.
+
+    Three perturbations, each chosen because it mimics variation a genuine
+    signer actually produces:
+
+      * **Speed change** — resample the sequence slightly faster or slower.
+        People do not sign at a fixed tempo, and speed is the feature family the
+        derived (dX, dY, dP) channels key on, so varying it teaches tolerance
+        where the model is most sensitive.
+      * **Small rotation** — nobody aligns the pen identically to the tablet
+        every time. Rotation applies to X/Y only, never pressure.
+      * **Coordinate jitter** — sensor noise and hand tremor.
+
+    Deliberately absent: mirroring, which produces a trajectory the signer could
+    never draw, and scaling, which is already normalized away because X/Y are
+    z-scored per signature by `normalize_trajectory`.
+
+    Sequences too short to resample are returned unchanged; perturbing three
+    points corrupts rather than varies them.
+    """
+    sequence = np.asarray(sequence, dtype=np.float32)
+    if len(sequence) < 8:
+        return sequence
+
+    xy = sequence[:, :2].copy()
+    pressure = sequence[:, 2].copy()
+
+    theta = np.deg2rad(rng.uniform(-max_rotation_deg, max_rotation_deg))
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    xy = xy @ np.array([[cos_t, -sin_t], [sin_t, cos_t]], dtype=np.float32)
+
+    xy += rng.normal(0.0, jitter, size=xy.shape).astype(np.float32)
+
+    # Resample onto a stretched or compressed timeline. Interpolating each
+    # channel against the original index keeps the stroke order intact.
+    scale = 1.0 + rng.uniform(-max_speed_change, max_speed_change)
+    new_length = max(8, int(round(len(sequence) * scale)))
+    source = np.arange(len(sequence), dtype=np.float32)
+    target = np.linspace(0, len(sequence) - 1, new_length, dtype=np.float32)
+
+    out = np.column_stack([
+        np.interp(target, source, xy[:, 0]),
+        np.interp(target, source, xy[:, 1]),
+        np.interp(target, source, pressure),
+    ]).astype(np.float32)
+
+    # Pressure is a physical quantity in [0, 1]; interpolation can drift it a
+    # hair outside on the endpoints.
+    out[:, 2] = np.clip(out[:, 2], 0.0, 1.0)
+    return out
+
+
 class TemporalSignatureDataset(Dataset):
     """
     PyTorch Dataset loading temporal (dynamic) signature pairs for Siamese training.
@@ -299,15 +392,25 @@ class TemporalSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels):
+    def __init__(self, pairs, labels, augment=False):
         self.pairs = pairs
         self.labels = labels
+        # Training only. Perturbing validation or test data would measure the
+        # model against inputs the deployed system never sees.
+        self.augment = augment
+        self._rng = np.random.RandomState(0)
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, index):
         seq1, seq2 = self.pairs[index]
+        if self.augment:
+            # Each side is perturbed independently: two recordings of the same
+            # signature differ by exactly this kind of variation, so the pair
+            # stays honest.
+            seq1 = augment_trajectory(seq1, self._rng)
+            seq2 = augment_trajectory(seq2, self._rng)
         return (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),
