@@ -32,7 +32,7 @@ from config.settings import (
     NUM_WORKERS, PIN_MEMORY,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
-    TEMPORAL_AUGMENT,
+    TEMPORAL_AUGMENT, SPATIAL_AUGMENT,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
@@ -123,6 +123,21 @@ def parse_args(argv=None):
     parser.add_argument("--weights-name", type=str, default=None,
                         help="Filename for the saved weights, so an ablation run "
                              "cannot overwrite the shipped spatial_cnn.pth")
+    parser.add_argument("--augment", dest="augment", action="store_true",
+                        default=SPATIAL_AUGMENT,
+                        help="Enable training-time augmentation (spatial branch)")
+    parser.add_argument("--no-augment", dest="augment", action="store_false",
+                        help="Disable training-time augmentation")
+    parser.add_argument("--lr-schedule", choices=["none", "plateau"], default="none",
+                        help="'plateau' halves the learning rate after 2 epochs "
+                             "without validation improvement. The spatial validation "
+                             "curve is non-monotone, so decaying on a plateau fits it "
+                             "better than a fixed step schedule")
+    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"], default="xyp",
+                        help="Extra SVC2004 channels to feed the temporal branch. "
+                             "'xyp' is the shipped 3-channel contract; 'tilt' adds "
+                             "azimuth+altitude (SVC2004 only, and the XPPen reports "
+                             "neither); 'dt' adds real inter-sample time")
     parser.add_argument("--pressure-dropout", type=float, default=None,
                         help="Override PRESSURE_DROPOUT_RATE for this run (temporal "
                              "branch only). A Task1 dataset still forces 0, since "
@@ -130,11 +145,16 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def build_writer_samples(data_dirs):
+def build_writer_samples(data_dirs, extra_channels=None):
     """Parse and merge every requested dataset into one writer-keyed mapping."""
     writer_samples = {}
     for directory in data_dirs:
-        parsed = parse_dataset(directory)
+        # Only SVC2004 declares extra channels; asking any other parser for them
+        # would raise, which is why this is conditional rather than always passed.
+        kwargs = ({"extra_channels": extra_channels}
+                  if extra_channels and "svc2004" in os.path.basename(
+                      os.path.normpath(directory)).lower() else {})
+        parsed = parse_dataset(directory, **kwargs)
         print(f"  {directory}: {len(parsed)} writers")
         merge_datasets(writer_samples, parsed)
     if not writer_samples:
@@ -142,7 +162,8 @@ def build_writer_samples(data_dirs):
     return writer_samples
 
 
-def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed):
+def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
+                 augment=SPATIAL_AUGMENT):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -156,7 +177,11 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
 
     if branch == "spatial":
         pairs, labels = generate_skilled_pairs(subset, seed=seed)
-        dataset = SpatialSignatureDataset(pairs, labels)
+        # `shuffle` is true only for the training loader, so validation and test
+        # are never augmented — an augmented val set would move the target the
+        # early-stopping rule is measuring against.
+        dataset = SpatialSignatureDataset(pairs, labels,
+                                          augment=shuffle and augment)
         collate = None
     else:
         pairs, labels = generate_skilled_pairs(
@@ -267,7 +292,8 @@ def save_weights(model, path):
 
 
 def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
-        weights_path, checkpoint_path, start_epoch=0, early_stopping=None):
+        weights_path, checkpoint_path, start_epoch=0, early_stopping=None,
+        scheduler=None):
     """
     Run the full training loop: per-epoch checkpoint, best-validation weight
     save, and early stopping.
@@ -293,6 +319,15 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         tqdm.write(f"{epoch_label(epoch, epochs)} | train {train_loss:.4f} | val {val_loss:.4f}")
+
+        # Stepped on validation, not training, loss: the point is to decay when
+        # generalization stalls, which is the only signal that matters here.
+        if scheduler is not None:
+            previous_lr = optimizer.param_groups[0]["lr"]
+            scheduler.step(val_loss)
+            current_lr = optimizer.param_groups[0]["lr"]
+            if current_lr < previous_lr:
+                tqdm.write(f"  LR decayed: {previous_lr:.2e} -> {current_lr:.2e}")
 
         save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path)
 
@@ -320,7 +355,9 @@ def main(argv=None):
     print(f"Training {args.branch} branch")
     print(f"Hardware Device: {device}")
     print("Discovering writers:")
-    writer_samples = build_writer_samples(args.data_dir)
+    writer_samples = build_writer_samples(
+        args.data_dir,
+        extra_channels=None if args.temporal_channels == "xyp" else args.temporal_channels)
 
     # Writer-independent partitioning (ISO/IEC 23053) happens on writer IDs
     # before any pair is formed, so no signer can straddle two partitions.
@@ -362,7 +399,12 @@ def main(argv=None):
                     pressure_dropout = 0.0
                     has_pressure = False
 
+        channel_count = {"xyp": 3, "dt": 4, "tilt": 5}[args.temporal_channels]
+        if channel_count != 3:
+            print(f"  Temporal channels: {args.temporal_channels} "
+                  f"({channel_count}ch) — NOT the shipped [L, 3] capture contract")
         model = TemporalSiamese(
+            input_features=channel_count,
             hidden_size=TEMPORAL_HIDDEN_SIZE,
             num_layers=TEMPORAL_NUM_LAYERS,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
@@ -378,9 +420,11 @@ def main(argv=None):
         weights_filename = args.weights_name
 
     train_loader, num_train = build_loader(writer_samples, train_ids, args.branch, args.batch_size,
-                                           args.num_workers, True, args.seed)
+                                           args.num_workers, True, args.seed,
+                                           augment=args.augment)
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
-                                       args.num_workers, False, args.seed)
+                                       args.num_workers, False, args.seed,
+                                       augment=args.augment)
     print(f"  Pairs: {num_train} train / {num_val} val (skilled-forgery negatives)")
     print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.lr}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -412,9 +456,19 @@ def main(argv=None):
     checkpoint_path = os.path.join(
         args.weights_dir, f"checkpoint_{os.path.splitext(weights_filename)[0]}.pth")
 
+    # Decay patience sits below early-stopping patience on purpose: the run gets
+    # at least one decayed-LR epoch to prove itself before stopping is allowed.
+    scheduler = None
+    if args.lr_schedule == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=2)
+        print(f"  LR schedule: plateau (halve after 2 stalled epochs, "
+              f"early-stopping patience {args.patience})")
+
     history = fit(model, train_loader, val_loader, loss_fn, optimizer, device,
                   args.epochs, weights_path, checkpoint_path,
-                  start_epoch=start_epoch, early_stopping=early_stopping)
+                  start_epoch=start_epoch, early_stopping=early_stopping,
+                  scheduler=scheduler)
 
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")

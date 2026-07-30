@@ -532,12 +532,7 @@ def load_branch_model(branch, weights_path, device):
     if branch == "spatial":
         model = SpatialSiamese.from_state_dict(state_dict)
     else:
-        model = TemporalSiamese(
-            hidden_size=TEMPORAL_HIDDEN_SIZE,
-            num_layers=TEMPORAL_NUM_LAYERS,
-            embedding_dim=TEMPORAL_EMBEDDING_DIM,
-        )
-        model.load_state_dict(state_dict)
+        model = TemporalSiamese.from_state_dict(state_dict)
     return model.to(device).eval()
 
 

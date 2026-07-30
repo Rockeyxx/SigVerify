@@ -172,6 +172,15 @@ ENROLLMENT_TRIALS = 10
 # Kept available because it should pay off once more writers are in the dataset.
 TEMPORAL_AUGMENT = False
 
+# Spatial augmentation: small affine warps plus occasional stroke-width change.
+# Unlike the temporal case above, this one has a real argument behind it. Every
+# spatial run best-validates at epoch 1 on 149,280 pairs, so the ceiling is the
+# *variety* the 301 training writers hold, not the pair count. Warping images is
+# the only way to add variety without new writers, and it is what the Siamese
+# references rely on at this dataset size. Training split only — `build_loader`
+# gates it on `shuffle`, so validation and test are never augmented.
+SPATIAL_AUGMENT = False
+
 # Early Stopping hyperparameters (monitors validation loss to halt training)
 EARLY_STOPPING_PATIENCE = 5            # Stop after 10 epochs without validation improvement
 EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrease required to trigger improvement

@@ -172,6 +172,10 @@ def parse_args(argv=None):
     parser.add_argument("--limit-pairs", type=int, default=None,
                         help="Subsample the test pairs to this many for a fast, reproducible "
                              "run instead of scoring the full held-out split")
+    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"], default="xyp",
+                        help="Must match the channels the weights were trained on. "
+                             "The model recovers its own width from the checkpoint, "
+                             "but the parser cannot, so a mismatch fails loudly here")
     parser.add_argument("--enroll", type=int, nargs="?", const=NUM_ENROLLMENT_REFERENCES,
                         default=None, metavar="K",
                         help="Score under the enrollment protocol the field uses and "
@@ -248,7 +252,11 @@ def main(argv=None):
 
     writer_samples = {}
     for directory in args.data_dir:
-        merge_datasets(writer_samples, parse_dataset(directory))
+        kwargs = ({"extra_channels": args.temporal_channels}
+                  if getattr(args, "temporal_channels", "xyp") != "xyp"
+                  and "svc2004" in os.path.basename(os.path.normpath(directory)).lower()
+                  else {})
+        merge_datasets(writer_samples, parse_dataset(directory, **kwargs))
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"

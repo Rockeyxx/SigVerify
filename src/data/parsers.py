@@ -37,6 +37,14 @@ from config.settings import (
 # this constant (rather than each file's own max) keeps pressure comparable
 # across signatures — a light signature must stay light.
 SVC_PRESSURE_MAX = 1023.0
+# WACOM tilt maxima, in tenths of a degree, from the SVC2004 device spec. Fixed
+# divisors rather than per-file ranges, for the same reason pressure uses one.
+SVC_AZIMUTH_MAX = 3600.0
+SVC_ALTITUDE_MAX = 900.0
+# Inter-sample gaps clip here before scaling. Measured across SVC2004 Task2:
+# 10 ms median, 50 ms p99, 311 ms max. Clipping keeps one long pause from
+# compressing every ordinary gap toward zero.
+SVC_MAX_GAP_MS = 100.0
 
 # SigComp2011 was captured on a WACOM Intuos3, which reports pen force on the
 # same 0–1023 scale as the SVC2004 tablet. Kept as its own name so that a
@@ -69,7 +77,7 @@ def _new_writer():
     return {"genuine": [], "forged": []}
 
 
-def normalize_trajectory(xy, pressure):
+def normalize_trajectory(xy, pressure, extra=None):
     """
     Normalize a raw trajectory into the model's expected [L, 3] input.
 
@@ -81,9 +89,14 @@ def normalize_trajectory(xy, pressure):
     Args:
         xy:       [L, 2] raw X/Y in device units.
         pressure: [L] pressure already scaled into [0, 1], or None to impute.
+        extra:    optional [L, K] of additional channels, ALREADY scaled into
+                  roughly [0, 1] by the caller using documented device maxima.
+                  Scaling here per-file would make one signature's range depend
+                  on its own extremes, the same mistake a per-file pressure max
+                  would be.
 
     Returns:
-        float32 [L, 3] — X and Y z-scored per signature, P in [0, 1].
+        float32 [L, 3 + K] — X and Y z-scored per signature, P in [0, 1].
 
     X/Y are standardized per-signature so the model keys on shape and dynamics
     rather than where on the tablet the person happened to sign, or how large.
@@ -101,7 +114,10 @@ def normalize_trajectory(xy, pressure):
     else:
         pressure = np.clip(np.asarray(pressure, dtype=np.float32), 0.0, 1.0)
 
-    return np.column_stack([xy, pressure]).astype(np.float32)
+    columns = [xy, pressure]
+    if extra is not None:
+        columns.append(np.asarray(extra, dtype=np.float32))
+    return np.column_stack(columns).astype(np.float32)
 
 
 def merge_datasets(target, incoming):
@@ -126,7 +142,7 @@ def merge_datasets(target, incoming):
     return target
 
 
-def parse_dataset(path):
+def parse_dataset(path, **kwargs):
     """
     Dispatch a dataset directory to its parser by directory name.
 
@@ -141,7 +157,9 @@ def parse_dataset(path):
             f"Expected one of: {', '.join(sorted(_PARSERS))}. "
             f"Rename the directory to match, or add a parser."
         )
-    return _PARSERS[name](path)
+    # kwargs reach only the parser that declares them; passing
+    # extra_channels at an image dataset is a caller error, not a silent no-op.
+    return _PARSERS[name](path, **kwargs)
 
 
 def parse_cedar(root=CEDAR_DIR):
@@ -251,7 +269,7 @@ def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
     return writers
 
 
-def load_svc2004_file(path):
+def load_svc2004_file(path, extra_channels=None):
     """
     Load one SVC2004 signature into a normalized [L, 3] (X, Y, P) array.
 
@@ -274,7 +292,27 @@ def load_svc2004_file(path):
 
     xy = rows[:, :2]
     pressure = rows[:, 6] / SVC_PRESSURE_MAX if rows.shape[1] >= 7 else None
-    return normalize_trajectory(xy, pressure)
+
+    extra = None
+    if extra_channels and rows.shape[1] >= 7:
+        if extra_channels == "tilt":
+            # WACOM reports both in tenths of a degree against documented maxima
+            # (azimuth 0-3600, altitude 0-900), so these are fixed divisors, not
+            # per-file statistics.
+            extra = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
+                                     rows[:, 5] / SVC_ALTITUDE_MAX])
+        elif extra_channels == "dt":
+            # Real inter-sample time. The model otherwise assumes a uniform
+            # 100 Hz grid, but measured dt has a 10 ms median and a 311 ms tail,
+            # so pauses and pen lifts are currently invisible to it.
+            gaps = np.zeros(len(rows), dtype=np.float32)
+            gaps[1:] = np.diff(rows[:, 2])
+            extra = np.clip(gaps, 0.0, SVC_MAX_GAP_MS)[:, None] / SVC_MAX_GAP_MS
+        else:
+            raise ValueError(f"Unknown extra_channels '{extra_channels}' "
+                             "— expected 'tilt', 'dt' or None")
+
+    return normalize_trajectory(xy, pressure, extra)
 
 
 def svc2004_has_pressure(root=SVC2004_DIR):
@@ -296,7 +334,7 @@ def svc2004_has_pressure(root=SVC2004_DIR):
     return False
 
 
-def parse_svc2004(root=SVC2004_DIR):
+def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
     """
     Parse SVC2004: flat `U{user}S{sample}.TXT`.
 
@@ -316,7 +354,7 @@ def parse_svc2004(root=SVC2004_DIR):
         label = "genuine" if sample <= 20 else "forged"
 
         writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename)))
+        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels))
 
     return writers
 
