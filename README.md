@@ -206,13 +206,13 @@ per writer, 512-d embedding. The Siamese column is Dey et al., whose FAR = FRR,
 so their figures are EER and compare directly. Every published figure quoted
 here, with its protocol, is in [References](#references).
 
-| dataset | compact trunk | **shipped (wide)** | published Siamese (Dey et al.) | best published, any method |
+| dataset | compact trunk | wide trunk | **shipped (wide + augment + LR decay)** | published Siamese (Dey et al.) |
 |---|---|---|---|---|
-| cedar (Latin) | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% | 0.00% |
-| bhsig_Hindi | 5.55% ± 0.76 | **4.65% ± 0.81** | 15.36% | 15.36% |
-| bhsig_Bengali | 14.69% ± 1.76 | **13.85% ± 1.30** | 13.89% | 13.89% |
-| utsig (Persian) | 33.76% ± 1.52 | **30.41% ± 2.32** | not evaluated | 11.16% at K = 5, writer-**dependent** |
-| pooled (65 writers) | 12.31% ± 0.96 | **11.78% ± 0.61** | — | — |
+| cedar (Latin) | 0.00% ± 0.00 | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% |
+| bhsig_Hindi | 5.55% ± 0.76 | 4.65% ± 0.81 | **4.48% ± 0.61** | 15.36% |
+| bhsig_Bengali | 14.69% ± 1.76 | 13.85% ± 1.30 | **12.26% ± 1.32** | 13.89% |
+| utsig (Persian) | 33.76% ± 1.52 | 30.41% ± 2.32 | **29.73% ± 2.57** | not evaluated |
+| pooled (65 writers) | 12.31% ± 0.96 | 11.78% ± 0.61 | **11.23% ± 0.47** | — |
 
 The wide trunk was measured against the compact one as three separate arms, and
 only the trunk itself paid off. Adding the reference's dropout schedule cost 6.78
@@ -229,6 +229,15 @@ before it is quoted as a headline.
 UTSig is the one genuine gap, and no Siamese network has been published on it:
 its state of the art fits a classifier per enrolled user, a stage this project
 measured and rejected because it made results 2–3× worse at 300 training writers.
+
+**Training-time augmentation** (small affine warps plus stroke-width jitter)
+broke a long-standing ceiling: every earlier spatial run peaked at epoch 1, which
+turned out to be image variety rather than pair supply, since 301 writers were
+seen pixel-identical every epoch. With augmentation the best epoch moved to 6.
+Plateau LR decay added on top ties on mean EER but tightens the draw spread 40%.
+The honest scale: 12.31% → 11.23% pooled across trunk width, augmentation and LR
+decay together. Roughly one EER point. The lever with real leverage is more
+writers.
 
 **Enrollment size is the cheapest remaining lever.** K is set at inference, so
 raising it needs no retraining. It only asks the user for more reference
@@ -253,6 +262,16 @@ Measured, it cost 2.47 pooled points on normal input **and** 3.00 points on
 pressure-blind input (23.32% → 20.32%), losing on the one path it existed to
 defend. It is now off. The pressure channel itself is worth about 2.3 points,
 from the Task1 vs Task2 ablation in `docs/SOLUTIONS.md`.
+
+**The channels the contract drops were measured, and one of them is expensive.**
+SVC2004 Task2 ships 7 channels; the capture contract keeps 3. On a 40-writer
+ablation (same split and seed as the 3-channel control at 19.55% K = 10), adding
+`azimuth + altitude` reaches **11.17% (−8.38)** and adding real inter-sample
+`dt` reaches **15.17% (−4.38)**. `button` is near-constant and worth nothing.
+Neither ships: the XPPen Deco 640 reports no tilt, and SigComp2011 carries
+neither channel, so both cost the branch 84 of its 124 writers. The tilt figure
+is the strongest argument on record for a different capture device. Full
+analysis in `docs/SOLUTIONS.md`.
 
 **SigComp Dutch is under the 5% target at K = 5**, and reaches 3.62% at K = 10.
 That is the pen-tablet condition matching the XPPen Deco 640, so the graded

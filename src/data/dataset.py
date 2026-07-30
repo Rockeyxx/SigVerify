@@ -293,6 +293,59 @@ def collate_temporal_pairs(batch):
     return padded1, lengths1, padded2, lengths2, torch.stack(list(labels))
 
 
+def augment_image(image, rng, max_rotation_deg=6.0, max_shear=0.08,
+                  max_scale=0.08, max_translate=0.04, stroke_prob=0.3):
+    """
+    Perturb one preprocessed [1, H, W] image for training-time augmentation.
+
+    The spatial branch trains on 301 writers and saturates inside a single
+    epoch, so the limit is how much *variety* the training set holds, not how
+    many pairs are drawn from it. This is the only lever that adds variety
+    without new writers, and it is what the Siamese references (Dey et al.,
+    Hafemann et al.) rely on at comparable dataset sizes.
+
+    Every warp is small and label-preserving: a signature rotated 6 degrees or
+    written with a slightly wider pen is still that person's signature. Large
+    warps would manufacture pairs whose label is no longer true.
+
+    Ranges are deliberately conservative because forgery detection keys on fine
+    stroke geometry — the thing an aggressive warp destroys first.
+
+    Args:
+        image: [1, H, W] float32, ink high, background 0 (post-`preprocess_image`).
+        rng:   a `numpy.random.Generator`.
+
+    Returns: a new [1, H, W] float32 array in the same range. Never in-place.
+    """
+    channels, height, width = image.shape
+    canvas = image[0]
+
+    angle = rng.uniform(-max_rotation_deg, max_rotation_deg)
+    scale = 1.0 + rng.uniform(-max_scale, max_scale)
+    shear = rng.uniform(-max_shear, max_shear)
+
+    matrix = cv2.getRotationMatrix2D((width / 2.0, height / 2.0), angle, scale)
+    matrix[0, 1] += shear                      # horizontal skew, as in slanted handwriting
+    matrix[0, 2] += rng.uniform(-max_translate, max_translate) * width
+    matrix[1, 2] += rng.uniform(-max_translate, max_translate) * height
+
+    # borderValue=0 keeps the background black, matching the inverted polarity
+    # preprocess_image produces. A white border would inject a bright constant
+    # the convolutions would read as ink.
+    warped = cv2.warpAffine(canvas, matrix, (width, height),
+                            flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+
+    # Stroke width stands in for pen choice and writing pressure. Applied to
+    # only some samples so the unmodified width stays the dominant mode.
+    if rng.random() < stroke_prob:
+        kernel = np.ones((2, 2), dtype=np.uint8)
+        warped = (cv2.dilate(warped, kernel) if rng.random() < 0.5
+                  else cv2.erode(warped, kernel))
+
+    return warped.reshape(channels, height, width).astype(np.float32)
+
+
 class SpatialSignatureDataset(Dataset):
     """
     PyTorch Dataset loading spatial (image) signature pairs for Siamese training.
@@ -303,10 +356,12 @@ class SpatialSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels, transform=None):
+    def __init__(self, pairs, labels, transform=None, augment=False):
         self.pairs = pairs
         self.labels = labels
         self.transform = transform
+        self.augment = augment
+        self._rng = np.random.default_rng()
 
     def __len__(self):
         return len(self.pairs)
@@ -315,6 +370,13 @@ class SpatialSignatureDataset(Dataset):
         path1, path2 = self.pairs[index]
         img1 = preprocess_image(path1)
         img2 = preprocess_image(path2)
+
+        if self.augment:
+            # Each side is warped independently. Warping a pair identically would
+            # move both embeddings the same way and leave the distance between
+            # them unchanged, which teaches the metric nothing.
+            img1 = augment_image(img1, self._rng)
+            img2 = augment_image(img2, self._rng)
 
         if self.transform:
             img1 = self.transform(img1)

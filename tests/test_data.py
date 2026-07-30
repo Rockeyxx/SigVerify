@@ -14,6 +14,7 @@ from src.data.dataset import (
     collate_temporal_pairs,
     generate_skilled_pairs,
     augment_trajectory,
+    augment_image,
     preprocess_image,
     quality_gate,
     writer_independent_split,
@@ -444,3 +445,82 @@ class TestSpatialInputGeometry:
         monkeypatch.setattr(ds, "SPATIAL_SQUARE_PAD", False)
         out = ds.preprocess_image(self._wide_image(tmp_path), target_size=(220, 155))
         assert out.shape == (1, 155, 220)
+
+
+class TestSpatialAugmentation:
+    """
+    Augmentation exists to add variety the 301 training writers do not hold.
+    It is only safe if every warp is label-preserving and confined to training.
+    """
+
+    @staticmethod
+    def _image():
+        # Ink high on a black field, matching what preprocess_image emits.
+        img = np.zeros((1, 155, 220), dtype=np.float32)
+        img[0, 60:95, 30:190] = 1.0
+        return img
+
+    def test_output_keeps_shape_dtype_and_range(self):
+        out = augment_image(self._image(), np.random.default_rng(0))
+        assert out.shape == (1, 155, 220)
+        assert out.dtype == np.float32
+        # Warping must not push values outside the normalized range the model
+        # was trained to expect.
+        assert out.min() >= 0.0 and out.max() <= 1.0
+
+    def test_it_actually_changes_the_image(self):
+        source = self._image()
+        out = augment_image(source, np.random.default_rng(0))
+        assert not np.array_equal(out, source)
+
+    def test_the_source_image_is_never_modified_in_place(self):
+        source = self._image()
+        before = source.copy()
+        augment_image(source, np.random.default_rng(0))
+        assert np.array_equal(source, before)
+
+    def test_ink_survives_the_warp(self):
+        # A warp that rotated or scaled the signature off-canvas would produce a
+        # blank image whose "genuine" label is a lie.
+        for seed in range(25):
+            out = augment_image(self._image(), np.random.default_rng(seed))
+            assert out.sum() > 0.0, f"seed {seed} erased the signature"
+
+    def test_background_stays_black(self):
+        # borderValue must match the inverted polarity. A white fill would read
+        # as a large constant of ink to every convolution.
+        out = augment_image(self._image(), np.random.default_rng(3))
+        assert out[0, 0, 0] == 0.0 and out[0, -1, -1] == 0.0
+
+    def test_different_seeds_give_different_warps(self):
+        a = augment_image(self._image(), np.random.default_rng(1))
+        b = augment_image(self._image(), np.random.default_rng(2))
+        assert not np.array_equal(a, b)
+
+    def test_dataset_leaves_images_untouched_when_augment_is_off(self, tmp_path):
+        pairs, labels = _one_pair(tmp_path)
+        plain = SpatialSignatureDataset(pairs, labels, augment=False)
+        first, second = plain[0][0], plain[0][1]
+        again = SpatialSignatureDataset(pairs, labels, augment=False)[0]
+        # Deterministic without augmentation, so repeat reads must agree.
+        assert torch.equal(first, again[0]) and torch.equal(second, again[1])
+
+    def test_dataset_augments_both_sides_independently(self, tmp_path):
+        # Warping a pair identically would leave the distance between the two
+        # embeddings unchanged, which teaches the metric nothing.
+        pairs, labels = _one_pair(tmp_path, identical=True)
+        item = SpatialSignatureDataset(pairs, labels, augment=True)[0]
+        assert not torch.equal(item[0], item[1])
+
+
+def _one_pair(tmp_path, identical=False):
+    """Write one genuine pair to disk and return it in (pairs, labels) form."""
+    paths = []
+    for i in range(2):
+        img = np.full((155, 220), 255, dtype=np.uint8)
+        offset = 0 if identical else i * 4
+        cv2.rectangle(img, (30 + offset, 60), (190, 95), 0, -1)
+        path = str(tmp_path / f"sig_{i}.png")
+        cv2.imwrite(path, img)
+        paths.append(path)
+    return [(paths[0], paths[1])], [1.0]

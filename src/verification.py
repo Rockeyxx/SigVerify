@@ -61,12 +61,9 @@ def load_model(branch, weights_path, device="cpu"):
         # unrecoverable once encrypted into the database.
         model = SpatialSiamese.from_state_dict(state_dict)
     elif branch == "temporal":
-        model = TemporalSiamese(
-            hidden_size=TEMPORAL_HIDDEN_SIZE,
-            num_layers=TEMPORAL_NUM_LAYERS,
-            embedding_dim=TEMPORAL_EMBEDDING_DIM,
-        )
-        model.load_state_dict(state_dict)
+        # Architecture from the checkpoint, not config: a 4- or 5-channel
+        # experiment must never be silently reinterpreted as the 3-channel default.
+        model = TemporalSiamese.from_state_dict(state_dict)
     else:
         raise ValueError(f"Unknown branch '{branch}' — expected 'spatial' or 'temporal'")
 

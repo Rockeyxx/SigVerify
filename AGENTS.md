@@ -21,7 +21,7 @@ them, even if they appear in the literature review or older drafts:
   continuous embeddings with L2 or cosine distance
 - **No SQLCipher / whole-file DB encryption** — encryption is
   application-layer AES-256-GCM only
-- **No extra *captured* channels** — the capture contract is `[1, L, 3]`,
+- **No extra _captured_ channels** — the capture contract is `[1, L, 3]`,
   `(X, Y, Pressure)`. The device must not be asked for azimuth, altitude or
   tilt. Features **derived** from those three channels inside the model are
   allowed and expected (see Temporal Branch below)
@@ -31,13 +31,13 @@ them, even if they appear in the literature review or older drafts:
 
 ## Hard Constraints
 
-| Constraint | Value |
-|---|---|
-| Inference RAM ceiling | ≤ 4 GB |
-| End-to-end verification latency | < 3.0 seconds |
-| Execution | Local only — no cloud, no dedicated GPU |
-| Platform support | Windows + Arch Linux (x86_64 and ARM64) |
-| Native build steps | None — all dependencies must have prebuilt wheels |
+| Constraint                      | Value                                             |
+| ------------------------------- | ------------------------------------------------- |
+| Inference RAM ceiling           | ≤ 4 GB                                            |
+| End-to-end verification latency | < 3.0 seconds                                     |
+| Execution                       | Local only — no cloud, no dedicated GPU           |
+| Platform support                | Windows + Arch Linux (x86_64 and ARM64)           |
+| Native build steps              | None — all dependencies must have prebuilt wheels |
 
 ---
 
@@ -55,7 +55,7 @@ them, even if they appear in the literature review or older drafts:
 - Pixel polarity: **inverted — background 0, ink high.** Measured: CEDAR
   4.86% → 0.00% EER. Ink covers ~1% of the canvas, so an un-inverted image feeds
   every convolution a large constant offset carrying no identity signal.
-- Backbone: **Siamese CNN** → **512-d** embedding. The *model type* is fixed;
+- Backbone: **Siamese CNN** → **512-d** embedding. The _model type_ is fixed;
   the embedding width is a tunable measured on held-out EER. Changing it is also
   a **database contract change** — 512-d stores as 2048 bytes, 128-d as 512 —
   so it requires re-enrolling every stored template.
@@ -78,9 +78,20 @@ them, even if they appear in the literature review or older drafts:
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
   through it. Never add a load path that builds the model from `config/` instead:
-  config points at whatever is being trained *now*, and scoring an archived
+  config points at whatever is being trained _now_, and scoring an archived
   checkpoint under the wrong architecture yields a plausible number that means
   nothing.
+- **Training-time augmentation is on** (`SPATIAL_AUGMENT`). Measured 2026-07-30:
+  every prior spatial run best-validated at **epoch 1**, which was image variety,
+  not pair supply — 301 writers seen pixel-identical every epoch. Small affine
+  warps plus stroke-width jitter moved the best epoch to 6 and pooled EER 11.78%
+  → 11.19%. Keep the ranges small; forgery detection keys on fine stroke geometry.
+  Warp each side of a pair **independently**, or the distance between them is
+  unchanged and the metric learns nothing.
+- **LR schedule: plateau** (`--lr-schedule plateau`, halve after 2 stalled
+  epochs). Fired twice to 2.5e-4 and reached the best validation loss of any
+  spatial run (0.1355). Pooled EER ties augmentation alone, but the draw spread
+  tightened 40% (±0.83 → ±0.47). It ships for the spread, not the mean.
 - Normalization: **GroupNorm or LayerNorm** — never BatchNorm (pair-sampled batches)
 - Quality gate: effective-resolution proxies (bounding-box pixel size +
   Laplacian-variance sharpness). Do **not** gate on the file's DPI tag
@@ -89,7 +100,7 @@ them, even if they appear in the literature review or older drafts:
 
 - Input tensor: **`[1, L, 3]`** — `(X, Y, Pressure)`, variable length `L`
 - **Derived dynamics:** the model appends per-frame deltas `(dX, dY, dP)` to
-  form a `[1, L, 6]` tensor *internally*, before the LSTM. Velocity is the most
+  form a `[1, L, 6]` tensor _internally_, before the LSTM. Velocity is the most
   discriminative feature family in the online-verification literature: a forger
   can copy the shape of a signature while tracing it far more slowly and evenly.
   This costs the capture device nothing, since deltas come from consecutive
@@ -106,6 +117,20 @@ them, even if they appear in the literature review or older drafts:
   an appeal to robustness.
 - **Inference:** if no pressure available, impute `P = 1.0` and set the
   degraded-mode flag in the GUI
+- **The dropped channels were measured 2026-07-30, and the ban now has a price.**
+  On SVC2004 Task2 (40 writers, seed 42, 3-channel control 19.55% at K=10):
+  adding `azimuth + altitude` reaches **11.17% (−8.38)**, adding real `dt`
+  reaches **15.17% (−4.38)**. `button` is near-constant (mean 1.0) and carries
+  nothing. Tilt is still banned under Drift Prevention **and** unusable on the
+  XPPen Deco 640, but −8.38 points is a live argument for a different tablet, and
+  the hardware claim is flagged unconfirmed below. `dt` is deployable today.
+  Neither is shipped; `SIGCOMP2011` has neither channel, so both cost the branch
+  84 of its 124 writers. Full analysis in `docs/SOLUTIONS.md`.
+- **A temporal checkpoint carries its own channel count.**
+  `TemporalSiamese.from_state_dict` reads it from the LSTM input width
+  (`2 x input_features`, because dynamics are concatenated first). Every load
+  path uses it, so a 4- or 5-channel experiment can never be silently scored as
+  the 3-channel default.
 
 #### Capture Output Contract (device → model)
 
@@ -116,20 +141,20 @@ the deployment device.
 
 The target device is an **XPPen Deco 640**, which reports position and pressure
 but no tilt or azimuth. The 3-channel contract is therefore what the hardware
-can actually deliver, not merely a preference.
+can actually deliver, not merely a preference. (not confirmed yet editable)
 
 `src/capture/` is responsible for narrowing whatever the device produces down
-to the 3 channels the model takes. Widening the *captured* contract is banned
+to the 3 channels the model takes. Widening the _captured_ contract is banned
 under Drift Prevention. Deriving further features from those 3 channels inside
 the model is not.
 
-| Device channel | Fate |
-|---|---|
-| X, Y | **Kept** — z-scored per signature (zero mean, unit variance per axis) |
-| Pressure | **Kept** — scaled to `[0.0, 1.0]`; absent ⇒ impute `1.0` + degraded flag |
-| Timestamp | Dropped |
-| Button / contact state | Dropped — it is pen-down/up, **not** a pressure substitute |
-| Azimuth, altitude, tilt | Dropped |
+| Device channel          | Fate                                                                     |
+| ----------------------- | ------------------------------------------------------------------------ |
+| X, Y                    | **Kept** — z-scored per signature (zero mean, unit variance per axis)    |
+| Pressure                | **Kept** — scaled to `[0.0, 1.0]`; absent ⇒ impute `1.0` + degraded flag |
+| Timestamp               | Dropped                                                                  |
+| Button / contact state  | Dropped — it is pen-down/up, **not** a pressure substitute               |
+| Azimuth, altitude, tilt | Dropped                                                                  |
 
 - Capture **must** normalize via `src.data.parsers.normalize_trajectory()` —
   the same function the training parsers call. Any separate normalization path
@@ -167,13 +192,13 @@ S_final = α · S_spatial + (1 − α) · S_temporal
 
 Cite **exactly** these five standards and no others:
 
-| Standard | Application |
-|---|---|
-| **IEEE 730** | Configuration control, deviation log, audit log |
-| **ISO/IEC 23053:2022** | Writer-independent data splits, documented training config |
-| **ISO/IEC 24745:2022** | Only derived embeddings persisted, never raw biometric data |
-| **ISO/IEC 9075-1:2023** | Structured relational SQLite schema |
-| **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of stored embedding payloads |
+| Standard                 | Application                                                 |
+| ------------------------ | ----------------------------------------------------------- |
+| **IEEE 730**             | Configuration control, deviation log, audit log             |
+| **ISO/IEC 23053:2022**   | Writer-independent data splits, documented training config  |
+| **ISO/IEC 24745:2022**   | Only derived embeddings persisted, never raw biometric data |
+| **ISO/IEC 9075-1:2023**  | Structured relational SQLite schema                         |
+| **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of stored embedding payloads         |
 
 Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 
@@ -188,7 +213,7 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 - **Never persist raw images or raw coordinate streams** — only derived
   embeddings (ISO/IEC 24745)
 - Audit log: record every verification event — `User ID, Timestamp,
-  Modality State, Similarity Score, Decision` — plaintext and queryable
+Modality State, Similarity Score, Decision` — plaintext and queryable
 
 ---
 
@@ -212,15 +237,15 @@ cryptography, matplotlib, scikit-learn, Pillow, sqlite3 (stdlib)
 
 ## Module Boundaries
 
-| Directory | Responsibility | Does NOT handle |
-|---|---|---|
-| `src/models/` | Network architectures, loss, fusion | Data loading, evaluation metrics, GUI |
-| `src/data/` | Dataset loading, preprocessing, augmentation, splitting | Model training, database operations |
-| `src/database/` | SQLite schema, embedding CRUD, encryption, audit log | Model inference, GUI rendering |
-| `src/capture/` | Tablet hardware abstraction, platform drivers | Image preprocessing, model inference |
-| `src/gui/` | PyQt5 application UI, user interaction | Direct model training, database schema |
-| `scripts/` | Training and evaluation entry points | Core library logic (import from `src/`) |
-| `config/` | Centralized hyperparameters and constants | Runtime logic |
+| Directory       | Responsibility                                          | Does NOT handle                         |
+| --------------- | ------------------------------------------------------- | --------------------------------------- |
+| `src/models/`   | Network architectures, loss, fusion                     | Data loading, evaluation metrics, GUI   |
+| `src/data/`     | Dataset loading, preprocessing, augmentation, splitting | Model training, database operations     |
+| `src/database/` | SQLite schema, embedding CRUD, encryption, audit log    | Model inference, GUI rendering          |
+| `src/capture/`  | Tablet hardware abstraction, platform drivers           | Image preprocessing, model inference    |
+| `src/gui/`      | PyQt5 application UI, user interaction                  | Direct model training, database schema  |
+| `scripts/`      | Training and evaluation entry points                    | Core library logic (import from `src/`) |
+| `config/`       | Centralized hyperparameters and constants               | Runtime logic                           |
 
 ---
 
@@ -254,11 +279,11 @@ Scopes: models, data, database, capture, gui, config, scripts
 Before a new online dataset is merged with SVC2004, **measure** these against it
 and align inside that dataset's loader, not in the model:
 
-| property | SVC2004 Task2 | why it matters |
-|---|---|---|
-| sample rate | 100 Hz (timestamp steps 10 ms) | The model derives `(dX, dY, dP)` from consecutive frames, so a 200 Hz dataset reports half the delta for the same pen speed |
-| pen-up samples | none — 0 of 100,494 points have `P = 0` | A dataset that records in-air travel gives the pressure channel a second meaning |
-| pressure scale | 0–1023 device units | A per-file max would make a light signature look heavy |
+| property       | SVC2004 Task2                           | why it matters                                                                                                              |
+| -------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| sample rate    | 100 Hz (timestamp steps 10 ms)          | The model derives `(dX, dY, dP)` from consecutive frames, so a 200 Hz dataset reports half the delta for the same pen speed |
+| pen-up samples | none — 0 of 100,494 points have `P = 0` | A dataset that records in-air travel gives the pressure channel a second meaning                                            |
+| pressure scale | 0–1023 device units                     | A per-file max would make a light signature look heavy                                                                      |
 
 This is not hypothetical bookkeeping. Merging SVC2004 Task1 into Task2 without
 reconciling the pressure channel collapsed the model to Cohen's d 0.279, and
@@ -272,10 +297,10 @@ results are reported. The tasks share filenames, writer count, and split seed,
 so the only variable between the runs is the pressure channel — which makes the
 difference in EER a direct measurement of what pressure contributes.
 
-| Run | Dataset | Channel 3 | Pressure dropout | Role |
-|---|---|---|---|---|
-| **A — baseline** | `data/svc2004_task1` | `P = 1.0` imputed (4-col source) | Disabled — it is a no-op when every P is already 1.0 | Pressure-blind control. Also the honest lower bound for any device that reports no pressure |
-| **B — headline** | `data/svc2004_task2` | Real pressure, scaled to `[0, 1]` (7-col source) | **Active at `PRESSURE_DROPOUT_RATE`** | The shipped temporal model — matches the capture device's channel set |
+| Run              | Dataset              | Channel 3                                        | Pressure dropout                                     | Role                                                                                        |
+| ---------------- | -------------------- | ------------------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **A — baseline** | `data/svc2004_task1` | `P = 1.0` imputed (4-col source)                 | Disabled — it is a no-op when every P is already 1.0 | Pressure-blind control. Also the honest lower bound for any device that reports no pressure |
+| **B — headline** | `data/svc2004_task2` | Real pressure, scaled to `[0, 1]` (7-col source) | **Active at `PRESSURE_DROPOUT_RATE`**                | The shipped temporal model — matches the capture device's channel set                       |
 
 Rules:
 

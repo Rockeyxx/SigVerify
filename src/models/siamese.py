@@ -280,6 +280,46 @@ class TemporalSiamese(nn.Module):
         # cone, pushing discrimination into magnitude rather than direction.
         self.embedding = nn.Linear(hidden_size * 2, embedding_dim)
 
+    @classmethod
+    def from_state_dict(cls, state_dict, **overrides):
+        """
+        Rebuild a TemporalSiamese with the architecture its weights declare.
+
+        The LSTM's input width is `2 * input_features`, because `_add_dynamics`
+        concatenates per-frame deltas before the sequence reaches it. Recovering
+        the count here means a 4- or 5-channel checkpoint scores under the
+        channels it trained on, instead of being silently reinterpreted as the
+        3-channel default. Same contract as `SpatialSiamese.from_state_dict`.
+        """
+        weight = state_dict["lstm.weight_ih_l0"]
+        hidden_size = weight.shape[0] // 4
+        doubled = weight.shape[1]
+        if doubled % 2:
+            raise ValueError(
+                f"LSTM input width {doubled} is odd, so it cannot be "
+                "2 * input_features. This checkpoint predates derived dynamics "
+                "and cannot be scored by this class."
+            )
+
+        # Bidirectional layers appear twice, as `..._l0` and `..._l0_reverse`,
+        # so strip the suffix before reading the layer index.
+        layers = 1 + max(
+            (int(k.rsplit("_l", 1)[-1].replace("_reverse", ""))
+             for k in state_dict if k.startswith("lstm.weight_ih_l")),
+            default=0,
+        )
+        params = {
+            "input_features": doubled // 2,
+            "hidden_size": hidden_size,
+            "num_layers": layers,
+            "embedding_dim": state_dict["embedding.weight"].shape[0],
+        }
+        params.update(overrides)
+
+        model = cls(**params)
+        model.load_state_dict(state_dict)
+        return model
+
     @staticmethod
     def _add_dynamics(x):
         """

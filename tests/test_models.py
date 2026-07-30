@@ -469,3 +469,42 @@ class TestSpatialGradientCheckpointing:
         with torch.no_grad():
             out = model.encode(torch.randn(2, 1, 155, 220))
         assert out.shape == (2, 64)
+
+
+class TestTemporalArchitectureRecovery:
+    """
+    A temporal checkpoint must declare its own channel count. The 3-channel
+    contract is the shipped one, but 4- and 5-channel experiments exist, and
+    scoring one under the wrong width would produce a plausible, meaningless
+    number rather than an error.
+    """
+
+    @pytest.mark.parametrize("channels", [3, 4, 5])
+    def test_channel_count_survives_a_round_trip(self, channels):
+        original = TemporalSiamese(input_features=channels, embedding_dim=128)
+        restored = TemporalSiamese.from_state_dict(original.state_dict())
+        # _add_dynamics doubles the width before the LSTM, so the recovered
+        # input size must be exactly 2x the declared channel count.
+        assert restored.lstm.input_size == channels * 2
+
+    def test_restored_model_scores_identically(self):
+        torch.manual_seed(0)
+        original = TemporalSiamese(input_features=4, embedding_dim=128).eval()
+        restored = TemporalSiamese.from_state_dict(original.state_dict()).eval()
+        batch = torch.randn(2, 25, 4)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(batch), restored.encode(batch))
+
+    def test_embedding_width_and_depth_are_recovered(self):
+        original = TemporalSiamese(input_features=3, embedding_dim=64, num_layers=2)
+        restored = TemporalSiamese.from_state_dict(original.state_dict())
+        assert restored.embedding.out_features == 64
+        assert restored.lstm.num_layers == 2
+
+    def test_a_pre_dynamics_checkpoint_is_rejected(self):
+        # An odd LSTM input width cannot be 2 * input_features, so it predates
+        # derived dynamics and must fail loudly instead of being rounded.
+        broken = TemporalSiamese(input_features=3).state_dict()
+        broken["lstm.weight_ih_l0"] = broken["lstm.weight_ih_l0"][:, :5]
+        with pytest.raises(ValueError, match="odd"):
+            TemporalSiamese.from_state_dict(broken)
