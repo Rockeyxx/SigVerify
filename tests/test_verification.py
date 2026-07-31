@@ -180,12 +180,17 @@ class TestVerify:
         assert result["routing"] == "multimodal"
         os.unlink(spath)
 
-    def test_failed_quality_gate_marks_degraded(self):
+    def test_failed_quality_gate_drops_the_spatial_branch(self):
         """
-        The orphaned quality gate must actually run on the spatial path.
+        A probe that fails the quality gate must be excluded from fusion, not
+        merely flagged.
 
-        Uses the multimodal route deliberately: that path is otherwise
-        `degraded=False`, so a True here can only come from the quality gate.
+        This assertion was inverted deliberately: it previously required the
+        gate-failing image to keep contributing to a `multimodal` verdict, which
+        let a blurry or undersized capture carry the same weight as a clean one
+        and flip the decision. The README's Capture Contract says the gate
+        rejects such an image, so the route must collapse to the modality that
+        still has evidence.
         """
         smodel, srefs, good_path = self._spatial_setup()
         tmodel, trefs, traj = self._temporal_setup()
@@ -193,12 +198,26 @@ class TestVerify:
 
         clean = verify(spatial=(smodel, srefs, good_path), temporal=(tmodel, trefs, traj))
         assert clean["degraded"] is False
+        assert clean["routing"] == "multimodal"
 
         gated = verify(spatial=(smodel, srefs, bad_path), temporal=(tmodel, trefs, traj))
-        assert gated["routing"] == "multimodal"
+        assert gated["routing"] == "temporal_only"
         assert gated["degraded"] is True
 
         os.unlink(good_path)
+        os.unlink(bad_path)
+
+    def test_failed_quality_gate_with_no_other_modality_raises(self):
+        """
+        Spatial-only verification of a gate-failing image has no evidence left,
+        so it must raise rather than return a confident verdict built on nothing.
+        """
+        smodel, srefs, _ = self._spatial_setup()
+        bad_path = _blank_image()
+
+        with pytest.raises(ValueError, match="No usable evidence"):
+            verify(spatial=(smodel, srefs, bad_path))
+
         os.unlink(bad_path)
 
     def test_nearest_reference_matching(self):

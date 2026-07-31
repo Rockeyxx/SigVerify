@@ -53,6 +53,84 @@ A multimodal biometric verification system that authenticates handwritten signat
 - **Spatial (offline):** any image format (JPG, PNG, etc.); app resizes to 155×220, inverts, normalizes internally.
 - **Temporal (online):** trajectory at 100 Hz with X, Y, Pressure channels; app z-scores X/Y per signature and scales pressure to [0.0, 1.0].
 
+### Capture Contract
+
+What the capture layer must guarantee before a sample reaches the model. These are
+not style preferences — each one is a documented assumption the training data
+satisfies, so a violation puts the probe in a distribution the model never saw.
+
+#### Spatial — hard gates
+
+`quality_gate()` (`src/data/dataset.py:104`) rejects the image outright if either
+fails, and sets `degraded: true` on the result, which the GUI must surface:
+
+| gate | rule | constant |
+| --- | --- | --- |
+| Ink bounding box | `min(width, height) >= 64 px` **in the submitted image** | `MIN_BBOX_PIXELS = 64` |
+| Sharpness | Laplacian variance `>= 50.0` | `MIN_LAPLACIAN_VARIANCE = 50.0` |
+
+#### Spatial — what the frontend must do
+
+1. **Apply EXIF rotation before submitting.** `cv2.imread` ignores the orientation
+   tag while every phone gallery honours it, so a portrait photo arrives 90° off
+   and looks correct in every viewer you would check it in. The model has no
+   rotation invariance. Use `PIL.ImageOps.exif_transpose`, or re-encode to strip EXIF.
+2. **Crop tight to the ink.** `SPATIAL_SQUARE_PAD = False`, so the image is resized
+   *straight* onto 220×155 with no padding. Desk, margin and shadow are canvas
+   taken from the signature.
+3. **Use one fixed capture frame for enrollment and verification.** Because nothing
+   is padded, a different framing stretches the signature by a different amount and
+   the model sees a different shape. Measured on three photos of one person's
+   signature: aspect ratios of **0.67, 1.18 and 0.85**, which left the genuine probe
+   scoring 0.6498 against a forgery's 0.6366 — correctly ordered, but only 0.0132
+   apart and both below τ. On the scan datasets every image is already tight and
+   consistent, so this failure mode never appears in the reported EER.
+4. **Dark ink on light paper.** The pipeline inverts internally so that background
+   becomes 0 and ink is high; do not pre-invert.
+5. Colour is discarded at load — greyscale in is fine.
+
+#### Temporal
+
+The capture layer **must call `parsers.normalize_trajectory()`**. Skipping it feeds
+raw device units to a model trained on z-scored input, and the embeddings are then
+meaningless rather than merely worse.
+
+| requirement | value |
+| --- | --- |
+| Shape | `[L, 3]` float32 — X, Y, Pressure |
+| Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
+| Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
+| Pen-up samples | dropped (`P = 0`) |
+| X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
+| No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
+
+#### Enrollment and decision
+
+| | value | constant |
+| --- | --- | --- |
+| References per user | **5** | `NUM_ENROLLMENT_REFERENCES = 5` |
+| Matching | nearest reference, not the mean | `_nearest_reference_score` |
+| Score | `S = 1 / (1 + distance)` | |
+| Threshold | `τ = 0.7143` | `DECISION_THRESHOLD` |
+
+Enrolling fewer than 5 references drops the system into the pair-scoring regime,
+which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
+
+#### Checking a real capture
+
+`tools/verify_my_signature.py` runs photographs through the deployed decision path
+and prints the raw score and its margin from τ, so a marginal call can be told
+apart from a confident one:
+
+```bash
+python tools/verify_my_signature.py --crop --crop-dir /tmp/sigcrop \
+    --references refs/*.jpg --probes probe.jpg
+```
+
+`--crop` applies the EXIF fix, ink-crop and binarisation described above. Keep
+`--crop-dir` and **look at the cropped images** — a bad crop is the most common
+reason a genuine signature is rejected, and the score alone will not reveal it.
+
 ---
 
 ## Features

@@ -191,7 +191,7 @@ TEMPORAL_AUGMENT = False
 # the only way to add variety without new writers, and it is what the Siamese
 # references rely on at this dataset size. Training split only — `build_loader`
 # gates it on `shuffle`, so validation and test are never augmented.
-SPATIAL_AUGMENT = False
+SPATIAL_AUGMENT = True
 
 # Early Stopping hyperparameters (monitors validation loss to halt training)
 EARLY_STOPPING_PATIENCE = 5            # Stop after 10 epochs without validation improvement

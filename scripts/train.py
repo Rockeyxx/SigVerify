@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 
+import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -171,6 +172,25 @@ def build_writer_samples(data_dirs, extra_channels=None):
     return writer_samples
 
 
+def _seed_worker(worker_id):
+    """
+    Give each DataLoader worker its own augmentation RNG stream.
+
+    Workers are forked, so without this they inherit one already-initialized
+    generator and replay the *same* rotation/shear/stroke-width draws in
+    lockstep — the augmentation still runs, but its diversity silently collapses
+    toward a single worker's worth. Deriving each stream from the dataset's own
+    seed keeps the run reproducible from `--seed`.
+    """
+    info = torch.utils.data.get_worker_info()
+    if info is None:
+        return
+    base = getattr(info.dataset, "_seed", None)
+    if base is None:
+        return
+    info.dataset._rng = np.random.default_rng(base + worker_id)
+
+
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
                  augment=SPATIAL_AUGMENT):
     """
@@ -190,7 +210,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         # are never augmented — an augmented val set would move the target the
         # early-stopping rule is measuring against.
         dataset = SpatialSignatureDataset(pairs, labels,
-                                          augment=shuffle and augment)
+                                          augment=shuffle and augment,
+                                          seed=seed)
         collate = None
     else:
         pairs, labels = generate_skilled_pairs(
@@ -204,7 +225,7 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                         num_workers=num_workers, pin_memory=PIN_MEMORY,
-                        collate_fn=collate)
+                        collate_fn=collate, worker_init_fn=_seed_worker)
     return loader, len(pairs)
 
 
@@ -302,7 +323,7 @@ def save_weights(model, path):
 
 def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         weights_path, checkpoint_path, start_epoch=0, early_stopping=None,
-        scheduler=None):
+        scheduler=None, resume_best=None):
     """
     Run the full training loop: per-epoch checkpoint, best-validation weight
     save, and early stopping.
@@ -319,7 +340,12 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
                                        min_delta=EARLY_STOPPING_MIN_DELTA)
 
     history = {"train_loss": [], "val_loss": []}
-    best_val_loss = float("inf")
+    # Resuming must inherit the best validation loss reached so far. Starting
+    # from infinity makes the first resumed epoch "best" by definition, so a
+    # *worse* model overwrites good weights and early stopping restarts its
+    # count against an inflated baseline. Measured: a run stopped at val 0.1153
+    # and resumed recorded the next epoch's 0.1202 as its new best.
+    best_val_loss = float("inf") if resume_best is None else resume_best
 
     for epoch in range(start_epoch, epochs):
         train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer,
@@ -445,13 +471,19 @@ def main(argv=None):
     early_stopping = EarlyStopping(patience=args.patience,
                                    min_delta=EARLY_STOPPING_MIN_DELTA)
     start_epoch = 0
+    resume_best = None
 
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        print(f"Resumed training from epoch {start_epoch}")
+        # `loss` is the validation loss at the checkpointed epoch (see
+        # save_checkpoint). Carrying it forward stops the resumed run from
+        # treating its first epoch as a new best and overwriting better weights.
+        resume_best = checkpoint.get("loss")
+        print(f"Resumed training from epoch {start_epoch}"
+              + (f", best val loss {resume_best:.4f}" if resume_best is not None else ""))
 
     if args.init_weights:
         # Fine-tuning, not resuming: take the weights and nothing else. The
@@ -477,7 +509,7 @@ def main(argv=None):
     history = fit(model, train_loader, val_loader, loss_fn, optimizer, device,
                   args.epochs, weights_path, checkpoint_path,
                   start_epoch=start_epoch, early_stopping=early_stopping,
-                  scheduler=scheduler)
+                  scheduler=scheduler, resume_best=resume_best)
 
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")

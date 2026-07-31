@@ -29,6 +29,7 @@ Supported datasets:
   Temporal: SVC2004, In-house collection
 """
 
+import itertools
 import os
 import random
 
@@ -250,17 +251,25 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
             len(genuine) * len(forged),               # available impostor combinations
         )
 
-        # Genuine pairs: two authentic signatures from the same writer
-        num_genuine = num_pairs
-        for _ in range(num_genuine):
-            s1, s2 = rng.sample(genuine, 2)
+        # Both arms enumerate their pair space, shuffle it, and take the first
+        # `num_pairs` — they do **not** draw `num_pairs` times with replacement.
+        #
+        # Drawing with replacement from a space of the same size returns only
+        # about 1 - 1/e of it, so a writer whose budget said 276 was really
+        # training on ~174 distinct pairs and ~102 duplicates. `num_pairs` is
+        # already capped at the available combination count above, so the slice
+        # can never run short of the requested budget.
+        genuine_space = list(itertools.combinations(genuine, 2))
+        rng.shuffle(genuine_space)
+        for s1, s2 in genuine_space[:num_pairs]:
             pairs.append((s1, s2))
             labels.append(1)
 
         # Skilled-forgery pairs: authentic vs. an imitation of this same writer
-        num_forged = num_pairs
-        for _ in range(num_forged):
-            pairs.append((rng.choice(genuine), rng.choice(forged)))
+        impostor_space = list(itertools.product(genuine, forged))
+        rng.shuffle(impostor_space)
+        for s1, s2 in impostor_space[:num_pairs]:
+            pairs.append((s1, s2))
             labels.append(0)
 
     return pairs, labels
@@ -356,12 +365,19 @@ class SpatialSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels, transform=None, augment=False):
+    def __init__(self, pairs, labels, transform=None, augment=False, seed=None):
         self.pairs = pairs
         self.labels = labels
         self.transform = transform
         self.augment = augment
-        self._rng = np.random.default_rng()
+        # Seeded so an augmented run reproduces from --seed. An unseeded
+        # default_rng() draws OS entropy, which silently made augmented training
+        # irreproducible even though every other RNG in the pipeline was seeded.
+        # DataLoader workers re-seed this per worker — see `worker_init_fn` in
+        # scripts/train.py — because fork-spawned workers otherwise inherit one
+        # generator state and replay identical augmentations in lockstep.
+        self._seed = seed
+        self._rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.pairs)

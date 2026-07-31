@@ -173,12 +173,28 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
         # embedding, so without this the result would look fully confident.
         passed, _details = quality_gate(probe)
         quality_failed = not passed
-        spatial_score = _nearest_reference_score(references, embed(model, probe, "spatial", device))
+        # A probe that fails the gate is **dropped from fusion**, not merely
+        # flagged. Scoring it anyway let a blurry or undersized capture carry the
+        # same weight as a clean one and flip the decision, while `degraded` said
+        # only that the result was weaker. Dropping it routes through the
+        # existing missing-modality path, so a spatial-only verification whose
+        # image fails the gate has no evidence left and raises, rather than
+        # returning a confident verdict built on nothing.
+        if passed:
+            spatial_score = _nearest_reference_score(
+                references, embed(model, probe, "spatial", device))
 
     if temporal is not None:
         model, references, probe = temporal
         pressure_imputed = _pressure_is_imputed(probe)
         temporal_score = _nearest_reference_score(references, embed(model, probe, "temporal", device))
+
+    if spatial_score is None and temporal_score is None:
+        raise ValueError(
+            "No usable evidence: the spatial probe failed the quality gate and no "
+            "temporal probe was supplied. Re-capture the signature — a verdict here "
+            "would rest on nothing. See the README's Capture Contract for the "
+            "bounding-box and sharpness minimums.")
 
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
