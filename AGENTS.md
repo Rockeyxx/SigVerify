@@ -290,6 +290,34 @@ reconciling the pressure channel collapsed the model to Cohen's d 0.279, and
 SigComp2011 differed on the first two rows above. Alignment belongs in the
 parser so the `[L, 3]` capture contract stays untouched.
 
+A fourth property, added after DeepSignDB: **the sample rate can vary per file
+inside one dataset.** BiosecurID's Development half is a near-even mix of 100 Hz
+and 200 Hz captures across four recording sessions. Measure the rate distribution
+before choosing between a per-dataset constant and a per-file factor; assuming
+uniformity would have halved the apparent pen speed for 180 of 376 sampled files.
+
+### Licensed Datasets
+
+Some corpora are held under a signed agreement rather than published. DeepSignDB
+is the first. For any such dataset:
+
+- **Never commit it, nor anything derived from it** — no signature files, no
+  cached features, no embedding dumps. `data/` being gitignored is the safety net,
+  not the policy. Check `git status` before committing while one is on disk.
+- **Never render its signatures into a plot or figure** unless the agreement's own
+  whitelist allows that specific user. DeepSignDB permits only `u1010`, `u1013`,
+  `u1028` (Development) and `u0103`, `u0145` (Evaluation).
+- **Carry its required citations** into anything public. DeepSignDB clause 4.5
+  names four, listed under ⚖ in the README bibliography.
+- **Treat derived weights as research-only.** The published release weights are
+  trained on open corpora; licensed-data weights stay local. See the README's
+  Model Weights section.
+- **Record the expiry.** DeepSignDB's agreement runs to 25 July 2028, after which
+  all copies are destroyed.
+
+The full clause-by-clause reading lives in the README's DeepSignDB section — this
+is the operational summary, and the README is the authority if they disagree.
+
 ### Pressure Ablation (temporal branch — two required runs)
 
 The temporal branch is trained **twice**, on the two SVC2004 tasks, and both

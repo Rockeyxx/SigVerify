@@ -41,6 +41,18 @@ MOBISIG_DIR = os.path.join(DATA_DIR, "MOBISIG")
 # the parser walks whatever is present. See README for the download recipe.
 SIGCOMP2011_DIR = os.path.join(DATA_DIR, "sigcomp2011")
 
+# DeepSignDB (BiDA Lab, Universidad Autónoma de Madrid): an aggregate of MCYT,
+# BiosecurID, BiosecureDS2 and e-BioSign, split by its authors into a Development
+# set to train on and an Evaluation set that published results are reported on.
+# Its stylus half is by far the largest pen-tablet corpus this project can reach —
+# 498 Development writers against the 124 it had before.
+#
+# **Licensed, not public.** Held under a signed research-use agreement (see the
+# README's DeepSignDB section). The data, any features derived from it, and any
+# weights trained on it are research-only, never committed and never
+# redistributed. `data/` is gitignored, which is what keeps that true by default.
+DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
+
 # ─── DataLoader ───────────────────────────────────────────────────────
 NUM_WORKERS = 4                         # 0 on Windows/notebook if workers hang
 PIN_MEMORY = False                      # CPU-only training — pinning buys nothing
@@ -179,7 +191,7 @@ TEMPORAL_AUGMENT = False
 # the only way to add variety without new writers, and it is what the Siamese
 # references rely on at this dataset size. Training split only — `build_loader`
 # gates it on `shuffle`, so validation and test are never augmented.
-SPATIAL_AUGMENT = False
+SPATIAL_AUGMENT = True
 
 # Early Stopping hyperparameters (monitors validation loss to halt training)
 EARLY_STOPPING_PATIENCE = 5            # Stop after 10 epochs without validation improvement
