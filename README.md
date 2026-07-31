@@ -516,6 +516,63 @@ python scripts/benchmark.py --branch temporal --weights <a.pth> \
 
 ---
 
+## Evaluation Figures
+
+Regenerated from the **shipped** weights on the openly available corpora only —
+`spatial_cnn.pth` on CEDAR + BHSig260 + UTSig, `temporal_lstm.pth` on SVC2004 +
+SigComp2011. No licensed data appears in any figure.
+
+> **These are pair-scoring figures, not the headline numbers.** Each probe is
+> scored against a single reference rather than a 5-signature enrollment, which is
+> the harder task described above and runs a few points worse. Read them as the
+> conservative lower bound they are: spatial **13.54%** here against **11.23%**
+> under `--enroll 5`, temporal **12.52%** against **10.26%**.
+
+| | spatial | temporal |
+|---|---|---|
+| EER | 13.54% | 12.52% |
+| calibrated threshold τ | 0.7070 | 0.7130 |
+| FAR / FRR at τ | 12.38% / 15.15% | 11.37% / 14.18% |
+| best dataset | cedar 0.00% | sigcomp_Dutch 5.68% |
+| worst dataset | utsig 36.18% | svc 26.95% |
+
+### Confusion matrices
+
+Counts at the calibrated threshold, over held-out test writers.
+
+| spatial | temporal |
+|---|---|
+| ![Confusion matrix, spatial branch](results/confusion_spatial.png) | ![Confusion matrix, temporal branch](results/confusion_temporal.png) |
+
+The spatial matrix reads 13,921 true rejects and 1,967 false accepts against
+13,481 true accepts and 2,407 false rejects. The two error types are close in
+size, which is the intended calibration — earlier weights sat at FAR 10.12%
+against FRR 21.20%, roughly double, and AGENTS.md requires slack to land on FRR
+only once FAR is already held down.
+
+### ROC and DET curves
+
+DET is the curve to read for a verification system: it plots FAR against FRR on a
+normal-deviate scale, so the operating point and the shape of the trade-off are
+both visible, where ROC compresses the region that matters into the top-left corner.
+
+| | spatial | temporal |
+|---|---|---|
+| **ROC** | ![ROC curve, spatial branch](results/roc_spatial.png) | ![ROC curve, temporal branch](results/roc_temporal.png) |
+| **DET** | ![DET curve, spatial branch](results/det_spatial.png) | ![DET curve, temporal branch](results/det_temporal.png) |
+
+Reproduce any of these with:
+
+```bash
+python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth \
+    --data-dir ./data/cedar ./data/bhsig260 ./data/utsig --output-dir results --seed 42
+
+python scripts/evaluate.py --branch temporal --weights models/weights/temporal_lstm.pth \
+    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 --output-dir results --seed 42
+```
+
+---
+
 ## Model Weights & GitHub Releases
 
 Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded from Git repository tracking via `.gitignore` to keep the repository lightweight:
