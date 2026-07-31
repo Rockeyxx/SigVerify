@@ -15,6 +15,7 @@ import pytest
 from config.settings import (
     BHSIG260_DIR,
     CEDAR_DIR,
+    DEEPSIGNDB_DIR,
     MOBISIG_DIR,
     SIGCOMP2011_DIR,
     SVC2004_TASK1_DIR,
@@ -22,10 +23,12 @@ from config.settings import (
     UTSIG_DIR,
 )
 from src.data.parsers import (
+    deepsigndb_source,
     load_svc2004_file,
     merge_datasets,
     parse_bhsig260,
     parse_cedar,
+    parse_deepsigndb,
     parse_mobisig,
     parse_sigcomp2011,
     parse_svc2004,
@@ -510,6 +513,218 @@ def test_real_sigcomp2011_counts():
     # A real pen sensor, not the flat P = 1.0 of a pressure-blind dataset.
     assert sample[:, 2].std() > 0.0
     assert not np.allclose(sample[:, 2], 1.0)
+
+
+class TestParseDeepSignDB:
+    """
+    DeepSignDB: `DeepSignDB/{split}/{modality}/u{id}_{g|s}_*.txt`.
+
+    Every value below is invented. DeepSignDB is licensed and may not be
+    redistributed, so no real sample is reproduced here — not even a partial one.
+    The azimuth/altitude constants 3600 and 900 are the published WACOM maxima
+    already hard-coded in `parsers.py`, not values taken from any signature.
+
+    The fixture carries one writer per source database, so the per-source
+    pressure column, the per-file sample rate and the source filter are each
+    exercised against a file that would parse wrongly under another source's rules.
+    """
+
+    def _fixture(self, root):
+        stylus = os.path.join(root, "DeepSignDB", "Development", "stylus")
+        os.makedirs(stylus, exist_ok=True)
+
+        # MCYT: 6 columns (x, y, t, azimuth, altitude, P), already 100 Hz.
+        # Row 3 is pen-up. Azimuth and altitude sit at their documented maxima so
+        # that reading the wrong column yields a pressure far outside [0, 1].
+        mcyt = ("4\n"
+                "10 20 0 3600 900 512\n"
+                "11 21 10 3600 900 1023\n"
+                "12 22 20 3600 900 0\n"
+                "13 23 30 3600 900 256\n")
+        for label in ("g", "s"):
+            with open(os.path.join(stylus, f"u0001_{label}_synthetic.txt"), "w") as fh:
+                fh.write(mcyt)
+
+        # BiosecurID: 7 columns (x, y, t, button, azimuth, altitude, P) at
+        # 200 Hz. Even-indexed rows survive decimation; one of those is pen-up.
+        biosecurid = ("6\n"
+                      "10 20 0 1 1500 700 512\n"
+                      "99 99 5 1 1500 700 999\n"
+                      "11 21 10 1 1500 700 1023\n"
+                      "99 99 15 1 1500 700 999\n"
+                      "12 22 20 1 1500 700 0\n"
+                      "99 99 25 1 1500 700 999\n")
+        for label in ("g", "s"):
+            with open(os.path.join(stylus, f"u0231_{label}_synthetic.txt"), "w") as fh:
+                fh.write(biosecurid)
+
+        # e-BioSign: 4 columns (x, y, t, P). Excluded by the default sources.
+        with open(os.path.join(stylus, "u1009_g_synthetic_w1.txt"), "w") as fh:
+            fh.write("2\n30 40 1000 200\n31 41 1010 300\n")
+
+        # The same integer ID in the other half — a different person.
+        evaluation = os.path.join(root, "DeepSignDB", "Evaluation", "stylus")
+        os.makedirs(evaluation, exist_ok=True)
+        with open(os.path.join(evaluation, "u0001_g_synthetic.txt"), "w") as fh:
+            fh.write(mcyt)
+
+        return root
+
+    def test_writer_ids_carry_source_and_split(self, tmp_path):
+        writers = parse_deepsigndb(self._fixture(str(tmp_path)))
+        assert set(writers) == {"deepsign_MCYT-dev_0001",
+                                "deepsign_BiosecurID-dev_0231"}
+
+    def test_g_and_s_become_genuine_and_forged(self, tmp_path):
+        record = parse_deepsigndb(self._fixture(str(tmp_path)))["deepsign_MCYT-dev_0001"]
+        assert len(record["genuine"]) == 1 and len(record["forged"]) == 1
+
+    def test_default_sources_exclude_ebiosign(self, tmp_path):
+        """
+        Its five capture devices disagree on the force maximum, so there is no
+        fixed divisor to normalize it with. Silently including it would put
+        signatures on a different pressure scale than every other writer.
+        """
+        writers = parse_deepsigndb(self._fixture(str(tmp_path)))
+        assert not any("eBioSign" in w for w in writers)
+
+        widened = parse_deepsigndb(self._fixture(str(tmp_path)),
+                                   sources=("MCYT", "eBioSign_DS1"))
+        assert "deepsign_eBioSign_DS1-dev_1009" in widened
+
+    def test_development_and_evaluation_never_collide(self, tmp_path):
+        """
+        `Development/u0001` and `Evaluation/u0001` are two different people —
+        MCYT's 330 signers are split 230/100 between the halves. One shared
+        writer ID would leak a training writer into the held-out set, and it
+        would do so silently, by *improving* the reported EER.
+        """
+        root = self._fixture(str(tmp_path))
+        development = parse_deepsigndb(root, split="Development")
+        evaluation = parse_deepsigndb(root, split="Evaluation")
+
+        assert "deepsign_MCYT-dev_0001" in development
+        assert "deepsign_MCYT-eval_0001" in evaluation
+        assert not set(development) & set(evaluation)
+
+    def test_pressure_comes_from_the_source_specific_column(self, tmp_path):
+        """
+        MCYT keeps pressure in column 6 and BiosecurID in column 7. Reading a
+        fixed column would return azimuth instead — 3600, or 3.52 once scaled.
+        """
+        writers = parse_deepsigndb(self._fixture(str(tmp_path)))
+        mcyt = writers["deepsign_MCYT-dev_0001"]["genuine"][0]
+        biosecurid = writers["deepsign_BiosecurID-dev_0231"]["genuine"][0]
+
+        assert np.allclose(mcyt[:, 2], [512 / 1023.0, 1.0, 256 / 1023.0], atol=1e-6)
+        assert np.allclose(biosecurid[:, 2], [512 / 1023.0, 1.0], atol=1e-6)
+
+    def test_resamples_each_file_by_its_own_rate(self, tmp_path):
+        """
+        BiosecurID mixes 100 Hz and 200 Hz captures, so the factor is measured
+        per file. The 200 Hz fixture halves; the 100 Hz one is left alone.
+        """
+        writers = parse_deepsigndb(self._fixture(str(tmp_path)))
+        # MCYT: 4 rows at 100 Hz, none dropped, minus one pen-up -> 3.
+        assert len(writers["deepsign_MCYT-dev_0001"]["genuine"][0]) == 3
+        # BiosecurID: 6 rows at 200 Hz -> 3 after halving, minus one pen-up -> 2.
+        assert len(writers["deepsign_BiosecurID-dev_0231"]["genuine"][0]) == 2
+
+    def test_drops_pen_up_samples(self, tmp_path):
+        """SVC2004 Task2 has no zero-pressure points, so neither may this one."""
+        for record in parse_deepsigndb(self._fixture(str(tmp_path))).values():
+            for sample in record["genuine"] + record["forged"]:
+                assert sample[:, 2].min() > 0.0
+
+    def test_file_with_no_pen_down_samples_raises(self, tmp_path):
+        """Silently yielding an empty trajectory would poison a training pair."""
+        root = self._fixture(str(tmp_path))
+        path = os.path.join(root, "DeepSignDB", "Development", "stylus",
+                            "u0002_g_synthetic.txt")
+        with open(path, "w") as fh:
+            fh.write("3\n10 20 0 3600 900 0\n11 21 10 3600 900 0\n"
+                     "12 22 20 3600 900 0\n")
+        with pytest.raises(ValueError, match="fewer than 2 pen-down samples"):
+            parse_deepsigndb(root)
+
+    def test_column_count_below_the_pressure_column_raises(self, tmp_path):
+        """
+        A 4-column file in MCYT's ID range means the archive is not laid out as
+        documented, and every label below it is then suspect.
+        """
+        root = self._fixture(str(tmp_path))
+        path = os.path.join(root, "DeepSignDB", "Development", "stylus",
+                            "u0003_g_synthetic.txt")
+        with open(path, "w") as fh:
+            fh.write("2\n10 20 0 512\n11 21 10 1023\n")
+        with pytest.raises(ValueError, match="does not match its documented source"):
+            parse_deepsigndb(root)
+
+    def test_unknown_source_or_split_raises(self, tmp_path):
+        root = self._fixture(str(tmp_path))
+        with pytest.raises(ValueError, match="Unknown DeepSignDB source"):
+            parse_deepsigndb(root, sources=("MCYT", "GPDS960"))
+        with pytest.raises(ValueError, match="Unknown DeepSignDB split"):
+            parse_deepsigndb(root, split="Testing")
+
+    def test_missing_root_raises(self):
+        with pytest.raises(FileNotFoundError):
+            parse_deepsigndb("/nonexistent/deepsigndb")
+
+    def test_source_ranges_differ_between_the_two_halves(self):
+        """
+        u0300 is BiosecurID in one half and BiosecureDS2 in the other, and they
+        keep pressure in different columns. The split tag is not decorative.
+        """
+        assert deepsigndb_source(100, "Development") == "MCYT"
+        assert deepsigndb_source(100, "Evaluation") == "MCYT"
+        assert deepsigndb_source(231, "Development") == "BiosecurID"
+        assert deepsigndb_source(231, "Evaluation") == "BiosecurID"
+        assert deepsigndb_source(300, "Development") == "BiosecurID"
+        assert deepsigndb_source(300, "Evaluation") == "BiosecureDS2"
+        assert deepsigndb_source(9999, "Development") is None
+
+
+@pytest.mark.skipif(not _have(DEEPSIGNDB_DIR), reason="DeepSignDB not licensed/downloaded")
+def test_real_deepsigndb_counts():
+    """
+    The Development stylus half ships 498 pen writers under the default sources:
+    MCYT's 230 (25 genuine + 25 skilled forgeries each) and BiosecurID's 268
+    (16 + 12 each), for 19,004 signatures.
+    """
+    writers = parse_deepsigndb(DEEPSIGNDB_DIR)
+    assert len(writers) == 498
+
+    mcyt = {w: v for w, v in writers.items() if w.startswith("deepsign_MCYT-dev_")}
+    biosecurid = {w: v for w, v in writers.items()
+                  if w.startswith("deepsign_BiosecurID-dev_")}
+    assert len(mcyt) == 230 and len(biosecurid) == 268
+    assert all(len(v["genuine"]) == 25 and len(v["forged"]) == 25
+               for v in mcyt.values())
+    assert all(len(v["genuine"]) == 16 and len(v["forged"]) == 12
+               for v in biosecurid.values())
+
+    total = sum(len(v["genuine"]) + len(v["forged"]) for v in writers.values())
+    assert total == 19004
+
+    sample = writers["deepsign_MCYT-dev_0001"]["genuine"][0]
+    assert sample.ndim == 2 and sample.shape[1] == 3
+    assert np.all(np.isfinite(sample))
+    # A real pen sensor, not the flat P = 1.0 of a pressure-blind dataset.
+    assert sample[:, 2].std() > 0.0 and sample[:, 2].min() > 0.0
+
+
+@pytest.mark.skipif(not _have(DEEPSIGNDB_DIR), reason="DeepSignDB not licensed/downloaded")
+def test_real_deepsigndb_evaluation_is_disjoint_from_development():
+    """
+    The Evaluation half is the authors' held-out benchmark: 372 writers reusing
+    Development's integers for different people. Nothing may be shared between
+    the halves but the numbers themselves.
+    """
+    development = parse_deepsigndb(DEEPSIGNDB_DIR, split="Development")
+    evaluation = parse_deepsigndb(DEEPSIGNDB_DIR, split="Evaluation")
+    assert len(evaluation) == 372
+    assert not set(development) & set(evaluation)
 
 
 class TestMergeDatasets:
