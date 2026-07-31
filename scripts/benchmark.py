@@ -195,6 +195,11 @@ def parse_args(argv=None):
                              "is the writer-dependent stage published systems use. "
                              "Requires --enroll. Scores are SVM margins, not "
                              "S = 1/(1+d), so thresholds do not carry across")
+    parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
+                        metavar=("TRAIN", "VAL", "TEST"),
+                        help="Must match the --split-ratios the weights were trained "
+                             "with. The split is derived from the ratios, so a "
+                             "mismatch scores the model on writers it trained on.")
     parser.add_argument("--writers", nargs="+", default=None,
                         help="Score only these writer IDs instead of the whole held-out "
                              "split. For comparing two models trained on different dataset "
@@ -259,8 +264,8 @@ def main(argv=None):
         merge_datasets(writer_samples, parse_dataset(directory, **kwargs))
 
     # Re-derives the exact partition training used — same writer list, same seed.
-    ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
-              else SPATIAL_SPLIT_RATIOS)
+    ratios = tuple(args.split_ratios) if args.split_ratios else (
+        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
     train_ids, val_ids, test_ids = writer_independent_split(
         sorted(writer_samples), *ratios, seed=args.seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")

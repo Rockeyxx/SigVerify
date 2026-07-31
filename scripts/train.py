@@ -123,6 +123,15 @@ def parse_args(argv=None):
     parser.add_argument("--weights-name", type=str, default=None,
                         help="Filename for the saved weights, so an ablation run "
                              "cannot overwrite the shipped spatial_cnn.pth")
+    parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
+                        metavar=("TRAIN", "VAL", "TEST"),
+                        help="Override the branch's writer-split ratios. The temporal "
+                             "default is 50/25/25 only because SVC2004's 40 writers "
+                             "would otherwise leave 6 test writers and an EER too "
+                             "noisy to compare; a corpus in the hundreds can afford "
+                             "the spatial branch's 70/15/15 and buy training writers "
+                             "back. Pass the same value to benchmark.py or the split "
+                             "will not match the one the model trained on.")
     parser.add_argument("--augment", dest="augment", action="store_true",
                         default=SPATIAL_AUGMENT,
                         help="Enable training-time augmentation (spatial branch)")
@@ -361,8 +370,8 @@ def main(argv=None):
 
     # Writer-independent partitioning (ISO/IEC 23053) happens on writer IDs
     # before any pair is formed, so no signer can straddle two partitions.
-    ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
-              else SPATIAL_SPLIT_RATIOS)
+    ratios = tuple(args.split_ratios) if args.split_ratios else (
+        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
     train_ids, val_ids, test_ids = writer_independent_split(
         sorted(writer_samples), *ratios, seed=args.seed)
     print(f"  Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")

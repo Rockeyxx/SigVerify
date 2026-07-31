@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
     CEDAR_DIR,
+    DEEPSIGNDB_DIR,
     MOBISIG_DIR,
     PRESSURE_IMPUTATION_VALUE,
     SIGCOMP2011_DIR,
@@ -58,6 +59,56 @@ SIGCOMP_PRESSURE_MAX = 1023.0
 # rather than asking one encoder to read the velocity channel two ways.
 SIGCOMP_DECIMATION = 2
 
+# ─── DeepSignDB ───────────────────────────────────────────────────────
+# DeepSignDB is an aggregate: each writer belongs to one of four source
+# databases, and the source decides how its files are laid out. The mapping is
+# by user-ID range and comes from the dataset's own
+# `Comparison_Files/TBIOM_2021_Journal/README.pdf`, not from inspection.
+#
+# **Development and Evaluation reuse the same integers for different people.**
+# MCYT's 330 signers are split 230 into Development and 100 into Evaluation, so
+# `Development/u0001` and `Evaluation/u0001` are two unrelated humans. Merging
+# on the bare ID would be a writer leak of exactly the kind the split protocol
+# exists to prevent, which is why the split tag is part of every writer ID.
+DEEPSIGN_SOURCE_RANGES = {
+    "Development": ((1, 230, "MCYT"), (231, 498, "BiosecurID"),
+                    (1009, 1038, "eBioSign_DS1"), (1039, 1084, "eBioSign_DS2")),
+    "Evaluation": ((1, 100, "MCYT"), (101, 232, "BiosecurID"),
+                   (233, 372, "BiosecureDS2"), (373, 407, "eBioSign_DS1"),
+                   (408, 442, "eBioSign_DS2")),
+}
+
+# Which 0-indexed column holds pen force. X, Y and the timestamp are always the
+# first three; everything after that is source-specific, so a single fixed
+# column would read azimuth as pressure for most of the corpus.
+DEEPSIGN_PRESSURE_COLUMN = {"MCYT": 5, "BiosecurID": 6, "BiosecureDS2": 6,
+                            "eBioSign_DS1": 3, "eBioSign_DS2": 3}
+
+# The Wacom pen-tablet corpora, all on the same 0–1023 force scale (measured:
+# min 0, max 1023 across all three). These are the DeepSignDB writers in the
+# deployment device's domain, and the default this project trains on.
+#
+# e-BioSign is deliberately excluded. Its five capture devices report incompatible
+# force maxima — measured 353, 424, 485, 505, 511, 954, 1003 and 1023 across
+# device/subset combinations — so no fixed divisor is defensible, and normalizing
+# per file would make one signature's scale depend on its own extremes, the same
+# mistake a per-file pressure max would be. Two of those devices (Samsung Galaxy
+# Note 10.1 and ATIV 7) are general-purpose tablets rather than pen tablets,
+# which is the MOBISIG domain, not this one.
+DEEPSIGN_PEN_SOURCES = ("MCYT", "BiosecurID", "BiosecureDS2")
+DEEPSIGN_PRESSURE_MAX = 1023.0
+
+# Target sampling period, matching SVC2004's measured 10 ms grid.
+#
+# Unlike SigComp2011, DeepSignDB's rate is **not** uniform per dataset, so it
+# cannot use a fixed decimation constant. Measured over a 5% sample: MCYT is
+# 10 ms in every file, but BiosecurID Development is a near-even mix — 196 files
+# at 10 ms and 180 at 5 ms — because it was captured across four sessions on two
+# tablet models. The model derives its velocity channels from consecutive-frame
+# deltas, so a 200 Hz file shows half the pen speed of a 100 Hz one for the same
+# hand. The decimation factor is therefore measured per file.
+DEEPSIGN_TARGET_PERIOD_MS = 10.0
+
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _CEDAR_FORGED = re.compile(r"^forgeries_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _BHSIG_FILE = re.compile(r"^[BH]-S-(\d+)-([GF])-(\d+)\.tif$", re.IGNORECASE)
@@ -66,6 +117,11 @@ _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
 # SIGN_FOR_USER7_USER2_3.csv  -> forgery of writer 7, drawn by user 2
 _MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
                            re.IGNORECASE)
+# u0231_g_u1013s0001_sg0001.txt -> genuine, DeepSignDB user 231
+# u0231_s_u1013s0001_sg0002.txt -> skilled forgery of that same user
+# The tail is the original database's own filename and is not interpreted; the
+# ID and the g/s flag are the only fields DeepSignDB guarantees across sources.
+_DEEPSIGN_FILE = re.compile(r"^u(\d+)_([gs])_.+\.txt$", re.IGNORECASE)
 
 
 def _require_dir(path, label):
@@ -601,6 +657,136 @@ def parse_sigcomp2011(root=SIGCOMP2011_DIR):
     return writers
 
 
+def deepsigndb_source(user_id, split):
+    """
+    Which source database a DeepSignDB user ID belongs to, or None if outside
+    every documented range.
+
+    The ID alone is not enough — `u0001` is an MCYT signer in both halves, but a
+    different MCYT signer in each — so the split has to be named explicitly.
+    """
+    for low, high, source in DEEPSIGN_SOURCE_RANGES[split]:
+        if low <= user_id <= high:
+            return source
+    return None
+
+
+def load_deepsigndb_file(path, source):
+    """
+    Load one DeepSignDB signature into the model's [L, 3] input.
+
+    Row 1 is a point count, which is skipped — the actual rows are trusted over
+    the declared number, as in SVC2004. Columns 1–3 are X, Y and a millisecond
+    timestamp for every source; pen force sits at `DEEPSIGN_PRESSURE_COLUMN[source]`.
+
+    Two alignments are applied, both because these trajectories are merged with
+    SVC2004 and read by one encoder. Neither widens the [L, 3] contract.
+
+    1. **Resample to 100 Hz.** The factor comes from this file's own median
+       inter-sample gap rather than a per-dataset constant, because BiosecurID
+       mixes 100 Hz and 200 Hz captures roughly half and half (see
+       `DEEPSIGN_TARGET_PERIOD_MS`). Files already at or below 100 Hz are left
+       alone — this only ever drops samples, never invents them.
+    2. **Drop pen-up samples (force = 0).** Measured 20–30% of raw points across
+       every stylus source, matching SigComp2011's 30% and against SVC2004
+       Task2's zero. The same reasoning applies: mixing them unfiltered would
+       make the pressure channel and its derivative mean different things per
+       dataset. The cost is the same too — in-air trajectory is discriminative
+       in the literature, and this discards it.
+    """
+    rows = np.loadtxt(path, dtype=np.float32, skiprows=1, ndmin=2)
+    if rows.size == 0:
+        raise ValueError(f"No trajectory points in {path}")
+
+    column = DEEPSIGN_PRESSURE_COLUMN[source]
+    if rows.shape[1] <= column:
+        raise ValueError(
+            f"{path} has {rows.shape[1]} columns but {source} keeps pressure in "
+            f"column {column + 1}. The file does not match its documented source."
+        )
+
+    if len(rows) >= 3:
+        period = float(np.median(np.diff(rows[:, 2])))
+        # A zero or negative median means the clock is unusable for rate
+        # detection; keeping every sample is the conservative reading.
+        if period > 0:
+            rows = rows[::max(1, round(DEEPSIGN_TARGET_PERIOD_MS / period))]
+
+    rows = rows[rows[:, column] > 0]
+    if len(rows) < 2:
+        raise ValueError(
+            f"{path} has fewer than 2 pen-down samples after alignment — "
+            f"the file carries no usable trajectory."
+        )
+
+    return normalize_trajectory(rows[:, :2], rows[:, column] / DEEPSIGN_PRESSURE_MAX)
+
+
+def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus",
+                     sources=DEEPSIGN_PEN_SOURCES):
+    """
+    Parse DeepSignDB: `DeepSignDB/{split}/{modality}/u{id}_{g|s}_*.txt`.
+
+    Defaults to the **Development** half, **stylus**, **Wacom pen sources** —
+    498 writers, the largest pen-domain corpus this project has. The defaults are
+    what training uses; the arguments exist so the held-out half stays reachable
+    without editing code.
+
+    `split="Evaluation"` is the authors' held-out benchmark and the split every
+    published DeepSignDB result is reported on. Training on it would forfeit the
+    only directly comparable external number this project can quote, so it is
+    never a default and never merged with Development.
+
+    `modality="finger"` is touchscreen capture by the same people as the stylus
+    half. It carries no pressure at all (measured: the force column is 0 in every
+    finger file), which puts it in MOBISIG's domain rather than the pen tablet's.
+    Writer IDs deliberately omit the modality, so if both are ever parsed and
+    merged, one person's stylus and finger signatures land on one writer — which
+    is what they are.
+
+    Raises on an unknown source name rather than silently yielding fewer writers:
+    a typo in `sources` would otherwise read as "this corpus is smaller than
+    documented".
+    """
+    unknown = set(sources) - set(DEEPSIGN_PRESSURE_COLUMN)
+    if unknown:
+        raise ValueError(
+            f"Unknown DeepSignDB source(s) {sorted(unknown)}. "
+            f"Expected any of: {', '.join(sorted(DEEPSIGN_PRESSURE_COLUMN))}."
+        )
+    if split not in DEEPSIGN_SOURCE_RANGES:
+        raise ValueError(f"Unknown DeepSignDB split '{split}' — "
+                         f"expected 'Development' or 'Evaluation'.")
+
+    directory = os.path.join(root, "DeepSignDB", split, modality)
+    _require_dir(directory, f"DeepSignDB {split}/{modality}")
+
+    split_tag = "dev" if split == "Development" else "eval"
+    wanted = set(sources)
+    writers = {}
+
+    for filename in sorted(os.listdir(directory)):
+        match = _DEEPSIGN_FILE.match(filename)
+        if not match:
+            continue
+
+        source = deepsigndb_source(int(match.group(1)), split)
+        if source not in wanted:
+            continue
+
+        # `deepsign_MCYT-dev_0001` — the source keeps the per-dataset breakdown
+        # meaningful (benchmark.py groups on the second token) and the split tag
+        # keeps Development and Evaluation from ever colliding.
+        writer_id = f"deepsign_{source}-{split_tag}_{int(match.group(1)):04d}"
+        label = "genuine" if match.group(2).lower() == "g" else "forged"
+
+        writers.setdefault(writer_id, _new_writer())
+        writers[writer_id][label].append(
+            load_deepsigndb_file(os.path.join(directory, filename), source))
+
+    return writers
+
+
 # Registered after definition so parse_dataset can dispatch by directory name.
 _PARSERS = {
     "cedar": parse_cedar,
@@ -613,7 +799,8 @@ _PARSERS = {
     "svc2004_task2": parse_svc2004,
     "mobisig": parse_mobisig,
     "sigcomp2011": parse_sigcomp2011,
+    "deepsigndb": parse_deepsigndb,
 }
 
 SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig")
-TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011")
+TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011", "deepsigndb")
