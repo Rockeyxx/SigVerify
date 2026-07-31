@@ -130,13 +130,19 @@ data/
 │   │   ├── SIGN_GEN_USER1_USER1_1.csv   (45 genuine)
 │   │   └── SIGN_FOR_USER1_USER2_1.csv   (20 skilled forgeries)
 │   └── ...
-└── sigcomp2011/            # Online SigComp2011 (84 pen-tablet writers, 3695 signatures)
-    ├── trainingSet/OnlineSignatures/{Dutch,Chinese}/TrainingSet/
-    │   ├── Online Genuine/     001_01.HWR       (writer_index)
-    │   └── Online Forgeries/   170_001_02.HWR   (forger_writer_index)
-    └── Testdata_SigComp2011/SigComp11-Onlinetestset/{Dutch,Chinese}/
-        ├── Reference(648)/013/   13_013.HWR     (index_writer — reversed!)
-        └── Questioned(1259)/013/ 01_182_013.HWR (index_forger_writer)
+├── sigcomp2011/            # Online SigComp2011 (84 pen-tablet writers, 3695 signatures)
+│   ├── trainingSet/OnlineSignatures/{Dutch,Chinese}/TrainingSet/
+│   │   ├── Online Genuine/     001_01.HWR       (writer_index)
+│   │   └── Online Forgeries/   170_001_02.HWR   (forger_writer_index)
+│   └── Testdata_SigComp2011/SigComp11-Onlinetestset/{Dutch,Chinese}/
+│       ├── Reference(648)/013/   13_013.HWR     (index_writer — reversed!)
+│       └── Questioned(1259)/013/ 01_182_013.HWR (index_forger_writer)
+└── deepsigndb/             # Online DeepSignDB — SIGNED LICENCE REQUIRED, see below
+    ├── DeepSignDB/
+    │   ├── Development/{stylus,finger}/  u0001_g_0100v00.txt  (genuine)
+    │   │                                 u0001_s_0100v00.txt  (skilled forgery)
+    │   └── Evaluation/{stylus,finger}/   the authors' held-out benchmark
+    └── Comparison_Files/TBIOM_2021_Journal/   official protocol lists + README.pdf
 ```
 
 Directory names are how parsers are selected (`src/data/parsers.py`), so an
@@ -169,6 +175,77 @@ request — retry, it succeeds once the record is warm. Verify with
 `pytest tests/test_parsers.py -k sigcomp`, which asserts the documented 84
 writers and 3695 signatures. A training-set-only download parses fine and simply
 yields 20 writers, so a partial fetch degrades rather than fails.
+
+#### DeepSignDB (signed licence required — read this before using it)
+
+[DeepSignDB](https://bidalab.eps.uam.es/listdatabases?id=DeepSignDB#access) is
+distributed by the **Biometrics and Data Pattern Analytics (BiDA) Lab, Universidad
+Autónoma de Madrid**. It is not a public download: request it from the page above,
+sign and return the licence agreement, and BiDA Lab sends the archive back. Turnaround
+is days to weeks. This project holds a copy under an agreement effective
+**25 July 2026**, valid two years.
+
+It aggregates four earlier corpora into one Development half to train on and one
+Evaluation half the authors reserve for reporting. **The two halves reuse the same
+integer IDs for different people** — MCYT's 330 signers are split 230/100 across
+them — so writer IDs here carry the split tag (`deepsign_MCYT-dev_0001` versus
+`deepsign_MCYT-eval_0001`). Merging on the bare ID would be a writer leak.
+
+| Source | Development | Evaluation | Per writer | Used here |
+|---|---|---|---|---|
+| MCYT | `u0001`–`u0230` | `u0001`–`u0100` | 25 genuine + 25 skilled | ✅ |
+| BiosecurID | `u0231`–`u0498` | `u0101`–`u0232` | 16 genuine + 12 skilled | ✅ |
+| BiosecureDS2 | — | `u0233`–`u0372` | | ✅ (evaluation only) |
+| e-BioSign DS1/DS2 | `u1009`–`u1084` | `u0373`–`u0442` | | ❌ excluded |
+
+`parse_deepsigndb()` defaults to **Development / stylus / the three Wacom sources** —
+**498 writers and 19,004 signatures**, four times the pen-domain writer count this
+project had from SVC2004 and SigComp2011 combined.
+
+Three things the parser does that are worth knowing:
+
+- **Pressure is read from a source-specific column** — MCYT column 6, BiosecurID and
+  BiosecureDS2 column 7, e-BioSign column 4. A fixed column would read azimuth as
+  pen force for most of the corpus.
+- **Each file is resampled to 100 Hz using its own measured median gap**, not a
+  per-dataset constant. BiosecurID's Development half is a near-even mix of 100 Hz
+  and 200 Hz captures (measured: 196 files against 180 in a 5% sample), because it
+  was recorded across four sessions on two tablet models. Velocity channels come
+  from consecutive-frame deltas, so a 200 Hz file shows half the pen speed for the
+  same hand.
+- **Pen-up samples are dropped** (force = 0, measured 20–30% of raw points), the
+  same alignment SigComp2011 gets and for the same reason: SVC2004 Task 2 contains
+  no zero-pressure points at all.
+
+**e-BioSign is excluded from the pen model.** Its five capture devices report
+incompatible force maxima — measured 353, 424, 485, 505, 511, 954, 1003 and 1023
+across device/subset combinations — so no fixed divisor is defensible, and
+normalizing per file would make one signature's scale depend on its own extremes.
+Two of those devices are Samsung general-purpose tablets, which is MOBISIG's domain,
+not the pen tablet's. Reach it deliberately with
+`parse_deepsigndb(sources=("eBioSign_DS1", "eBioSign_DS2"))` if that changes.
+
+The **finger** subset is the same people signing on a touchscreen. Its force column
+is 0 in every file, so it belongs to the mobile tier alongside MOBISIG, not here.
+
+##### Licence rules this repository has to keep
+
+The agreement is research-use-only and specific. In practice:
+
+| Clause | What it means here |
+|---|---|
+| 4.1 | Only the licensee and direct colleagues at the same institution may use it |
+| 4.2 | No copying or redistribution beyond your own backup — `data/` is gitignored, and **no signature file, feature cache, or embedding dump derived from it may ever be committed** |
+| 4.4 | Research only. The prohibition explicitly covers "files containing extracted features", so features and weights derived from it are non-commercial too |
+| 4.5 | Any public work based on it must cite the four references marked ⚖ in the [Bibliography](#bibliography) |
+| 4.6 | No signature images in publications — BiDA Lab whitelists **only users `u1010`, `u1013`, `u1028` (Development) and `u0103`, `u0145` (Evaluation)**. Every plot in this repo is a score distribution or a DET/ROC curve, so nothing currently renders a DeepSignDB stroke; keep it that way |
+| 4.7 | Expires 25 July 2028 unless renewed, then all copies are destroyed |
+| 4.8 | BiDA Lab may instruct that part of the database be destroyed; comply immediately |
+
+Training on it and using the resulting weights for this project, its report and its
+demo is exactly the licensed use. Selling it, or shipping it inside a commercial
+product, is not. See [Model Weights & GitHub Releases](#model-weights--github-releases)
+for how that constrains public weight distribution.
 
 ### Writer-Independent Data Split Protocol
 
@@ -344,6 +421,86 @@ The first four columns come from one identical 31-writer held-out split, so they
 are directly comparable. Note that the older model had 3 of those 10 SVC test
 writers in its *training* set, which flatters its SVC column.
 
+#### Adding DeepSignDB: the largest measured gain in this project
+
+Adding DeepSignDB's 498 Development stylus writers took the trainable pen count
+from 62 to 311. Both models below are scored on the **same 131 writers**, the ones
+each of them held out — 124 DeepSignDB, 4 SigComp, 3 SVC2004 — so the comparison is
+on identical people rather than two differently-shuffled splits.
+
+| temporal model | train writers | pooled | BiosecurID | MCYT | svc | sigcomp_Chinese | Cohen's d |
+|---|---|---|---|---|---|---|---|
+| SVC2004 + SigComp2011 | 62 | 12.68% ± 0.31 | 10.58% | 13.25% | 21.11% | 8.51% | 1.523 |
+| **+ DeepSignDB Development** | **311** | **6.89% ± 0.25** | **4.61%** | **7.10%** | **16.94%** | **6.27%** | **1.922** |
+| | | **−5.79** | −5.97 | −6.15 | −4.17 | −2.24 | +0.40 |
+
+The pooled EER nearly halved, and **every** dataset improved — including SVC2004 and
+SigComp2011, which the baseline was already trained on. So this is not new writers
+flattering their own corpus. BiosecurID at **4.61%** is the first result under the
+project's 5% pen-tablet target.
+
+Two cautions come with it:
+
+- **It overfits, and early.** Training loss fell to 0.0285 by epoch 23 while
+  validation loss climbed to 0.1902; best validation was **epoch 2**. Early stopping
+  fired at epoch 23 of 120. At 311 writers the 128-d LSTM still has capacity to
+  memorize, which argues for more writers rather than more regularization — the same
+  conclusion the spatial dropout experiment reached.
+- **Validation loss inverts on small differences but not on large ones.** Three
+  checkpoints from this run, all scored on the same 131 writers:
+
+  | checkpoint | val loss | pooled EER |
+  | --- | --- | --- |
+  | epoch 2 | 0.1153 | 7.74% |
+  | epoch 3 | 0.1202 | **6.89%** |
+  | epoch 23 | 0.1902 | 16.43% |
+
+  Epoch 2 has the better validation loss and the worse EER, so the checkpoint the
+  training loop labels "best" is not the best model — rank close candidates with
+  `benchmark.py`. But the ordering holds at range: the overfit epoch-23 model is
+  worse than the baseline that never saw DeepSignDB at all (16.43% against 12.68%,
+  and SVC2004 collapses to 36.11%). Early stopping was right to fire; it was only
+  the one-epoch tiebreak it got wrong.
+
+The SVC2004 column stays the outlier at 16.94%, consistent with everything else
+measured here: its contributors were told not to use their real signatures.
+
+#### Trading validation writers for training writers does not pay
+
+The temporal branch splits 50/25/25 rather than the spatial branch's 70/15/15 only
+because SVC2004's 40 writers would otherwise have left 6 test writers. At 622
+writers that constraint is gone, so the ratio was re-measured as its own arm. All
+three models below are scored on the **same 80 writers**, held out by every one of
+them:
+
+| temporal model | train / val writers | pooled | BiosecurID | MCYT | svc | Cohen's d |
+|---|---|---|---|---|---|---|
+| SVC2004 + SigComp2011 | 62 / 31 | 13.15% ± 0.37 | 11.43% | 13.33% | 21.11% | 1.437 |
+| **+ DeepSignDB, 50/25/25** | **311 / 155** | **6.88% ± 0.34** | 4.85% | **5.79%** | **16.94%** | **1.867** |
+| + DeepSignDB, 70/15/15 | 435 / 93 | 7.49% ± 0.31 | **5.14%** | 7.14% | 21.11% | 1.837 |
+
+**124 extra training writers cost 0.61 EER points.** The spreads do not overlap, so
+this is not enrollment-draw luck. The trade also removed 62 validation writers, and
+both early stopping and best-checkpoint selection run off validation — on this very
+run a 0.005 difference in validation loss inverted the EER ranking, so a thinner
+validation set is not a cheap thing to buy training data with.
+
+A related trap worth naming: arm B's validation loss (0.1066) looked better than arm
+A's (0.1202), but the two were computed on **different validation sets**, so the
+comparison meant nothing. Validation loss is comparable only within one split.
+
+Taken with the table above it, the writer-count lever reads:
+
+| change | writers | Δ pooled EER |
+| --- | --- | --- |
+| add DeepSignDB Development | 62 → 311 | **−6.27** |
+| shift the split ratio | 311 → 435 | **+0.61** (worse) |
+
+Writer count paid enormously up to roughly 311 and then stopped. **50/25/25 stays.**
+
+These weights are **not shipped** — see [Model Weights & GitHub Releases](#model-weights--github-releases).
+They live in `models/pen_deepsign/` with `DONT_SHIP` in every filename.
+
 **Comparing two temporal checkpoints requires care.** The writer split is derived
 from whichever datasets are loaded, so adding a dataset reshuffles it and the EERs
 stop being comparable. A third run including MOBISIG appeared to cut SVC2004 from
@@ -370,6 +527,16 @@ Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded f
   ├── spatial_cnn.pth
   └── temporal_lstm.pth
   ```
+
+**Weights trained on DeepSignDB are not published here.** The licence bars commercial
+use of anything derived from the database, including "files containing extracted
+features" (clause 4.4), and a public release makes the file available to anyone,
+commercial users included. Weights are not the database and the clause does not
+name them, so this is a caution rather than a stated prohibition — but the cheap,
+clean resolution is to keep it: the published `temporal_lstm.pth` is trained on the
+openly available corpora (SVC2004 + SigComp2011), while DeepSignDB-trained weights
+stay local and are used for the project report, demo and benchmarks. Ask BiDA Lab in
+writing before changing that.
 
 ---
 
@@ -604,14 +771,31 @@ the target rather than to this implementation of it.
     signature verification method based on texture features on a large
     indic-script signature dataset.* DAS 2016, pp. 72–77. — BHSig260.
 
+The four below are **required by the DeepSignDB licence** (clause 4.5): any work
+made public that rests directly or indirectly on any part of that database must
+cite all four, whether or not the specific sub-corpus was used.
+
+12. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. *DeepSign:
+    Deep On-Line Signature Verification.* IEEE Transactions on Biometrics,
+    Behavior, and Identity Science, 3(2):229–239, 2021. — DeepSignDB itself, and
+    the source of the Development/Evaluation protocol this project follows.
+13. ⚖ J. Fierrez, J. Galbally, et al. *BiosecurID: A Multimodal Biometric
+    Database.* Pattern Analysis and Applications, 13(2):235–246, May 2010.
+14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. *The Multi-Scenario Multi-Environment
+    BioSecure Multimodal Database (BMDB).* IEEE Transactions on Pattern Analysis
+    and Machine Intelligence, 32(6):1097–1111, 2010.
+15. ⚖ J. Ortega-Garcia, J. Fierrez, et al. *MCYT Baseline Corpus: A Bimodal
+    Biometric Database.* IEE Proceedings — Vision, Image and Signal Processing,
+    150(6):395–401, December 2003.
+
 **Standards**
 
-12. ISO/IEC 23053:2022 — framework for AI systems using machine learning
+16. ISO/IEC 23053:2022 — framework for AI systems using machine learning
     (writer-independent splits, documented training configuration).
-13. ISO/IEC 24745:2022 — biometric information protection (only derived
+17. ISO/IEC 24745:2022 — biometric information protection (only derived
     embeddings are persisted).
-14. ISO/IEC 18033-1:2021 — encryption algorithms (AES-256-GCM at rest).
-15. IEEE 730-2014 — software quality assurance processes (configuration control,
+18. ISO/IEC 18033-1:2021 — encryption algorithms (AES-256-GCM at rest).
+19. IEEE 730-2014 — software quality assurance processes (configuration control,
     deviation log, verification audit log).
 
 ---
