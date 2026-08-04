@@ -33,7 +33,7 @@ from config.settings import (
     NUM_WORKERS, PIN_MEMORY,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
-    TEMPORAL_AUGMENT, SPATIAL_AUGMENT,
+    TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
@@ -138,6 +138,20 @@ def parse_args(argv=None):
                         help="Enable training-time augmentation (spatial branch)")
     parser.add_argument("--no-augment", dest="augment", action="store_false",
                         help="Disable training-time augmentation")
+    parser.add_argument("--attention", action="store_true",
+                        help="Temporal branch: pool the LSTM's timestep outputs by "
+                             "learned attention instead of reading only the final "
+                             "hidden state. Measured motivation: DTW with zero "
+                             "training writers beat this branch on SVC2004 by 5.22 "
+                             "points, and elastic alignment is its only capability")
+    parser.add_argument("--random-impostor-ratio", type=float,
+                        default=RANDOM_IMPOSTOR_RATIO, metavar="R",
+                        help="Fraction of the training negative budget drawn from "
+                             "other writers' genuine signatures instead of this "
+                             "writer's skilled forgeries. Training only — validation "
+                             "keeps pure skilled-forgery pairs. At 0 the encoder "
+                             "never learns that two different people should be far "
+                             "apart, which measurement showed it does not infer")
     parser.add_argument("--lr-schedule", choices=["none", "plateau"], default="none",
                         help="'plateau' halves the learning rate after 2 epochs "
                              "without validation improvement. The spatial validation "
@@ -192,7 +206,7 @@ def _seed_worker(worker_id):
 
 
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
-                 augment=SPATIAL_AUGMENT):
+                 augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -204,8 +218,14 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
     """
     subset = {w: writer_samples[w] for w in writer_ids}
 
+    # Random impostors are a training-time supervision signal, never an
+    # evaluation one: `shuffle` is true only for the training loader, so val and
+    # test keep the pure skilled-forgery pairing every reported metric uses.
+    ratio = random_impostor_ratio if shuffle else 0.0
+
     if branch == "spatial":
-        pairs, labels = generate_skilled_pairs(subset, seed=seed)
+        pairs, labels = generate_skilled_pairs(subset, seed=seed,
+                                               random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, so validation and test
         # are never augmented — an augmented val set would move the target the
         # early-stopping rule is measuring against.
@@ -216,7 +236,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
     else:
         pairs, labels = generate_skilled_pairs(
             subset, TEMPORAL_PAIRS_GENUINE_PER_WRITER,
-            TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed)
+            TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed,
+            random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, which is also the only
         # split that may be augmented.
         dataset = TemporalSignatureDataset(pairs, labels,
@@ -302,14 +323,24 @@ def validate_one_epoch(model, dataloader, loss_fn, device, epoch=None, total_epo
     return total_loss / max(num_batches, 1)
 
 
-def save_checkpoint(model, optimizer, epoch, loss, path):
-    """Save full training checkpoint for resuming later."""
+def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None):
+    """
+    Save full training checkpoint for resuming later.
+
+    `loss` is this epoch's validation loss; `best_val_loss` is the best seen
+    across the whole run. Both are stored because they answer different
+    questions, and resuming needs the second one. Restoring from `loss` alone
+    re-baselines the run against whatever the final epoch happened to score, so
+    an epoch worse than the true best still reads as an improvement and
+    overwrites the good weights.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "loss": loss,
+        "best_val_loss": best_val_loss,
     }, path)
     tqdm.write(f"  Checkpoint saved: {path}")
 
@@ -364,7 +395,8 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
             if current_lr < previous_lr:
                 tqdm.write(f"  LR decayed: {previous_lr:.2e} -> {current_lr:.2e}")
 
-        save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path)
+        save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path,
+                        best_val_loss=min(best_val_loss, val_loss))
 
         # Only the best-validation weights ship — the final epoch is not
         # necessarily the best one once early stopping has been counting.
@@ -438,12 +470,15 @@ def main(argv=None):
         if channel_count != 3:
             print(f"  Temporal channels: {args.temporal_channels} "
                   f"({channel_count}ch) — NOT the shipped [L, 3] capture contract")
+        if args.attention:
+            print("  Pooling: attention over all timesteps (not the final hidden state)")
         model = TemporalSiamese(
             input_features=channel_count,
             hidden_size=TEMPORAL_HIDDEN_SIZE,
             num_layers=TEMPORAL_NUM_LAYERS,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
             pressure_dropout=pressure_dropout,
+            attention=args.attention,
         ).to(device)
 
         # Distinct filenames so the pressure-blind ablation can never silently
@@ -456,11 +491,15 @@ def main(argv=None):
 
     train_loader, num_train = build_loader(writer_samples, train_ids, args.branch, args.batch_size,
                                            args.num_workers, True, args.seed,
-                                           augment=args.augment)
+                                           augment=args.augment,
+                                           random_impostor_ratio=args.random_impostor_ratio)
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
                                        args.num_workers, False, args.seed,
                                        augment=args.augment)
-    print(f"  Pairs: {num_train} train / {num_val} val (skilled-forgery negatives)")
+    negatives = ("skilled-forgery negatives" if not args.random_impostor_ratio else
+                 f"{1 - args.random_impostor_ratio:.0%} skilled / "
+                 f"{args.random_impostor_ratio:.0%} random-impostor negatives in train")
+    print(f"  Pairs: {num_train} train / {num_val} val ({negatives})")
     print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.lr}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
@@ -478,10 +517,12 @@ def main(argv=None):
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        # `loss` is the validation loss at the checkpointed epoch (see
-        # save_checkpoint). Carrying it forward stops the resumed run from
-        # treating its first epoch as a new best and overwriting better weights.
-        resume_best = checkpoint.get("loss")
+        # Prefer the run's best validation loss over the checkpointed epoch's
+        # own loss. Older checkpoints predate the `best_val_loss` field and fall
+        # back to `loss`, which re-baselines against the final epoch rather than
+        # the best one — so a resumed run can still overwrite better weights.
+        # When that matters, copy the current best weights aside first.
+        resume_best = checkpoint.get("best_val_loss") or checkpoint.get("loss")
         print(f"Resumed training from epoch {start_epoch}"
               + (f", best val loss {resume_best:.4f}" if resume_best is not None else ""))
 
