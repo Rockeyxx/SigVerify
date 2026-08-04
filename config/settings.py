@@ -99,6 +99,20 @@ PRESSURE_IMPUTATION_VALUE = 1.0
 PAIRS_GENUINE_PER_WRITER = 276
 PAIRS_IMPOSTOR_PER_WRITER = 276
 
+# Fraction of each writer's negative budget spent on **random impostors** —
+# another writer's genuine signature — instead of a skilled forgery of this
+# writer. Training-time only; every reported metric still pairs against skilled
+# forgeries alone (AGENTS.md eval protocol).
+#
+# Measured 2026-08-04 (full write-up in `docs/SOLUTIONS.md`): at 0.0 the encoder
+# never sees a cross-writer negative, and on CEDAR it stopped separating writers
+# entirely — a different person's genuine signature sat at mean distance 0.048
+# against 0.038 for the same person's, while that writer's own skilled forgery
+# sat at 2.043. The model had learned a genuine/forged axis, not identity, and
+# scored 36.64% EER against random impostors while scoring 0.00% against skilled
+# ones. Every dataset showed the same effect more weakly.
+RANDOM_IMPOSTOR_RATIO = 0.0
+
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by mining

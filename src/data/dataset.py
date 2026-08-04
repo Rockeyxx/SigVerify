@@ -47,6 +47,7 @@ from config.settings import (
     MIN_LAPLACIAN_VARIANCE,
     PAIRS_GENUINE_PER_WRITER,
     PAIRS_IMPOSTOR_PER_WRITER,
+    RANDOM_IMPOSTOR_RATIO,
 )
 
 
@@ -204,25 +205,45 @@ def generate_pairs(samples_by_writer, num_genuine_per_writer=5,
 
 
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
-                           num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42):
+                           num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
+                           random_impostor_ratio=RANDOM_IMPOSTOR_RATIO):
     """
     Generate pairs under the **skilled-forgery** scenario (AGENTS.md eval protocol).
 
-    Unlike `generate_pairs`, every negative here is a genuine signature paired
+    Unlike `generate_pairs`, negatives are by default a genuine signature paired
     against a forgery *of that same writer* — a deliberate imitation, not a
     random stranger's signature. Random-impostor negatives are trivially
     separable and inflate the reported EER into a number that does not describe
-    the attack the system actually faces. All reported metrics use this pairing.
+    the attack the system actually faces. **All reported metrics use that pairing
+    and nothing here changes it**: leave `random_impostor_ratio` at 0 for every
+    evaluation loader.
+
+    `random_impostor_ratio` exists for *training* only. Supervising exclusively
+    on same-writer forgeries never tells the encoder that two different people
+    should be far apart, and measurement showed it does not infer that on its
+    own: on CEDAR the shipped model placed a stranger's genuine signature at mean
+    distance 0.048 against 0.038 for the same writer's, while that writer's own
+    skilled forgery sat at 2.043 — a genuine/forged axis rather than an identity
+    one, and 36.64% EER against random impostors. The ratio takes its share out
+    of the negative budget rather than adding to it, so the 1:1 positive-negative
+    balance per writer is unchanged and the only variable is what the negatives
+    are made of.
 
     Args:
         samples_by_writer: dict mapping writer_id to
             {"genuine": [paths/arrays], "forged": [paths/arrays]}.
         num_genuine_per_writer: target genuine pairs per writer (label = 1).
-        num_forged_per_writer: target skilled-forgery pairs per writer (label = 0).
+        num_forged_per_writer: target negative pairs per writer (label = 0).
+        random_impostor_ratio: fraction of the negative budget drawn from other
+            writers' genuine signatures instead of this writer's forgeries.
 
     Returns:
         (pairs: list of (sample1, sample2), labels: list of int)
     """
+    if not 0.0 <= random_impostor_ratio <= 1.0:
+        raise ValueError(
+            f"random_impostor_ratio must be in [0, 1], got {random_impostor_ratio}")
+
     rng = random.Random(seed)
     pairs, labels = [], []
 
@@ -265,11 +286,33 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
             pairs.append((s1, s2))
             labels.append(1)
 
+        # The negative budget splits between the two attack types. Rounding down
+        # keeps at least one skilled pair unless the ratio is exactly 1.0, so a
+        # small ratio never silently wipes out the arm that already works.
+        num_random = int(num_pairs * random_impostor_ratio)
+        num_skilled = num_pairs - num_random
+
         # Skilled-forgery pairs: authentic vs. an imitation of this same writer
         impostor_space = list(itertools.product(genuine, forged))
         rng.shuffle(impostor_space)
-        for s1, s2 in impostor_space[:num_pairs]:
+        for s1, s2 in impostor_space[:num_skilled]:
             pairs.append((s1, s2))
+            labels.append(0)
+
+        # Random-impostor pairs: authentic vs. a *different* writer's authentic
+        # signature. Drawn with replacement, unlike the two same-writer arms:
+        # the cross-writer space is the whole corpus (301 training writers x ~24
+        # genuines is over 7000 candidates per slot), so the coupon-collector
+        # duplication that cost the same-writer arms ~37% of their diversity is
+        # negligible here, and enumerating that space per writer is not.
+        others = [w for w in samples_by_writer if w != writer
+                  and samples_by_writer[w].get("genuine")]
+        if not others:
+            continue
+        for _ in range(num_random):
+            other = rng.choice(others)
+            pairs.append((rng.choice(genuine),
+                          rng.choice(samples_by_writer[other]["genuine"])))
             labels.append(0)
 
     return pairs, labels

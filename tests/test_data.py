@@ -208,6 +208,70 @@ class TestGenerateSkilledPairs:
         pairs, labels = generate_skilled_pairs(writers)
         assert all("w0" not in s1 for s1, _ in pairs)
 
+    def test_random_impostor_ratio_introduces_cross_writer_negatives(self):
+        """
+        At a non-zero ratio some negatives must pair two *different* writers'
+        genuine signatures.
+
+        This is the one supervision signal the skilled-only pairing never gives:
+        measured on the shipped spatial model, a stranger's genuine CEDAR
+        signature sat at mean distance 0.048 against 0.038 for the same writer's,
+        so the encoder had learned a genuine/forged axis rather than an identity
+        one.
+        """
+        pairs, labels = generate_skilled_pairs(self._writers(),
+                                               num_genuine_per_writer=4,
+                                               num_forged_per_writer=4,
+                                               random_impostor_ratio=0.5)
+        negatives = [p for p, y in zip(pairs, labels) if y == 0]
+        cross = [(a, b) for a, b in negatives if a.split("_")[0] != b.split("_")[0]]
+
+        assert cross, "no cross-writer negatives generated at ratio 0.5"
+        for s1, s2 in cross:
+            assert s1.split("_")[1].startswith("g")
+            assert s2.split("_")[1].startswith("g"), (
+                f"random impostor must be another writer's genuine, got {s2}")
+
+    def test_random_impostors_come_out_of_the_negative_budget(self):
+        """
+        The ratio re-composes the negatives; it must not add to them.
+
+        Class balance is the confound this guards: if random impostors were
+        appended rather than substituted, an arm testing the ratio would also be
+        testing a 1:2 positive-negative imbalance, and the two effects could not
+        be separated.
+        """
+        kwargs = dict(num_genuine_per_writer=4, num_forged_per_writer=4)
+        _, baseline = generate_skilled_pairs(self._writers(), **kwargs)
+        _, mixed = generate_skilled_pairs(self._writers(),
+                                          random_impostor_ratio=0.5, **kwargs)
+
+        assert mixed.count(0) == baseline.count(0)
+        assert mixed.count(1) == baseline.count(1)
+        assert mixed.count(0) == mixed.count(1)
+
+    def test_random_impostor_never_pairs_a_writer_with_themselves(self):
+        """A 'random impostor' drawn from the same writer would be a positive mislabelled 0."""
+        pairs, labels = generate_skilled_pairs(self._writers(n=3),
+                                               num_genuine_per_writer=6,
+                                               num_forged_per_writer=6,
+                                               random_impostor_ratio=1.0)
+        for (s1, s2), y in zip(pairs, labels):
+            if y == 0:
+                assert s1.split("_")[0] != s2.split("_")[0]
+
+    def test_ratio_zero_reproduces_the_skilled_only_pairing(self):
+        """The default must leave the shipped behaviour bit-for-bit unchanged."""
+        assert (generate_skilled_pairs(self._writers(), seed=7)
+                == generate_skilled_pairs(self._writers(), seed=7,
+                                          random_impostor_ratio=0.0))
+
+    def test_ratio_outside_zero_to_one_is_rejected(self):
+        """A ratio above 1 would silently produce a negative skilled budget."""
+        for bad in (-0.1, 1.5):
+            with pytest.raises(ValueError, match="random_impostor_ratio"):
+                generate_skilled_pairs(self._writers(), random_impostor_ratio=bad)
+
     def test_deterministic_under_seed(self):
         """Same seed must reproduce the same pair list (ISO/IEC 23053 reproducibility)."""
         a = generate_skilled_pairs(self._writers(), seed=7)
