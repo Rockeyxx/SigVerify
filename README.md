@@ -357,17 +357,17 @@ as the writer split is.
 
 **Spatial branch** — shipped configuration is the **wide trunk** (96×11×11 stem
 into 256, 384, 256), inverted pixels, 155×220 direct resize, 276 balanced pairs
-per writer, 512-d embedding. The Siamese column is Dey et al., whose FAR = FRR,
-so their figures are EER and compare directly. Every published figure quoted
-here, with its protocol, is in [References](#references).
+per writer drawn **without replacement**, 512-d embedding. The Siamese column is
+Dey et al., whose FAR = FRR, so their figures are EER and compare directly. Every
+published figure quoted here, with its protocol, is in [References](#references).
 
-| dataset | compact trunk | wide trunk | **shipped (wide + augment + LR decay)** | published Siamese (Dey et al.) |
-|---|---|---|---|---|
-| cedar (Latin) | 0.00% ± 0.00 | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% |
-| bhsig_Hindi | 5.55% ± 0.76 | 4.65% ± 0.81 | **4.48% ± 0.61** | 15.36% |
-| bhsig_Bengali | 14.69% ± 1.76 | 13.85% ± 1.30 | **12.26% ± 1.32** | 13.89% |
-| utsig (Persian) | 33.76% ± 1.52 | 30.41% ± 2.32 | **29.73% ± 2.57** | not evaluated |
-| pooled (65 writers) | 12.31% ± 0.96 | 11.78% ± 0.61 | **11.23% ± 0.47** | — |
+| dataset | compact trunk | wide trunk | + augment + LR decay | **shipped (+ pair diversity)** | published Siamese (Dey et al.) |
+|---|---|---|---|---|---|
+| cedar (Latin) | 0.00% ± 0.00 | 0.00% ± 0.00 | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% |
+| bhsig_Hindi | 5.55% ± 0.76 | 4.65% ± 0.81 | 4.48% ± 0.61 | **4.20% ± 0.53** | 15.36% |
+| bhsig_Bengali | 14.69% ± 1.76 | 13.85% ± 1.30 | 12.26% ± 1.32 | **11.80% ± 1.12** | 13.89% |
+| utsig (Persian) | 33.76% ± 1.52 | 30.41% ± 2.32 | 29.73% ± 2.57 | **28.48% ± 2.83** | not evaluated |
+| pooled (65 writers) | 12.31% ± 0.96 | 11.78% ± 0.61 | 11.23% ± 0.47 | **10.58% ± 0.67** | — |
 
 The wide trunk was measured against the compact one as three separate arms, and
 only the trunk itself paid off. Adding the reference's dropout schedule cost 6.78
@@ -390,9 +390,18 @@ broke a long-standing ceiling: every earlier spatial run peaked at epoch 1, whic
 turned out to be image variety rather than pair supply, since 301 writers were
 seen pixel-identical every epoch. With augmentation the best epoch moved to 6.
 Plateau LR decay added on top ties on mean EER but tightens the draw spread 40%.
-The honest scale: 12.31% → 11.23% pooled across trunk width, augmentation and LR
-decay together. Roughly one EER point. The lever with real leverage is more
-writers.
+**Pair diversity** was the last architectural change to pay. Pairs had been drawn
+*with replacement* from each writer's pair space, so at 276 draws roughly 37% were
+duplicates of pairs already in the batch — the coupon-collector effect. Drawing
+from a shuffled exhaustive enumeration instead cost nothing and bought 0.65
+points, and it fixed a silent class imbalance on UTSig at the same time.
+
+The honest scale: 12.31% → 10.58% pooled across trunk width, augmentation, LR
+decay and pair diversity together. Roughly 1.7 EER points for four changes. The
+lever with real leverage is more writers — and adding 84 of them from SigComp2011's
+offline half *lost* to pair diversity alone, so "more writers" turns out to mean
+escaping a corpus small enough to memorise, not more of the same. Details in
+`docs/SOLUTIONS.md`.
 
 **Enrollment size is the cheapest remaining lever.** K is set at inference, so
 raising it needs no retraining. It only asks the user for more reference
@@ -603,16 +612,23 @@ SigComp2011. No licensed data appears in any figure.
 > **These are pair-scoring figures, not the headline numbers.** Each probe is
 > scored against a single reference rather than a 5-signature enrollment, which is
 > the harder task described above and runs a few points worse. Read them as the
-> conservative lower bound they are: spatial **13.54%** here against **11.23%**
+> conservative lower bound they are: spatial **13.64%** here against **10.58%**
 > under `--enroll 5`, temporal **12.52%** against **10.26%**.
 
 | | spatial | temporal |
 |---|---|---|
-| EER | 13.54% | 12.52% |
-| calibrated threshold τ | 0.7070 | 0.7130 |
-| FAR / FRR at τ | 12.38% / 15.15% | 11.37% / 14.18% |
+| EER | 13.64% | 12.52% |
+| calibrated threshold τ | 0.7132 | 0.7130 |
+| FAR / FRR at τ | 11.92% / 15.54% | 11.37% / 14.18% |
 | best dataset | cedar 0.00% | sigcomp_Dutch 5.68% |
-| worst dataset | utsig 36.18% | svc 26.95% |
+| worst dataset | utsig 36.03% | svc 26.95% |
+
+Note the two protocols moved in opposite directions: enrollment improved 11.23% →
+10.58% while pair-scoring held flat at 13.54% → 13.64%. Pair diversity helped the
+model place a writer's *cluster*, which is what nearest-reference enrollment reads,
+and did nothing for isolated one-against-one comparisons. The deployed system uses
+enrollment, so the gain is the real one — but the gap is now 3.1 points rather than
+2.3, and the pair-scoring column is the number to quote when no enrollment exists.
 
 ### Confusion matrices
 
