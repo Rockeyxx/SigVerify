@@ -245,8 +245,7 @@ class TemporalSiamese(nn.Module):
     """
 
     def __init__(self, input_features=3, hidden_size=256,
-                 num_layers=2, embedding_dim=128, pressure_dropout=0.4,
-                 attention=False):
+                 num_layers=2, embedding_dim=128, pressure_dropout=0.4):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.pressure_dropout = pressure_dropout
@@ -281,28 +280,6 @@ class TemporalSiamese(nn.Module):
         # cone, pushing discrimination into magnitude rather than direction.
         self.embedding = nn.Linear(hidden_size * 2, embedding_dim)
 
-        # Attention pooling over every timestep, instead of reading only the
-        # final hidden state.
-        #
-        # Measured 2026-08-04 (see `docs/SOLUTIONS.md`): DTW, which has no
-        # training writers at all, beat this branch on SVC2004 by 5.22 points
-        # (12.24% against 17.46%) while losing by 12 points pooled. DTW's only
-        # capability is elastic alignment, and SVC2004 is the corpus whose
-        # signers are least consistent in timing because they invented the
-        # signature they enrolled. Reading h_n alone asks a 256-wide state to
-        # carry a median of 223 frames — up to 4706 — with no way to weight the
-        # part that discriminates.
-        #
-        # One scalar score per frame, softmaxed into a convex combination. Off
-        # by default so existing checkpoints load unchanged and an arm testing
-        # it moves exactly one variable.
-        self.attend = nn.Linear(hidden_size * 2, 1) if attention else None
-
-    @property
-    def attention(self):
-        """Whether this instance pools with attention rather than the final state."""
-        return self.attend is not None
-
     @classmethod
     def from_state_dict(cls, state_dict, **overrides):
         """
@@ -336,13 +313,6 @@ class TemporalSiamese(nn.Module):
             "hidden_size": hidden_size,
             "num_layers": layers,
             "embedding_dim": state_dict["embedding.weight"].shape[0],
-            # Attention adds one parameter tensor and nothing else, so its
-            # presence in the keys is the whole declaration. Without this a
-            # checkpoint trained with attention would rebuild without it and
-            # fail on an unexpected key, which is at least loud — but a
-            # checkpoint trained *without* it would silently gain an untrained
-            # attention layer, which would not be.
-            "attention": "attend.weight" in state_dict,
         }
         params.update(overrides)
 
@@ -399,47 +369,15 @@ class TemporalSiamese(nn.Module):
             packed = nn.utils.rnn.pack_padded_sequence(
                 x, lengths.cpu(), batch_first=True, enforce_sorted=False
             )
-            outputs, (h_n, _) = self.lstm(packed)
+            _, (h_n, _) = self.lstm(packed)
         else:
-            outputs, (h_n, _) = self.lstm(x)
+            _, (h_n, _) = self.lstm(x)
 
-        if self.attend is None:
-            # Extract last layer forward state (h_n[-2]) and backward state (h_n[-1])
-            h_forward = h_n[-2]
-            h_backward = h_n[-1]
-            h_combined = torch.cat([h_forward, h_backward], dim=1)
-        else:
-            h_combined = self._attention_pool(outputs, lengths)
-
+        # Extract last layer forward state (h_n[-2]) and backward state (h_n[-1])
+        h_forward = h_n[-2]
+        h_backward = h_n[-1]
+        h_combined = torch.cat([h_forward, h_backward], dim=1)
         return self.embedding(h_combined)
-
-    def _attention_pool(self, outputs, lengths):
-        """
-        Collapse [B, L, 2H] timestep outputs into [B, 2H] by learned attention.
-
-        Packing protects the LSTM from padding but this pools over the *unpacked*
-        sequence, so the padded tail has to be masked explicitly here. Without the
-        mask a short signature batched beside a long one would spread attention
-        onto frames that do not exist, and its embedding would depend on which
-        batch it happened to land in — the same contamination
-        `pack_padded_sequence` exists to prevent, reintroduced one layer later.
-        `tests/test_models.py::test_padded_batch_matches_single_sample` is the
-        invariant that catches it.
-        """
-        if lengths is not None:
-            outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=True)
-
-        scores = self.attend(outputs).squeeze(-1)               # [B, L]
-
-        if lengths is not None:
-            # pad_packed_sequence trims to the longest member of *this* batch, so
-            # the mask is built against that width rather than the caller's.
-            positions = torch.arange(outputs.size(1), device=outputs.device)
-            padding = positions[None, :] >= lengths.to(outputs.device)[:, None]
-            scores = scores.masked_fill(padding, float("-inf"))
-
-        weights = torch.softmax(scores, dim=1)                  # [B, L]
-        return torch.bmm(weights.unsqueeze(1), outputs).squeeze(1)  # [B, 2H]
 
     def forward(self, x1, x2, lengths1=None, lengths2=None):
         """Forward pass for a pair of trajectory sequences. Returns both embeddings."""

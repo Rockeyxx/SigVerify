@@ -138,12 +138,6 @@ def parse_args(argv=None):
                         help="Enable training-time augmentation (spatial branch)")
     parser.add_argument("--no-augment", dest="augment", action="store_false",
                         help="Disable training-time augmentation")
-    parser.add_argument("--attention", action="store_true",
-                        help="Temporal branch: pool the LSTM's timestep outputs by "
-                             "learned attention instead of reading only the final "
-                             "hidden state. Measured motivation: DTW with zero "
-                             "training writers beat this branch on SVC2004 by 5.22 "
-                             "points, and elastic alignment is its only capability")
     parser.add_argument("--random-impostor-ratio", type=float,
                         default=RANDOM_IMPOSTOR_RATIO, metavar="R",
                         help="Fraction of the training negative budget drawn from "
@@ -470,15 +464,12 @@ def main(argv=None):
         if channel_count != 3:
             print(f"  Temporal channels: {args.temporal_channels} "
                   f"({channel_count}ch) — NOT the shipped [L, 3] capture contract")
-        if args.attention:
-            print("  Pooling: attention over all timesteps (not the final hidden state)")
         model = TemporalSiamese(
             input_features=channel_count,
             hidden_size=TEMPORAL_HIDDEN_SIZE,
             num_layers=TEMPORAL_NUM_LAYERS,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
             pressure_dropout=pressure_dropout,
-            attention=args.attention,
         ).to(device)
 
         # Distinct filenames so the pressure-blind ablation can never silently
