@@ -215,12 +215,40 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrease required to trig
 ALPHA_DEFAULT = 0.5                     # Tuned on validation via grid search
 ALPHA_GRID_STEP = 0.05
 # τ: S_final ≥ τ → Genuine. Tuned on the validation split, never on test, and
-# re-derive it whenever the spatial weights change. Similarity is S = 1/(1+d),
-# so a threshold sits directly on a distance: the old default of 0.5 meant
-# d = 1.0, which is exactly CONTRASTIVE_MARGIN. That put the decision boundary
-# on the loss's own target with no slack, and every impostor the model had not
-# pushed fully past the margin landed on the accept side.
-DECISION_THRESHOLD = 0.7143
+# re-derive it whenever the weights change. Similarity is S = 1/(1+d), so a
+# threshold sits directly on a distance: the old default of 0.5 meant d = 1.0,
+# which is exactly CONTRASTIVE_MARGIN. That put the decision boundary on the
+# loss's own target with no slack, and every impostor the model had not pushed
+# fully past the margin landed on the accept side.
+#
+# **Calibrate under the protocol you deploy.** Until 2026-08-04 τ was tuned on
+# *pair-scoring* validation scores while `src/verification.py` scores under
+# *enrolment* (nearest of K references). Taking a minimum over K references
+# shrinks every distance, so scores shift up — genuine further than impostor —
+# and a τ frozen at the pair-scoring EER point sits below the deployed
+# distribution and accepts almost everything. Measured at the old 0.7143:
+#
+#   branch    pair-scoring            enrolment K=5
+#   spatial   FAR 17.01/FRR 17.38     FAR 19.32/FRR  2.65
+#   temporal  FAR 11.74/FRR 11.39     FAR 25.00/FRR  2.18
+#
+# A 36-probe MOBISIG sample independently measured FAR 22.2%/FRR 0.0%.
+#
+# Both values below are the FAR<=10% operating point, chosen on validation under
+# enrolment at K=5 and then reported on test. FAR<=10% is the knee of the curve:
+# below it the FRR cost per point of FAR roughly doubles (spatial FAR 10->5 costs
+# +17 FRR), and FAR<=5% would reject one genuine user in three.
+#
+#   spatial  τ=0.7868 -> test FAR 9.25% / FRR 11.17%
+#   temporal τ=0.8524 -> test FAR 7.97% / FRR 14.51%
+#            sigcomp_Dutch, the XPPen deployment condition: FAR 1.80% / FRR 10.26%
+#
+# The two branches need different τ because their score distributions differ;
+# one global value cannot serve both. DECISION_THRESHOLD remains the fused-path
+# default, where scores from both branches are mixed.
+SPATIAL_DECISION_THRESHOLD = 0.7868
+TEMPORAL_DECISION_THRESHOLD = 0.8524
+DECISION_THRESHOLD = 0.8196          # midpoint, fused path only
 
 # ─── Evaluation Targets ──────────────────────────────────────────────
 TARGET_FAR = 0.05

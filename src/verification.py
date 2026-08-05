@@ -27,6 +27,8 @@ import torch
 from config.settings import (
     ALPHA_DEFAULT,
     DECISION_THRESHOLD,
+    SPATIAL_DECISION_THRESHOLD,
+    TEMPORAL_DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
     TEMPORAL_EMBEDDING_DIM,
     TEMPORAL_HIDDEN_SIZE,
@@ -159,7 +161,19 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
 
-    engine = engine or FusionEngine(alpha=ALPHA_DEFAULT, threshold=DECISION_THRESHOLD)
+    # Each branch carries its own τ: their score distributions differ enough that
+    # one global value cannot serve both (spatial 0.7868 against temporal 0.8524
+    # at the same FAR<=10% target). Routing to a single branch must therefore use
+    # that branch's threshold, not the fused default — using the fused value on a
+    # spatial-only verification would sit 0.03 too high and reject genuine users.
+    if engine is None:
+        if spatial is not None and temporal is not None:
+            threshold = DECISION_THRESHOLD
+        elif spatial is not None:
+            threshold = SPATIAL_DECISION_THRESHOLD
+        else:
+            threshold = TEMPORAL_DECISION_THRESHOLD
+        engine = FusionEngine(alpha=ALPHA_DEFAULT, threshold=threshold)
 
     spatial_score = None
     temporal_score = None
