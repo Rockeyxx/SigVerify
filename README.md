@@ -111,7 +111,7 @@ meaningless rather than merely worse.
 | References per user | **5** | `NUM_ENROLLMENT_REFERENCES = 5` |
 | Matching | nearest reference, not the mean | `_nearest_reference_score` |
 | Score | `S = 1 / (1 + distance)` | |
-| Threshold | `τ = 0.7143` | `DECISION_THRESHOLD` |
+| Threshold | spatial `τ = 0.7868`, temporal `τ = 0.8524` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
 
 Enrolling fewer than 5 references drops the system into the pair-scoring regime,
 which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
@@ -361,13 +361,22 @@ per writer drawn **without replacement**, 512-d embedding. The Siamese column is
 Dey et al., whose FAR = FRR, so their figures are EER and compare directly. Every
 published figure quoted here, with its protocol, is in [References](#references).
 
-| dataset | compact trunk | wide trunk | + augment + LR decay | **shipped (+ pair diversity)** | published Siamese (Dey et al.) |
-|---|---|---|---|---|---|
-| cedar (Latin) | 0.00% ± 0.00 | 0.00% ± 0.00 | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% |
-| bhsig_Hindi | 5.55% ± 0.76 | 4.65% ± 0.81 | 4.48% ± 0.61 | **4.20% ± 0.53** | 15.36% |
-| bhsig_Bengali | 14.69% ± 1.76 | 13.85% ± 1.30 | 12.26% ± 1.32 | **11.80% ± 1.12** | 13.89% |
-| utsig (Persian) | 33.76% ± 1.52 | 30.41% ± 2.32 | 29.73% ± 2.57 | **28.48% ± 2.83** | not evaluated |
-| pooled (65 writers) | 12.31% ± 0.96 | 11.78% ± 0.61 | 11.23% ± 0.47 | **10.58% ± 0.67** | — |
+| dataset | compact trunk | wide trunk | + augment + LR decay | + pair diversity | **shipped (+ random impostors)** | published Siamese (Dey et al.) |
+|---|---|---|---|---|---|---|
+| cedar (Latin) | 0.00% ± 0.00 | 0.00% ± 0.00 | 0.00% ± 0.00 | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% |
+| bhsig_Hindi | 5.55% ± 0.76 | 4.65% ± 0.81 | 4.48% ± 0.61 | 4.20% ± 0.53 | **4.30% ± 0.78** | 15.36% |
+| bhsig_Bengali | 14.69% ± 1.76 | 13.85% ± 1.30 | 12.26% ± 1.32 | 11.80% ± 1.12 | **12.07% ± 1.38** | 13.89% |
+| utsig (Persian) | 33.76% ± 1.52 | 30.41% ± 2.32 | 29.73% ± 2.57 | 28.48% ± 2.83 | **30.74% ± 1.78** | not evaluated |
+| pooled (65 writers) | 12.31% ± 0.96 | 11.78% ± 0.61 | 11.23% ± 0.47 | 10.58% ± 0.67 | **10.10% ± 0.38** | — |
+
+**The shipped column is not uniformly better, and the trade is deliberate.**
+Adding random-impostor negatives (`RANDOM_IMPOSTOR_RATIO = 0.5`) improved the
+pooled figure and halved its spread, but **UTSig regressed 28.48% → 30.74%**.
+It ships anyway because the previous model could not tell one writer from
+another: a *stranger's* genuine signature passed as the enrolled user 24–37% of
+the time depending on dataset, and cross-writer negatives roughly halved that.
+The published metric measures skilled forgery only, so it never saw that hole.
+Full decomposition in `docs/SOLUTIONS.md`.
 
 The wide trunk was measured against the compact one as three separate arms, and
 only the trunk itself paid off. Adding the reference's dropout schedule cost 6.78
@@ -396,7 +405,7 @@ duplicates of pairs already in the batch — the coupon-collector effect. Drawin
 from a shuffled exhaustive enumeration instead cost nothing and bought 0.65
 points, and it fixed a silent class imbalance on UTSig at the same time.
 
-The honest scale: 12.31% → 10.58% pooled across trunk width, augmentation, LR
+The honest scale: 12.31% → 10.10% pooled across trunk width, augmentation, LR
 decay and pair diversity together. Roughly 1.7 EER points for four changes. The
 lever with real leverage is more writers — and adding 84 of them from SigComp2011's
 offline half *lost* to pair diversity alone, so "more writers" turns out to mean
@@ -609,26 +618,36 @@ Regenerated from the **shipped** weights on the openly available corpora only �
 `spatial_cnn.pth` on CEDAR + BHSig260 + UTSig, `temporal_lstm.pth` on SVC2004 +
 SigComp2011. No licensed data appears in any figure.
 
-> **These are pair-scoring figures, not the headline numbers.** Each probe is
-> scored against a single reference rather than a 5-signature enrollment, which is
-> the harder task described above and runs a few points worse. Read them as the
-> conservative lower bound they are: spatial **13.64%** here against **10.58%**
-> under `--enroll 5`, temporal **12.52%** against **10.26%**.
+> **These figures use the enrollment protocol — the one the app deploys.** Each
+> probe is matched against the nearest of 5 enrolled references, and τ is tuned
+> on validation under that same protocol. Until 2026-08-04 τ was tuned on
+> *pair-scoring* scores while `src/verification.py` scored under enrollment; the
+> mismatch put τ below the deployed distribution and the system accepted almost
+> everything (spatial FAR 19.32% / FRR 2.65%, temporal FAR 25.00% / FRR 2.18%).
+> Calibrate under the protocol you deploy.
 
 | | spatial | temporal |
 |---|---|---|
-| EER | 13.64% | 12.52% |
-| calibrated threshold τ | 0.7132 | 0.7130 |
-| FAR / FRR at τ | 11.92% / 15.54% | 11.37% / 14.18% |
-| best dataset | cedar 0.00% | sigcomp_Dutch 5.68% |
-| worst dataset | utsig 36.03% | svc 26.95% |
+| EER | 10.08% | 10.35% |
+| calibrated threshold τ | 0.7753 | 0.8340 |
+| FAR / FRR at τ | 10.54% / 9.39% | 9.89% / 10.84% |
+| best dataset | cedar 0.00% | **sigcomp_Dutch 4.02%** |
+| worst dataset | utsig 30.68% | svc 18.00% |
 
-Note the two protocols moved in opposite directions: enrollment improved 11.23% →
-10.58% while pair-scoring held flat at 13.54% → 13.64%. Pair diversity helped the
-model place a writer's *cluster*, which is what nearest-reference enrollment reads,
-and did nothing for isolated one-against-one comparisons. The deployed system uses
-enrollment, so the gain is the real one — but the gap is now 3.1 points rather than
-2.3, and the pair-scoring column is the number to quote when no enrollment exists.
+The shipped `DECISION_THRESHOLD` values (spatial 0.7868, temporal 0.8524) are
+slightly higher than the EER points above: they are the **FAR ≤ 10%** operating
+point on the same validation scores, because a verification system should prefer
+rejecting a forgery over accepting one. On test that gives spatial FAR 9.25% /
+FRR 11.17% and temporal FAR 7.97% / FRR 14.51%.
+
+**FAR ≤ 5% is reachable but not advisable.** It needs τ 0.8181 spatial / 0.8788
+temporal and costs FRR **22.19% / 22.03%** — better than one user in five turned
+away. The knee of the curve is at FAR 8–10%; below it the FRR cost per point of
+FAR roughly doubles.
+
+On the deployment-relevant dataset — SigComp Dutch, the pen-tablet condition
+matching the XPPen — the operating point is **FAR 1.80% / FRR 7.05%**, inside the
+5% FAR target.
 
 ### Confusion matrices
 
