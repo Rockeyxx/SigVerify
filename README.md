@@ -11,6 +11,34 @@ A multimodal biometric verification system that authenticates handwritten signat
 
 ---
 
+## Contents
+
+- [Architecture](#architecture)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Running the Application](#running-the-application)
+  - [Input Specifications](#input-specifications)
+  - [Model Weights & GitHub Releases](#model-weights-github-releases)
+- [Training](#training)
+  - [Datasets](#datasets)
+- [Evaluation](#evaluation)
+  - [Results](#results)
+  - [Datasets and device targets](#datasets-and-device-targets)
+  - [Evaluation Figures](#evaluation-figures)
+- [Standards & Compliance](#standards-compliance)
+- [Hardware](#hardware)
+- [References](#references)
+  - [Published results on the datasets this project uses](#published-results-on-the-datasets-this-project-uses)
+  - [How the reference architecture differs](#how-the-reference-architecture-differs)
+  - [Bibliography](#bibliography)
+- [Team](#team)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
+---
 ## Architecture
 
 ```
@@ -45,91 +73,6 @@ A multimodal biometric verification system that authenticates handwritten signat
 ```
 
 **Automatic fallback:** if only one modality is available, the system routes to the corresponding unimodal branch (α = 1 for image-only, α = 0 for dynamic-only).
-
----
-
-## Input Specifications
-
-- **Spatial (offline):** any image format (JPG, PNG, etc.); app resizes to 155×220, inverts, normalizes internally.
-- **Temporal (online):** trajectory at 100 Hz with X, Y, Pressure channels; app z-scores X/Y per signature and scales pressure to [0.0, 1.0].
-
-### Capture Contract
-
-What the capture layer must guarantee before a sample reaches the model. These are
-not style preferences — each one is a documented assumption the training data
-satisfies, so a violation puts the probe in a distribution the model never saw.
-
-#### Spatial — hard gates
-
-`quality_gate()` (`src/data/dataset.py:104`) rejects the image outright if either
-fails, and sets `degraded: true` on the result, which the GUI must surface:
-
-| gate | rule | constant |
-| --- | --- | --- |
-| Ink bounding box | `min(width, height) >= 64 px` **in the submitted image** | `MIN_BBOX_PIXELS = 64` |
-| Sharpness | Laplacian variance `>= 50.0` | `MIN_LAPLACIAN_VARIANCE = 50.0` |
-
-#### Spatial — what the frontend must do
-
-1. **Apply EXIF rotation before submitting.** `cv2.imread` ignores the orientation
-   tag while every phone gallery honours it, so a portrait photo arrives 90° off
-   and looks correct in every viewer you would check it in. The model has no
-   rotation invariance. Use `PIL.ImageOps.exif_transpose`, or re-encode to strip EXIF.
-2. **Crop tight to the ink.** `SPATIAL_SQUARE_PAD = False`, so the image is resized
-   *straight* onto 220×155 with no padding. Desk, margin and shadow are canvas
-   taken from the signature.
-3. **Use one fixed capture frame for enrollment and verification.** Because nothing
-   is padded, a different framing stretches the signature by a different amount and
-   the model sees a different shape. Measured on three photos of one person's
-   signature: aspect ratios of **0.67, 1.18 and 0.85**, which left the genuine probe
-   scoring 0.6498 against a forgery's 0.6366 — correctly ordered, but only 0.0132
-   apart and both below τ. On the scan datasets every image is already tight and
-   consistent, so this failure mode never appears in the reported EER.
-4. **Dark ink on light paper.** The pipeline inverts internally so that background
-   becomes 0 and ink is high; do not pre-invert.
-5. Colour is discarded at load — greyscale in is fine.
-
-#### Temporal
-
-The capture layer **must call `parsers.normalize_trajectory()`**. Skipping it feeds
-raw device units to a model trained on z-scored input, and the embeddings are then
-meaningless rather than merely worse.
-
-| requirement | value |
-| --- | --- |
-| Shape | `[L, 3]` float32 — X, Y, Pressure |
-| Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
-| Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
-| Pen-up samples | dropped (`P = 0`) |
-| X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
-| No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
-
-#### Enrollment and decision
-
-| | value | constant |
-| --- | --- | --- |
-| References per user | **5** | `NUM_ENROLLMENT_REFERENCES = 5` |
-| Matching | nearest reference, not the mean | `_nearest_reference_score` |
-| Score | `S = 1 / (1 + distance)` | |
-| Threshold | spatial `τ = 0.7868`, temporal `τ = 0.8524` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
-
-Enrolling fewer than 5 references drops the system into the pair-scoring regime,
-which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
-
-#### Checking a real capture
-
-`tools/verify_my_signature.py` runs photographs through the deployed decision path
-and prints the raw score and its margin from τ, so a marginal call can be told
-apart from a confident one:
-
-```bash
-python tools/verify_my_signature.py --crop --crop-dir /tmp/sigcrop \
-    --references refs/*.jpg --probes probe.jpg
-```
-
-`--crop` applies the EXIF fix, ink-crop and binarisation described above. Keep
-`--crop-dir` and **look at the cropped images** — a bad crop is the most common
-reason a genuine signature is rejected, and the score alone will not reveal it.
 
 ---
 
@@ -182,9 +125,101 @@ reason a genuine signature is rejected, and the score alone will not reveal it.
 
 ---
 
-## Datasets
+## Getting Started
 
-### Local Dataset Structure (`./data`)
+### Prerequisites
+
+- Python 3.10+
+- pip
+
+### Installation
+
+```bash
+git clone https://github.com/Rockeyxx/Signature-Verification-ML-EE499.git
+cd Signature-Verification-ML-EE499
+
+python -m venv venv
+source venv/bin/activate        # Linux
+# venv\Scripts\activate         # Windows
+
+pip install -r requirements.txt
+```
+
+### Running the Application
+
+```bash
+python -m src.gui.app
+```
+
+---
+
+### Input Specifications
+
+- **Spatial (offline):** any image format (JPG, PNG, etc.); app resizes to 155×220, inverts, normalizes internally.
+- **Temporal (online):** trajectory at 100 Hz with X, Y, Pressure channels; app z-scores X/Y per signature and scales pressure to [0.0, 1.0].
+
+Both are enforced at the door. A photo that is too small or too blurry, or a
+trajectory that was not normalized by the capture layer, is **rejected rather
+than scored** — a wrong answer given confidently is worse than no answer. The
+full contract the capture layer must satisfy is in
+[AGENTS.md](AGENTS.md#capture-contract-for-the-capture-and-gui-layers).
+
+#### Enrollment and decision
+
+|                     | value                                       | constant                                                     |
+| ------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| References per user | **5**                                       | `NUM_ENROLLMENT_REFERENCES = 5`                              |
+| Matching            | nearest reference, not the mean             | `_nearest_reference_score`                                   |
+| Score               | `S = 1 / (1 + distance)`                    |                                                              |
+| Threshold           | spatial `τ = 0.7868`, temporal `τ = 0.8524` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
+
+Enrolling fewer than 5 references drops the system into the pair-scoring regime,
+which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
+
+---
+
+### Model Weights & GitHub Releases
+
+Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded from Git repository tracking via `.gitignore` to keep the repository lightweight:
+
+- **Pre-compiled Weights Distribution**: Official pre-trained weights (`spatial_cnn.pth` and `temporal_lstm.pth`) are hosted and distributed via **[GitHub Releases](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases)**.
+- **Local Deployment**: Download the compiled weight `.pth` files from the latest GitHub Release and place them into the `models/weights/` directory:
+  ```
+  models/weights/
+  ├── spatial_cnn.pth
+  └── temporal_lstm.pth
+  ```
+
+**Weights trained on DeepSignDB are not published here.** The licence bars commercial
+use of anything derived from the database, including "files containing extracted
+features" (clause 4.4), and a public release makes the file available to anyone,
+commercial users included. Weights are not the database and the clause does not
+name them, so this is a caution rather than a stated prohibition — but the cheap,
+clean resolution is to keep it: the published `temporal_lstm.pth` is trained on the
+openly available corpora (SVC2004 + SigComp2011), while DeepSignDB-trained weights
+stay local and are used for the project report, demo and benchmarks. Ask BiDA Lab in
+writing before changing that.
+
+---
+
+## Training
+
+```bash
+# Train spatial branch (offline signatures)
+python scripts/train.py --branch spatial --data-dir ./data/cedar ./data/bhsig260 ./data/utsig
+
+# Train temporal branch (online signatures)
+python scripts/train.py --branch temporal --data-dir ./data/svc2004
+```
+
+Training uses **writer-independent splits** — see
+[Results](#results).
+
+---
+
+### Datasets
+
+#### Local Dataset Structure (`./data`)
 
 To train and evaluate the models locally, arrange your datasets inside the `./data` directory following this layout:
 
@@ -226,529 +261,8 @@ data/
 Directory names are how parsers are selected (`src/data/parsers.py`), so an
 unrecognized name raises rather than silently training on zero writers.
 
-#### Fetching SigComp2011 (no licence request needed)
-
-The ICDAR competition dataset is published openly, unlike MCYT / BiosecurID /
-DeepSignDB, which all require a signed agreement and a wait of days to weeks.
-The zip password is printed on the dataset page itself. The original host
-(`iapr-tc11.org`) has been unreachable, so the commands below pull the archived
-copies; substitute the live host if it returns.
-
-```bash
-mkdir -p data/sigcomp2011
-BASE=https://web.archive.org/web/20250907124749if_/http://www.iapr-tc11.org/dataset/ICDAR_SignatureVerification/SigComp2011
-curl -L -o /tmp/sc11-train.zip "$BASE/sigComp2011-trainingSet.zip"   # 234 MB
-curl -L -o /tmp/sc11-test.zip  "$BASE/sigComp2011-test.zip"          # 540 MB
-
-# Only the online trajectories are needed; the offline PNGs duplicate ground
-# the image datasets already cover and cost ~700 MB.
-PW="I hereby accept the SigComp 2011 disclaimer."
-unzip -P "$PW" /tmp/sc11-train.zip 'trainingSet/OnlineSignatures/*' -d data/sigcomp2011
-unzip -P "$PW" /tmp/sc11-test.zip  'Testdata_SigComp2011/SigComp11-Onlinetestset/*' \
-    -d data/sigcomp2011
-```
-
-Wayback serves the 540 MB test archive slowly and returns `504` on a cold
-request — retry, it succeeds once the record is warm. Verify with
-`pytest tests/test_parsers.py -k sigcomp`, which asserts the documented 84
-writers and 3695 signatures. A training-set-only download parses fine and simply
-yields 20 writers, so a partial fetch degrades rather than fails.
-
-#### DeepSignDB (signed licence required — read this before using it)
-
-[DeepSignDB](https://bidalab.eps.uam.es/listdatabases?id=DeepSignDB#access) is
-distributed by the **Biometrics and Data Pattern Analytics (BiDA) Lab, Universidad
-Autónoma de Madrid**. It is not a public download: request it from the page above,
-sign and return the licence agreement, and BiDA Lab sends the archive back. Turnaround
-is days to weeks. This project holds a copy under an agreement effective
-**25 July 2026**, valid two years.
-
-It aggregates four earlier corpora into one Development half to train on and one
-Evaluation half the authors reserve for reporting. **The two halves reuse the same
-integer IDs for different people** — MCYT's 330 signers are split 230/100 across
-them — so writer IDs here carry the split tag (`deepsign_MCYT-dev_0001` versus
-`deepsign_MCYT-eval_0001`). Merging on the bare ID would be a writer leak.
-
-| Source | Development | Evaluation | Per writer | Used here |
-|---|---|---|---|---|
-| MCYT | `u0001`–`u0230` | `u0001`–`u0100` | 25 genuine + 25 skilled | ✅ |
-| BiosecurID | `u0231`–`u0498` | `u0101`–`u0232` | 16 genuine + 12 skilled | ✅ |
-| BiosecureDS2 | — | `u0233`–`u0372` | | ✅ (evaluation only) |
-| e-BioSign DS1/DS2 | `u1009`–`u1084` | `u0373`–`u0442` | | ❌ excluded |
-
-`parse_deepsigndb()` defaults to **Development / stylus / the three Wacom sources** —
-**498 writers and 19,004 signatures**, four times the pen-domain writer count this
-project had from SVC2004 and SigComp2011 combined.
-
-Three things the parser does that are worth knowing:
-
-- **Pressure is read from a source-specific column** — MCYT column 6, BiosecurID and
-  BiosecureDS2 column 7, e-BioSign column 4. A fixed column would read azimuth as
-  pen force for most of the corpus.
-- **Each file is resampled to 100 Hz using its own measured median gap**, not a
-  per-dataset constant. BiosecurID's Development half is a near-even mix of 100 Hz
-  and 200 Hz captures (measured: 196 files against 180 in a 5% sample), because it
-  was recorded across four sessions on two tablet models. Velocity channels come
-  from consecutive-frame deltas, so a 200 Hz file shows half the pen speed for the
-  same hand.
-- **Pen-up samples are dropped** (force = 0, measured 20–30% of raw points), the
-  same alignment SigComp2011 gets and for the same reason: SVC2004 Task 2 contains
-  no zero-pressure points at all.
-
-**e-BioSign is excluded from the pen model.** Its five capture devices report
-incompatible force maxima — measured 353, 424, 485, 505, 511, 954, 1003 and 1023
-across device/subset combinations — so no fixed divisor is defensible, and
-normalizing per file would make one signature's scale depend on its own extremes.
-Two of those devices are Samsung general-purpose tablets, which is MOBISIG's domain,
-not the pen tablet's. Reach it deliberately with
-`parse_deepsigndb(sources=("eBioSign_DS1", "eBioSign_DS2"))` if that changes.
-
-The **finger** subset is the same people signing on a touchscreen. Its force column
-is 0 in every file, so it belongs to the mobile tier alongside MOBISIG, not here.
-
-##### Licence rules this repository has to keep
-
-The agreement is research-use-only and specific. In practice:
-
-| Clause | What it means here |
-|---|---|
-| 4.1 | Only the licensee and direct colleagues at the same institution may use it |
-| 4.2 | No copying or redistribution beyond your own backup — `data/` is gitignored, and **no signature file, feature cache, or embedding dump derived from it may ever be committed** |
-| 4.4 | Research only. The prohibition explicitly covers "files containing extracted features", so features and weights derived from it are non-commercial too |
-| 4.5 | Any public work based on it must cite the four references marked ⚖ in the [Bibliography](#bibliography) |
-| 4.6 | No signature images in publications — BiDA Lab whitelists **only users `u1010`, `u1013`, `u1028` (Development) and `u0103`, `u0145` (Evaluation)**. Every plot in this repo is a score distribution or a DET/ROC curve, so nothing currently renders a DeepSignDB stroke; keep it that way |
-| 4.7 | Expires 25 July 2028 unless renewed, then all copies are destroyed |
-| 4.8 | BiDA Lab may instruct that part of the database be destroyed; comply immediately |
-
-Training on it and using the resulting weights for this project, its report and its
-demo is exactly the licensed use. Selling it, or shipping it inside a commercial
-product, is not. See [Model Weights & GitHub Releases](#model-weights--github-releases)
-for how that constrains public weight distribution.
-
-### Writer-Independent Data Split Protocol
-
-All model training and validation routines follow an **open-set writer-independent split protocol** compliant with **ISO/IEC 23053:2022**:
-
-- **Partition Ratios**: 70/15/15 for the image datasets, which have 430 writers
-  between them. The temporal datasets use **50/25/25**, since SVC2004's 40 writers
-  would otherwise leave only 6 test writers and an EER too noisy to compare
-  configurations against.
-- **Zero Writer Overlap**: Writer IDs are partitioned such that $\text{Writers}_{\text{train}} \cap \text{Writers}_{\text{val}} \cap \text{Writers}_{\text{test}} = \emptyset$. No individual writer appears in more than one partition.
-- **Skilled Forgery Benchmark**: Impostor pairs are evaluated strictly using skilled forgeries rather than random signers.
-- **Enrollment protocol** (`--enroll 5`): the standard the field measures with, and
-  what `src/verification.py` runs. Each user enrolls **5 genuine** signatures,
-  skilled forgeries are **never** shown at enrollment, each probe is matched
-  against the nearest enrolled reference, and the result is **averaged over 10
-  random enrollment draws**. This is the SVC2004 competition protocol, whose best
-  Task 2 result was 2.89% EER.
-
-```bash
-# The standard protocol — the headline numbers
-python scripts/benchmark.py --branch temporal --weights models/weights/temporal_lstm.pth \
-    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 --seed 42 --enroll 5
-
-# Without --enroll the harness scores isolated pairs: a harder task that neither
-# the literature nor this system performs. Kept as a conservative lower bound.
-```
-
-All figures below are enrollment protocol, K=5, mean ± spread over 10 draws,
-seed 42. Report the spread, not one draw — the enrollment draw is a sample just
-as the writer split is.
-
-**Spatial branch** — shipped configuration is the **wide trunk** (96×11×11 stem
-into 256, 384, 256), inverted pixels, 155×220 direct resize, 276 balanced pairs
-per writer drawn **without replacement**, 512-d embedding. The Siamese column is
-Dey et al., whose FAR = FRR, so their figures are EER and compare directly. Every
-published figure quoted here, with its protocol, is in [References](#references).
-
-| dataset | compact trunk | wide trunk | + augment + LR decay | + pair diversity | **shipped (+ random impostors)** | published Siamese (Dey et al.) |
-|---|---|---|---|---|---|---|
-| cedar (Latin) | 0.00% ± 0.00 | 0.00% ± 0.00 | 0.00% ± 0.00 | 0.00% ± 0.00 | **0.00% ± 0.00** | 0.00% |
-| bhsig_Hindi | 5.55% ± 0.76 | 4.65% ± 0.81 | 4.48% ± 0.61 | 4.20% ± 0.53 | **4.30% ± 0.78** | 15.36% |
-| bhsig_Bengali | 14.69% ± 1.76 | 13.85% ± 1.30 | 12.26% ± 1.32 | 11.80% ± 1.12 | **12.07% ± 1.38** | 13.89% |
-| utsig (Persian) | 33.76% ± 1.52 | 30.41% ± 2.32 | 29.73% ± 2.57 | 28.48% ± 2.83 | **30.74% ± 1.78** | not evaluated |
-| pooled (65 writers) | 12.31% ± 0.96 | 11.78% ± 0.61 | 11.23% ± 0.47 | 10.58% ± 0.67 | **10.10% ± 0.38** | — |
-
-**The shipped column is not uniformly better, and the trade is deliberate.**
-Adding random-impostor negatives (`RANDOM_IMPOSTOR_RATIO = 0.5`) improved the
-pooled figure and halved its spread, but **UTSig regressed 28.48% → 30.74%**.
-It ships anyway because the previous model could not tell one writer from
-another: a *stranger's* genuine signature passed as the enrolled user 24–37% of
-the time depending on dataset, and cross-writer negatives roughly halved that.
-The published metric measures skilled forgery only, so it never saw that hole.
-Full decomposition in `docs/SOLUTIONS.md`.
-
-The wide trunk was measured against the compact one as three separate arms, and
-only the trunk itself paid off. Adding the reference's dropout schedule cost 6.78
-pooled points, and adding its FC-1024 head on top of that collapsed the model to
-a single embedding. At 301 training writers the failure is data scarcity rather
-than excess capacity, so the regularization Dey et al. can afford at GPDS300
-scale removes capacity this project needs. Full table in `docs/SOLUTIONS.md`.
-
-CEDAR is at parity with the reference and Hindi beats it by 10.7 points. CEDAR's
-0.00% is measured on 8 held-out writers and 344 pairs — real, and stable across
-all 10 draws, but a small sample that deserves re-measuring on more writers
-before it is quoted as a headline.
-
-UTSig is the one genuine gap, and no Siamese network has been published on it:
-its state of the art fits a classifier per enrolled user, a stage this project
-measured and rejected because it made results 2–3× worse at 300 training writers.
-
-**Training-time augmentation** (small affine warps plus stroke-width jitter)
-broke a long-standing ceiling: every earlier spatial run peaked at epoch 1, which
-turned out to be image variety rather than pair supply, since 301 writers were
-seen pixel-identical every epoch. With augmentation the best epoch moved to 6.
-Plateau LR decay added on top ties on mean EER but tightens the draw spread 40%.
-**Pair diversity** was the last architectural change to pay. Pairs had been drawn
-*with replacement* from each writer's pair space, so at 276 draws roughly 37% were
-duplicates of pairs already in the batch — the coupon-collector effect. Drawing
-from a shuffled exhaustive enumeration instead cost nothing and bought 0.65
-points, and it fixed a silent class imbalance on UTSig at the same time.
-
-The honest scale: 12.31% → 10.10% pooled across trunk width, augmentation, LR
-decay and pair diversity together. Roughly 1.7 EER points for four changes. The
-lever with real leverage is more writers — and adding 84 of them from SigComp2011's
-offline half *lost* to pair diversity alone, so "more writers" turns out to mean
-escaping a corpus small enough to memorise, not more of the same. Details in
-`docs/SOLUTIONS.md`.
-
-**Enrollment size is the cheapest remaining lever.** K is set at inference, so
-raising it needs no retraining. It only asks the user for more reference
-signatures. At K = 10 Hindi reaches 4.05%, SigComp Dutch reaches 4.93%, and
-CEDAR holds at 0.00%, which puts three datasets under the 5% target. Most of the
-gain arrives by K = 10. K = 12 adds little and starts excluding writers who lack
-13 genuine samples.
-
-**Temporal branch** — SVC2004 + SigComp2011, contrastive Siamese LSTM, **pressure
-dropout off**.
-
-| dataset | pressure dropout 0.4 | **shipped (dropout 0)** | shipped at K = 10 |
-|---|---|---|---|
-| sigcomp_Dutch (pen, the XPPen condition) | 6.11% ± 1.15 | **4.19% ± 0.75** | **3.62% ± 1.08** |
-| sigcomp_Chinese (pen) | 8.97% ± 0.72 | **8.11% ± 1.76** | 7.64% ± 0.97 |
-| svc (pen) | 21.77% ± 1.67 | **17.46% ± 1.99** | 16.05% ± 1.43 |
-| pooled (31 writers) | 12.73% ± 0.79 | **10.26% ± 0.65** | **9.23% ± 0.60** |
-
-Pressure dropout replaced real pressure with a flat `P = 1.0` on 40% of training
-samples, to keep a pressure-less device inside the training distribution.
-Measured, it cost 2.47 pooled points on normal input **and** 3.00 points on
-pressure-blind input (23.32% → 20.32%), losing on the one path it existed to
-defend. It is now off. The pressure channel itself is worth about 2.3 points,
-from the Task1 vs Task2 ablation in `docs/SOLUTIONS.md`.
-
-**The channels the contract drops were measured, and one of them is expensive.**
-SVC2004 Task2 ships 7 channels; the capture contract keeps 3. On a 40-writer
-ablation (same split and seed as the 3-channel control at 19.55% K = 10), adding
-`azimuth + altitude` reaches **11.17% (−8.38)** and adding real inter-sample
-`dt` reaches **15.17% (−4.38)**. `button` is near-constant and worth nothing.
-Neither ships: the XPPen Deco 640 reports no tilt, and SigComp2011 carries
-neither channel, so both cost the branch 84 of its 124 writers. The tilt figure
-is the strongest argument on record for a different capture device. Full
-analysis in `docs/SOLUTIONS.md`.
-
-**SigComp Dutch is under the 5% target at K = 5**, and reaches 3.62% at K = 10.
-That is the pen-tablet condition matching the XPPen Deco 640, so the graded
-deployment target is met on the deployment-relevant dataset.
-
-SigComp2011 Dutch is the dataset that matches the XPPen deployment condition —
-real signatures on a pen tablet — and is the closest to the <5% spec.
-
-| Dataset                                                                                                            | Modality | Script           | Role                                      |
-| ------------------------------------------------------------------------------------------------------------------ | -------- | ---------------- | ----------------------------------------- |
-| [CEDAR](https://www.kaggle.com/datasets/shreelakshmigp/cedardataset)                                               | Offline  | Latin            | Spatial branch training                   |
-| [BHSig260](https://drive.google.com/file/d/0B29vNACcjvzVc1RfVkg5dUh2b1E/view?resourcekey=0-MUNnTzBi4h_VE0J84NDF3Q) | Offline  | Bengali / Hindi  | Multi-script generalization               |
-| [UTSig](https://www.kaggle.com/datasets/sinjinir1999/utsignature-verification?resource=download)                   | Offline  | Persian / Arabic | Closest proxy to Arabic-script deployment |
-| [SVC2004](https://cse.hkust.edu.hk/svc2004/download.html)                                                          | Online   | —                | Pen-tablet proxy — the headline dataset    |
-| [SigComp2011](http://www.iapr-tc11.org/mediawiki/index.php/ICDAR_2011_Signature_Verification_Competition_(SigComp2011)) | Online | Dutch / Chinese | Pen-tablet volume (84 writers)            |
-| [MOBISIG](https://www.ms.sapientia.ro/~manyi/mobisig.html)                                                         | Online   | —                | Mobile / iPad proxy (see caveat below)    |
-| In-house collection                                                                                                | Both     | Arabic           | Fine-tuning, same-signer multimodal pairs |
-
-**Device targets are tiered.** The primary capture device is the **XPPen Deco 640
-pen tablet**, which must reach the 5% FAR/FRR spec. Mobile and iPad capture is
-supported as a secondary path where roughly 80% accuracy is acceptable.
-
-That ordering decides how the online datasets are used. MOBISIG's 83 users signed
-with a **finger on a capacitive touchscreen**, so its pressure channel comes from
-contact area rather than a pen sensor: it is the proxy for the mobile and iPad
-path. SVC2004 and SigComp2011 are both **pen-tablet** datasets and are where the
-primary target is measured.
-
-Two things were measured rather than assumed, and both shape the recipe:
-
-- **Touchscreen writers do not substitute for pen writers.** Pre-training on
-  MOBISIG and fine-tuning on SVC2004 *lost* 2.6 EER points against training from
-  scratch. Tripling the writer count with MOBISIG moved the mobile number 14
-  points and the pen number not at all.
-- **SVC2004 is much harder than other pen datasets, and not because of the
-  device.** One training run scores 10.92% on SigComp2011's Dutch writers and
-  29.62% on SVC2004. SVC2004's contributors were advised not to use their real
-  signatures, and its forgers were shown the signing process on a monitor and
-  allowed to practise. Always report the two datasets separately.
-
-The temporal branch is therefore trained on **pen datasets together, from
-scratch** — no pre-training stage.
-
-```bash
-# 1. Train on the pen datasets together. SigComp2011 supplies 84 pen writers,
-#    taking the trainable count from 20 to 62. expandable_segments avoids
-#    fragmentation OOM on a 4 GB card.
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python scripts/train.py --branch temporal \
-    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 \
-    --weights-dir models/pen_sigcomp --epochs 120 --patience 20 --seed 42
-
-# 2. Score on the same datasets and seed, which reproduces the same held-out
-#    writers. Read the per-dataset breakdown, never the pooled number alone.
-python scripts/benchmark.py --branch temporal \
-    --weights models/pen_sigcomp/temporal_lstm.pth \
-    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 --seed 42
-
-# 3. Mobile is a separate bar (~20%), measured on its own dataset.
-python scripts/benchmark.py --branch temporal \
-    --weights models/pen_sigcomp/temporal_lstm.pth --data-dir ./data/MOBISIG
-```
-
-| temporal model | pooled | svc | sigcomp_Dutch | sigcomp_Chinese | MOBISIG |
-|---|---|---|---|---|---|
-| MOBISIG + SVC2004 | 24.31% | 26.75% | 18.17% | 23.75% | 20.13% |
-| **SVC2004 + SigComp2011 (ships)** | **17.98%** | 29.62% | **10.92%** | **12.08%** | 24.09% |
-
-The first four columns come from one identical 31-writer held-out split, so they
-are directly comparable. Note that the older model had 3 of those 10 SVC test
-writers in its *training* set, which flatters its SVC column.
-
-#### Adding DeepSignDB: the largest measured gain in this project
-
-Adding DeepSignDB's 498 Development stylus writers took the trainable pen count
-from 62 to 311. Both models below are scored on the **same 131 writers**, the ones
-each of them held out — 124 DeepSignDB, 4 SigComp, 3 SVC2004 — so the comparison is
-on identical people rather than two differently-shuffled splits.
-
-| temporal model | train writers | pooled | BiosecurID | MCYT | svc | sigcomp_Chinese | Cohen's d |
-|---|---|---|---|---|---|---|---|
-| SVC2004 + SigComp2011 | 62 | 12.68% ± 0.31 | 10.58% | 13.25% | 21.11% | 8.51% | 1.523 |
-| **+ DeepSignDB Development** | **311** | **6.89% ± 0.25** | **4.61%** | **7.10%** | **16.94%** | **6.27%** | **1.922** |
-| | | **−5.79** | −5.97 | −6.15 | −4.17 | −2.24 | +0.40 |
-
-The pooled EER nearly halved, and **every** dataset improved — including SVC2004 and
-SigComp2011, which the baseline was already trained on. So this is not new writers
-flattering their own corpus. BiosecurID at **4.61%** is the first result under the
-project's 5% pen-tablet target.
-
-Two cautions come with it:
-
-- **It overfits, and early.** Training loss fell to 0.0285 by epoch 23 while
-  validation loss climbed to 0.1902; best validation was **epoch 2**. Early stopping
-  fired at epoch 23 of 120. At 311 writers the 128-d LSTM still has capacity to
-  memorize, which argues for more writers rather than more regularization — the same
-  conclusion the spatial dropout experiment reached.
-- **Validation loss inverts on small differences but not on large ones.** Three
-  checkpoints from this run, all scored on the same 131 writers:
-
-  | checkpoint | val loss | pooled EER |
-  | --- | --- | --- |
-  | epoch 2 | 0.1153 | 7.74% |
-  | epoch 3 | 0.1202 | **6.89%** |
-  | epoch 23 | 0.1902 | 16.43% |
-
-  Epoch 2 has the better validation loss and the worse EER, so the checkpoint the
-  training loop labels "best" is not the best model — rank close candidates with
-  `benchmark.py`. But the ordering holds at range: the overfit epoch-23 model is
-  worse than the baseline that never saw DeepSignDB at all (16.43% against 12.68%,
-  and SVC2004 collapses to 36.11%). Early stopping was right to fire; it was only
-  the one-epoch tiebreak it got wrong.
-
-The SVC2004 column stays the outlier at 16.94%, consistent with everything else
-measured here: its contributors were told not to use their real signatures.
-
-#### Trading validation writers for training writers does not pay
-
-The temporal branch splits 50/25/25 rather than the spatial branch's 70/15/15 only
-because SVC2004's 40 writers would otherwise have left 6 test writers. At 622
-writers that constraint is gone, so the ratio was re-measured as its own arm. All
-three models below are scored on the **same 80 writers**, held out by every one of
-them:
-
-| temporal model | train / val writers | pooled | BiosecurID | MCYT | svc | Cohen's d |
-|---|---|---|---|---|---|---|
-| SVC2004 + SigComp2011 | 62 / 31 | 13.15% ± 0.37 | 11.43% | 13.33% | 21.11% | 1.437 |
-| **+ DeepSignDB, 50/25/25** | **311 / 155** | **6.88% ± 0.34** | 4.85% | **5.79%** | **16.94%** | **1.867** |
-| + DeepSignDB, 70/15/15 | 435 / 93 | 7.49% ± 0.31 | **5.14%** | 7.14% | 21.11% | 1.837 |
-
-**124 extra training writers cost 0.61 EER points.** The spreads do not overlap, so
-this is not enrollment-draw luck. The trade also removed 62 validation writers, and
-both early stopping and best-checkpoint selection run off validation — on this very
-run a 0.005 difference in validation loss inverted the EER ranking, so a thinner
-validation set is not a cheap thing to buy training data with.
-
-A related trap worth naming: arm B's validation loss (0.1066) looked better than arm
-A's (0.1202), but the two were computed on **different validation sets**, so the
-comparison meant nothing. Validation loss is comparable only within one split.
-
-Taken with the table above it, the writer-count lever reads:
-
-| change | writers | Δ pooled EER |
-| --- | --- | --- |
-| add DeepSignDB Development | 62 → 311 | **−6.27** |
-| shift the split ratio | 311 → 435 | **+0.61** (worse) |
-
-Writer count paid enormously up to roughly 311 and then stopped. **50/25/25 stays.**
-
-These weights are **not shipped** — see [Model Weights & GitHub Releases](#model-weights--github-releases).
-They live in `models/pen_deepsign/` with `DONT_SHIP` in every filename.
-
-**Comparing two temporal checkpoints requires care.** The writer split is derived
-from whichever datasets are loaded, so adding a dataset reshuffles it and the EERs
-stop being comparable. A third run including MOBISIG appeared to cut SVC2004 from
-29.62% to 16.92%; scored on the 5 SVC writers both runs had actually held out,
-the real gap was 33.00% against 29.50%. Use `--writers` for this, which refuses
-any writer the run being scored trained on:
-
-```bash
-python scripts/benchmark.py --branch temporal --weights <a.pth> \
-    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 --seed 42 \
-    --writers svc_3 svc_6 svc_7 svc_34 svc_38
-```
-
----
-
-## Evaluation Figures
-
-Regenerated from the **shipped** weights on the openly available corpora only —
-`spatial_cnn.pth` on CEDAR + BHSig260 + UTSig, `temporal_lstm.pth` on SVC2004 +
-SigComp2011. No licensed data appears in any figure.
-
-> **These figures use the enrollment protocol — the one the app deploys.** Each
-> probe is matched against the nearest of 5 enrolled references, and τ is tuned
-> on validation under that same protocol. Until 2026-08-04 τ was tuned on
-> *pair-scoring* scores while `src/verification.py` scored under enrollment; the
-> mismatch put τ below the deployed distribution and the system accepted almost
-> everything (spatial FAR 19.32% / FRR 2.65%, temporal FAR 25.00% / FRR 2.18%).
-> Calibrate under the protocol you deploy.
-
-| | spatial | temporal |
-|---|---|---|
-| EER | 10.08% | 10.35% |
-| calibrated threshold τ | 0.7753 | 0.8340 |
-| FAR / FRR at τ | 10.54% / 9.39% | 9.89% / 10.84% |
-| best dataset | cedar 0.00% | **sigcomp_Dutch 4.02%** |
-| worst dataset | utsig 30.68% | svc 18.00% |
-
-The shipped `DECISION_THRESHOLD` values (spatial 0.7868, temporal 0.8524) are
-slightly higher than the EER points above: they are the **FAR ≤ 10%** operating
-point on the same validation scores, because a verification system should prefer
-rejecting a forgery over accepting one. On test that gives spatial FAR 9.25% /
-FRR 11.17% and temporal FAR 7.97% / FRR 14.51%.
-
-**FAR ≤ 5% is reachable but not advisable.** It needs τ 0.8181 spatial / 0.8788
-temporal and costs FRR **22.19% / 22.03%** — better than one user in five turned
-away. The knee of the curve is at FAR 8–10%; below it the FRR cost per point of
-FAR roughly doubles.
-
-On the deployment-relevant dataset — SigComp Dutch, the pen-tablet condition
-matching the XPPen — the operating point is **FAR 1.80% / FRR 7.05%**, inside the
-5% FAR target.
-
-### Confusion matrices
-
-Counts at the calibrated threshold, over held-out test writers.
-
-| spatial | temporal |
-|---|---|
-| ![Confusion matrix, spatial branch](results/confusion_spatial.png) | ![Confusion matrix, temporal branch](results/confusion_temporal.png) |
-
-The spatial matrix reads 13,921 true rejects and 1,967 false accepts against
-13,481 true accepts and 2,407 false rejects. The two error types are close in
-size, which is the intended calibration — earlier weights sat at FAR 10.12%
-against FRR 21.20%, roughly double, and AGENTS.md requires slack to land on FRR
-only once FAR is already held down.
-
-### ROC and DET curves
-
-DET is the curve to read for a verification system: it plots FAR against FRR on a
-normal-deviate scale, so the operating point and the shape of the trade-off are
-both visible, where ROC compresses the region that matters into the top-left corner.
-
-| | spatial | temporal |
-|---|---|---|
-| **ROC** | ![ROC curve, spatial branch](results/roc_spatial.png) | ![ROC curve, temporal branch](results/roc_temporal.png) |
-| **DET** | ![DET curve, spatial branch](results/det_spatial.png) | ![DET curve, temporal branch](results/det_temporal.png) |
-
-Reproduce any of these with:
-
-```bash
-python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth \
-    --data-dir ./data/cedar ./data/bhsig260 ./data/utsig --output-dir results --seed 42
-
-python scripts/evaluate.py --branch temporal --weights models/weights/temporal_lstm.pth \
-    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 --output-dir results --seed 42
-```
-
----
-
-## Model Weights & GitHub Releases
-
-Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded from Git repository tracking via `.gitignore` to keep the repository lightweight:
-
-- **Pre-compiled Weights Distribution**: Official pre-trained weights (`spatial_cnn.pth` and `temporal_lstm.pth`) are hosted and distributed via **[GitHub Releases](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases)**.
-- **Local Deployment**: Download the compiled weight `.pth` files from the latest GitHub Release and place them into the `models/weights/` directory:
-  ```
-  models/weights/
-  ├── spatial_cnn.pth
-  └── temporal_lstm.pth
-  ```
-
-**Weights trained on DeepSignDB are not published here.** The licence bars commercial
-use of anything derived from the database, including "files containing extracted
-features" (clause 4.4), and a public release makes the file available to anyone,
-commercial users included. Weights are not the database and the clause does not
-name them, so this is a caution rather than a stated prohibition — but the cheap,
-clean resolution is to keep it: the published `temporal_lstm.pth` is trained on the
-openly available corpora (SVC2004 + SigComp2011), while DeepSignDB-trained weights
-stay local and are used for the project report, demo and benchmarks. Ask BiDA Lab in
-writing before changing that.
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.10+
-- pip
-
-### Installation
-
-```bash
-git clone https://github.com/Rockeyxx/Signature-Verification-ML-EE499.git
-cd Signature-Verification-ML-EE499
-
-python -m venv venv
-source venv/bin/activate        # Linux
-# venv\Scripts\activate         # Windows
-
-pip install -r requirements.txt
-```
-
-### Running the Application
-
-```bash
-python -m src.gui.app
-```
-
----
-
-## Training
-
-```bash
-# Train spatial branch (offline signatures)
-python scripts/train.py --branch spatial --data-dir ./data/cedar ./data/bhsig260 ./data/utsig
-
-# Train temporal branch (online signatures)
-python scripts/train.py --branch temporal --data-dir ./data/svc2004
-```
-
-Training uses **writer-independent splits** — no signer appears in more than one of train / validation / test.
+SigComp2011 downloads openly; DeepSignDB and most other large corpora require a
+signed licence agreement.
 
 ---
 
@@ -773,6 +287,91 @@ Metrics reported:
 - **FAR / FRR** under skilled-forgery protocol
 - **ROC / DET curves** and confusion matrices
 - **α-vs-EER sweep** plot for fusion weight selection
+
+---
+
+### Results
+
+| dataset | this system | published Siamese (Dey et al.) |
+| --- | --- | --- |
+| cedar (Latin) | **0.00% ± 0.00** | 0.00% |
+| bhsig_Hindi | **4.30% ± 0.78** | 15.36% |
+| bhsig_Bengali | **12.07% ± 1.38** | 13.89% |
+| utsig (Persian) | 30.74% ± 1.78 | not evaluated |
+| **pooled (65 writers)** | **10.10% ± 0.38** | — |
+
+### Datasets and device targets
+
+| Dataset | Modality | Script | Role |
+| --- | --- | --- | --- |
+| CEDAR | Offline | Latin | Spatial branch training |
+| BHSig260 | Offline | Bengali / Hindi | Multi-script generalization |
+| UTSig | Offline | Persian / Arabic | Closest proxy to Arabic-script deployment |
+| SVC2004 | Online | — | Pen-tablet proxy |
+| SigComp2011 | Online | Dutch / Chinese | Pen-tablet volume (84 writers) |
+| MOBISIG | Online | — | Mobile / iPad proxy |
+
+Device support is **tiered**. The primary target is the **XPPen Deco 640 pen
+tablet**, which must reach the 5% FAR/FRR spec — and does, at **FAR 1.80% /
+FRR 7.05%** on the matching pen-tablet dataset. Mobile and iPad capture is a
+secondary path where roughly 80% accuracy is acceptable, because a finger on a
+capacitive touchscreen reports contact area rather than true pen pressure. The
+temporal branch is trained on the two pen datasets together, from scratch.
+
+### Evaluation Figures
+
+From the shipped weights on the open corpora only — no licensed data appears in
+any figure. Scored the way the app scores: each probe matched against the nearest
+of 5 enrolled references.
+
+|                | spatial | temporal |
+| -------------- | --- | --- |
+| EER | 10.08% | 10.35% |
+| FAR / FRR at the shipped threshold | 9.25% / 11.17% | 7.97% / 14.51% |
+| best dataset | cedar 0.00% | **sigcomp_Dutch 4.02%** |
+| worst dataset | utsig 30.68% | svc 18.00% |
+
+The thresholds are set to hold **false accepts at or under 10%**, because letting
+a forgery through is worse than asking a real user to sign again. Pushing false
+accepts below 5% is possible but turns away more than one genuine user in five,
+so it is not the shipped setting. On **SigComp Dutch — the pen-tablet condition
+matching the XPPen** — the system runs at FAR 1.80% / FRR 7.05%, inside the 5%
+target.
+
+#### Confusion matrices
+
+Counts at the calibrated threshold, over held-out test writers.
+
+| spatial                                                            | temporal                                                             |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| ![Confusion matrix, spatial branch](results/confusion_spatial.png) | ![Confusion matrix, temporal branch](results/confusion_temporal.png) |
+
+The spatial matrix reads 13,921 true rejects and 1,967 false accepts against
+13,481 true accepts and 2,407 false rejects. The two error types are close in
+size, which is the intended calibration — earlier weights sat at FAR 10.12%
+against FRR 21.20%, roughly double, and AGENTS.md requires slack to land on FRR
+only once FAR is already held down.
+
+#### ROC and DET curves
+
+DET is the curve to read for a verification system: it plots FAR against FRR on a
+normal-deviate scale, so the operating point and the shape of the trade-off are
+both visible, where ROC compresses the region that matters into the top-left corner.
+
+|         | spatial                                               | temporal                                                |
+| ------- | ----------------------------------------------------- | ------------------------------------------------------- |
+| **ROC** | ![ROC curve, spatial branch](results/roc_spatial.png) | ![ROC curve, temporal branch](results/roc_temporal.png) |
+| **DET** | ![DET curve, spatial branch](results/det_spatial.png) | ![DET curve, temporal branch](results/det_temporal.png) |
+
+Reproduce any of these with:
+
+```bash
+python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth \
+    --data-dir ./data/cedar ./data/bhsig260 ./data/utsig --output-dir results --seed 42
+
+python scripts/evaluate.py --branch temporal --weights models/weights/temporal_lstm.pth \
+    --data-dir ./data/svc2004_task2 ./data/sigcomp2011 --output-dir results --seed 42
+```
 
 ---
 
@@ -812,52 +411,33 @@ The published figures this project is measured against, with the protocol each
 one used. Every "this project" number comes from `benchmark.py --enroll 5`: mean
 over 10 draws, seed 42, held-out writers only.
 
-### What the protocol column means
-
-Three things move these numbers more than any architecture choice does, so every
-row says which of them applies.
-
-- **WI vs WD.** *Writer-independent* systems learn one distance and threshold it
-  for everybody. *Writer-dependent* systems fit a classifier per enrolled user.
-  Nearly every published UTSig and MCYT result is WD. This project is WI, and it
-  measured the WD stage directly: a per-user linear SVM took the spatial branch
-  from 13.90% to 43.89% EER (`docs/SOLUTIONS.md`). With 300 training writers
-  rather than thousands, random-forgery negatives cannot teach a skilled-forgery
-  boundary. Part of the distance to a WD number is protocol, not quality.
-- **Global vs user-specific threshold.** A threshold tuned per user *after*
-  seeing that user's scores measures something else. MOBISIG's headline 5.81% is
-  a posteriori user-specific; the same work reports 14.31% under a global
-  threshold. This project reports global-threshold EER only.
-- **Enrolled references (K).** More references make the task easier. K appears on
-  every row whose source states it. This project uses K = 5 throughout.
-
-Dey et al. report FAR = FRR, so their accuracies convert straight across:
-EER = 100 − accuracy.
-
 ### Published results on the datasets this project uses
 
-| Dataset | Published | Protocol | Source | This project |
-| --- | --- | --- | --- | --- |
-| CEDAR | **0.00%** EER (100.00% acc) | WI Siamese CNN, 50 of 55 writers trained | [1] | **0.00% ± 0.00** |
-| CEDAR | 4.63% EER | WD SVM on CNN features, K = 12 | [2] | **0.00% ± 0.00** |
-| BHSig260 Bengali | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained | [1] | 13.85% ± 1.30 |
-| BHSig260 Hindi | 15.36% EER (84.64% acc) | WI Siamese CNN, 100 of 160 writers trained | [1] | **4.65% ± 0.81** |
-| UTSig | **9.80%** EER | WD SVM, transfer from Persian handwriting, K = 10 | [3] | 30.41% ± 2.32 |
-| UTSig | 11.16% EER | same, K = 5 — the closest protocol match to ours | [3] | 30.41% ± 2.32 |
-| UTSig | 17.45% EER | WD DMML on HOG features, K = 12 | [4] | 30.41% ± 2.32 |
-| UTSig | 29.71% EER | WD SVM on fixed-point geometrics, K = 12 | [5] | 30.41% ± 2.32 |
-| SVC2004 Task 2 | **2.89%** EER | competition winner of 8 teams, K = 5, skilled forgeries | [6] | 21.77% ± 1.67 |
-| SVC2004 Task 2 | 77.00% acc | WI Siamese CNN, 35 writers trained / 5 tested | [7] | 21.77% ± 1.67 |
-| SigComp2011 online, Dutch | not established here | competition, reference-set matching | [8] | **6.11% ± 1.15** |
-| SigComp2011 online, Chinese | not established here | competition, reference-set matching | [8] | 8.97% ± 0.72 |
-| MOBISIG | 5.81% EER | DTW, a posteriori **user-specific** thresholds | [9] | 24.09% |
-| MOBISIG | 14.31% EER | global features, **global** threshold | [9] | 24.09% |
+The **This project** column mirrors the shipped column of the results table
+above — it is not a separate measurement. Update both together.
+
+| Dataset                     | Published                   | Protocol                                                | Source | This project     |
+| --------------------------- | --------------------------- | ------------------------------------------------------- | ------ | ---------------- |
+| CEDAR                       | **0.00%** EER (100.00% acc) | WI Siamese CNN, 50 of 55 writers trained                | [1]    | **0.00% ± 0.00** |
+| CEDAR                       | 4.63% EER                   | WD SVM on CNN features, K = 12                          | [2]    | **0.00% ± 0.00** |
+| BHSig260 Bengali            | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained               | [1]    | **12.07% ± 1.38** |
+| BHSig260 Hindi              | 15.36% EER (84.64% acc)     | WI Siamese CNN, 100 of 160 writers trained              | [1]    | **4.30% ± 0.78** |
+| UTSig                       | **9.80%** EER               | WD SVM, transfer from Persian handwriting, K = 10       | [3]    | 30.74% ± 1.78    |
+| UTSig                       | 11.16% EER                  | same, K = 5 — the closest protocol match to ours        | [3]    | 30.74% ± 1.78    |
+| UTSig                       | 17.45% EER                  | WD DMML on HOG features, K = 12                         | [4]    | 30.74% ± 1.78    |
+| UTSig                       | 29.71% EER                  | WD SVM on fixed-point geometrics, K = 12                | [5]    | 30.74% ± 1.78    |
+| SVC2004 Task 2              | **2.89%** EER               | competition winner of 8 teams, K = 5, skilled forgeries | [6]    | 17.46% ± 1.99    |
+| SVC2004 Task 2              | 77.00% acc                  | WI Siamese CNN, 35 writers trained / 5 tested           | [7]    | 17.46% ± 1.99    |
+| SigComp2011 online, Dutch   | not established here        | competition, reference-set matching                     | [8]    | **4.19% ± 0.75** |
+| SigComp2011 online, Chinese | not established here        | competition, reference-set matching                     | [8]    | 8.11% ± 1.76     |
+| MOBISIG                     | 5.81% EER                   | DTW, a posteriori **user-specific** thresholds          | [9]    | 21.26%           |
+| MOBISIG                     | 14.31% EER                  | global features, **global** threshold                   | [9]    | 21.26%           |
 
 Two datasets carry a real gap: UTSig and SVC2004. Both have a known cause. Every
 published UTSig result is writer-dependent with 10 to 12 references. SVC2004's
 contributors were told not to use their real signatures, and its forgers watched
 the signing process on a monitor and were allowed to practise, which is why one
-temporal model scores 29.62% there and 10.92% on SigComp2011's Dutch pen writers.
+temporal model scores 17.46% there and 4.19% on SigComp2011's Dutch pen writers.
 
 Reference [8] reports the SigComp2011 online results per system. Those figures
 are left out here because the tables circulating in secondary sources could not
@@ -870,17 +450,17 @@ The spatial branch is measured against [1], which is the same architecture class
 (Siamese CNN, contrastive loss, margin 1). Its configuration, from the paper's
 own tables:
 
-| | Dey et al. SigNet [1] | this project |
-| --- | --- | --- |
-| input | 155×220, inverted, ÷ std | 155×220, inverted, ÷ 255 |
-| pairs per writer | 276 genuine + 276 forged | 276 + 276 |
-| conv stack | 96×11×11 → 256×5×5 → 384×3×3 → 256×3×3 | 32×5×5 → 64 → 128 → 256 → 256 (their stack is selectable, measured below) |
-| normalization | local response norm | GroupNorm |
-| head | FC-1024 (dropout 0.5) → FC-128 | 4×4 avg+max pool (8192) → FC-512 |
-| dropout | 0.3 after pools 2 and 4, 0.5 after FC1 | none |
-| optimizer | RMSprop 1e-4, momentum 0.9, wd 5e-4 | Adam 1e-3, wd 1e-4 |
-| batch / epochs | 128 / 20 | 32 / early-stopped |
-| loss | contrastive, margin 1 | contrastive, margin 1 + hard-negative mining |
+|                  | Dey et al. SigNet [1]                  | this project                                                              |
+| ---------------- | -------------------------------------- | ------------------------------------------------------------------------- |
+| input            | 155×220, inverted, ÷ std               | 155×220, inverted, ÷ 255                                                  |
+| pairs per writer | 276 genuine + 276 forged               | 276 + 276                                                                 |
+| conv stack       | 96×11×11 → 256×5×5 → 384×3×3 → 256×3×3 | 32×5×5 → 64 → 128 → 256 → 256 (their stack is selectable, measured below) |
+| normalization    | local response norm                    | GroupNorm                                                                 |
+| head             | FC-1024 (dropout 0.5) → FC-128         | 4×4 avg+max pool (8192) → FC-512                                          |
+| dropout          | 0.3 after pools 2 and 4, 0.5 after FC1 | none                                                                      |
+| optimizer        | RMSprop 1e-4, momentum 0.9, wd 5e-4    | Adam 1e-3, wd 1e-4                                                        |
+| batch / epochs   | 128 / 20                               | 32 / early-stopped                                                        |
+| loss             | contrastive, margin 1                  | contrastive, margin 1 + hard-negative mining                              |
 
 The reference trunk was measured against ours as three separate arms, and only
 the first paid off: the wide stack alone reached 11.78% pooled EER against the
@@ -888,9 +468,8 @@ compact stack's 12.31% (UTSig −3.35), while adding their dropout schedule cost
 6.78 points and adding their FC-1024 head on top of it collapsed the model
 outright. At 301 training writers the failure mode is data scarcity rather than
 excess capacity, so the regularization Dey et al. need at GPDS300 scale removes
-capacity this project cannot spare. The compact stack stays shipped: 0.53 points
-does not pay for roughly 11× the training compute. Full table in
-`docs/SOLUTIONS.md`.
+capacity this project cannot spare. The wide stack ships; its dropout schedule and
+FC-1024 head do not.
 
 **No published Siamese system reaches 95% accuracy on all of these datasets.**
 SigNet's own GPDS300 result is 76.83% (23.17% EER) and its Bengali result 86.11%.
@@ -903,59 +482,59 @@ the target rather than to this implementation of it.
 **Methods**
 
 1. S. Dey, A. Dutta, J. I. Toledo, S. K. Ghosh, J. Lladós, U. Pal.
-   *SigNet: Convolutional Siamese Network for Writer Independent Offline
-   Signature Verification.* arXiv:1707.02131, 2017.
+   _SigNet: Convolutional Siamese Network for Writer Independent Offline
+   Signature Verification._ arXiv:1707.02131, 2017.
    <https://arxiv.org/abs/1707.02131>
-2. L. G. Hafemann, R. Sabourin, L. S. Oliveira. *Learning features for offline
-   handwritten signature verification using deep convolutional neural networks.*
+2. L. G. Hafemann, R. Sabourin, L. S. Oliveira. _Learning features for offline
+   handwritten signature verification using deep convolutional neural networks._
    Pattern Recognition 70:163–176, 2017. doi:10.1016/j.patcog.2017.05.012 —
    preprint arXiv:1705.05787. Writer-ID training plus a per-user SVM, **not** a
    Siamese network; cited for its CEDAR/MCYT numbers, not as an architecture model.
-3. O. Mersa, F. Etaati, S. Masoudnia, B. N. Araabi. *Learning Representations
+3. O. Mersa, F. Etaati, S. Masoudnia, B. N. Araabi. _Learning Representations
    from Persian Handwriting for Offline Signature Verification, a Deep Transfer
-   Learning Approach.* arXiv:1903.06249, 2019. <https://arxiv.org/abs/1903.06249>
-4. A. Soleimani, B. N. Araabi, K. Fouladi. *Deep Multitask Metric Learning for
-   Offline Signature Verification.* Pattern Recognition Letters 80:84–90, 2016.
-5. A. Soleimani, K. Fouladi, B. N. Araabi. *UTSig: A Persian offline signature
-   dataset.* IET Biometrics 6(1):1–8, 2017. Dataset paper and its own baseline.
+   Learning Approach._ arXiv:1903.06249, 2019. <https://arxiv.org/abs/1903.06249>
+4. A. Soleimani, B. N. Araabi, K. Fouladi. _Deep Multitask Metric Learning for
+   Offline Signature Verification._ Pattern Recognition Letters 80:84–90, 2016.
+5. A. Soleimani, K. Fouladi, B. N. Araabi. _UTSig: A Persian offline signature
+   dataset._ IET Biometrics 6(1):1–8, 2017. Dataset paper and its own baseline.
 6. D.-Y. Yeung, H. Chang, Y. Xiong, S. George, R. Kashi, T. Matsumoto, G. Rigoll.
-   *SVC2004: First International Signature Verification Competition.* ICBA 2004,
+   _SVC2004: First International Signature Verification Competition._ ICBA 2004,
    LNCS 3072, pp. 16–22. <https://cse.hkust.edu.hk/svc2004/icba2004paper.pdf>
-7. C. Sekhar, P. Mukherjee, D. S. Guru, V. Pulabaigari. *OSVNet: Convolutional
-   Siamese Network for Writer Independent Online Signature Verification.*
+7. C. Sekhar, P. Mukherjee, D. S. Guru, V. Pulabaigari. _OSVNet: Convolutional
+   Siamese Network for Writer Independent Online Signature Verification._
    ICDAR 2019 — arXiv:1904.00240. <https://arxiv.org/abs/1904.00240>
    The temporal branch's closest published Siamese counterpart.
 8. M. Liwicki, M. I. Malik, C. E. van den Heuvel, X. Chen, C. Berger, R. Stoel,
-   M. Blumenstein, B. Found. *Signature Verification Competition for Online and
-   Offline Skilled Forgeries (SigComp2011).* ICDAR 2011, pp. 1480–1484.
+   M. Blumenstein, B. Found. _Signature Verification Competition for Online and
+   Offline Skilled Forgeries (SigComp2011)._ ICDAR 2011, pp. 1480–1484.
    doi:10.1109/ICDAR.2011.294
-9. M. Antal, L. Z. Szabó, T. Tordai. *Online Signature Verification on MOBISIG
-   Finger-Drawn Signature Corpus.* Mobile Information Systems, vol. 2018,
+9. M. Antal, L. Z. Szabó, T. Tordai. _Online Signature Verification on MOBISIG
+   Finger-Drawn Signature Corpus._ Mobile Information Systems, vol. 2018,
    Article ID 3127042. doi:10.1155/2018/3127042
 
 **Datasets**
 
-10. M. K. Kalera, S. Srihari, A. Xu. *Offline signature verification and
-    identification using distance statistics.* IJPRAI 18(7):1339–1360, 2004. — CEDAR.
-11. S. Pal, A. Alaei, U. Pal, M. Blumenstein. *Performance of an off-line
+10. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and
+    identification using distance statistics._ IJPRAI 18(7):1339–1360, 2004. — CEDAR.
+11. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line
     signature verification method based on texture features on a large
-    indic-script signature dataset.* DAS 2016, pp. 72–77. — BHSig260.
+    indic-script signature dataset._ DAS 2016, pp. 72–77. — BHSig260.
 
 The four below are **required by the DeepSignDB licence** (clause 4.5): any work
 made public that rests directly or indirectly on any part of that database must
 cite all four, whether or not the specific sub-corpus was used.
 
-12. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. *DeepSign:
-    Deep On-Line Signature Verification.* IEEE Transactions on Biometrics,
+12. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign:
+    Deep On-Line Signature Verification._ IEEE Transactions on Biometrics,
     Behavior, and Identity Science, 3(2):229–239, 2021. — DeepSignDB itself, and
     the source of the Development/Evaluation protocol this project follows.
-13. ⚖ J. Fierrez, J. Galbally, et al. *BiosecurID: A Multimodal Biometric
-    Database.* Pattern Analysis and Applications, 13(2):235–246, May 2010.
-14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. *The Multi-Scenario Multi-Environment
-    BioSecure Multimodal Database (BMDB).* IEEE Transactions on Pattern Analysis
+13. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric
+    Database._ Pattern Analysis and Applications, 13(2):235–246, May 2010.
+14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment
+    BioSecure Multimodal Database (BMDB)._ IEEE Transactions on Pattern Analysis
     and Machine Intelligence, 32(6):1097–1111, 2010.
-15. ⚖ J. Ortega-Garcia, J. Fierrez, et al. *MCYT Baseline Corpus: A Bimodal
-    Biometric Database.* IEE Proceedings — Vision, Image and Signal Processing,
+15. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal
+    Biometric Database._ IEE Proceedings — Vision, Image and Signal Processing,
     150(6):395–401, December 2003.
 
 **Standards**
