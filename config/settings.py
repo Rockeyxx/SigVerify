@@ -75,6 +75,23 @@ SPATIAL_SQUARE_PAD = False
 MIN_BBOX_PIXELS = 64                    # Minimum signature bounding-box dimension
 MIN_LAPLACIAN_VARIANCE = 50.0           # Sharpness threshold
 
+# ─── Temporal input gate ─────────────────────────────────────────────
+# The spatial branch has had `quality_gate` since the start; the temporal branch
+# had nothing, and its failure mode is worse. `normalize_trajectory` is called
+# only inside the parsers, never on the deployed `verification.embed` path, so a
+# capture layer that forgets it feeds raw device units to a model trained on
+# z-scored input. Measured 2026-08-05 on one SigComp writer: the same signature
+# scored 0.9370 (Genuine) normalized and 0.4888 (Forged) in raw tablet units —
+# a confident wrong verdict on a real user, with no `degraded` flag raised.
+#
+# `normalize_trajectory` z-scores X and Y per signature, so a correctly prepared
+# trajectory has mean ~0 and std ~1 on both axes. The bounds below are wide
+# enough that a short, legitimately unusual signature passes, and narrow enough
+# that raw device units (means in the thousands) cannot.
+MIN_TRAJECTORY_POINTS = 10              # Fewer cannot describe a signature
+MAX_NORMALIZED_XY_MEAN = 0.5            # |mean| above this is not z-scored
+NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # std outside this is not z-scored
+
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
 TEMPORAL_INPUT_FEATURES = 3             # (X, Y, Pressure)
 TEMPORAL_EMBEDDING_DIM = 128
@@ -111,7 +128,10 @@ PAIRS_IMPOSTOR_PER_WRITER = 276
 # sat at 2.043. The model had learned a genuine/forged axis, not identity, and
 # scored 36.64% EER against random impostors while scoring 0.00% against skilled
 # ones. Every dataset showed the same effect more weakly.
-RANDOM_IMPOSTOR_RATIO = 0.0
+# Set to 0.5 on 2026-08-05 to match the shipped weights. It was 0.0 while the arm
+# was being validated; leaving it there would mean `train.py` with no flags no
+# longer reproduces `spatial_cnn.pth`.
+RANDOM_IMPOSTOR_RATIO = 0.5
 
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
@@ -212,7 +232,25 @@ EARLY_STOPPING_PATIENCE = 5            # Stop after 10 epochs without validation
 EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrease required to trigger improvement
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
-ALPHA_DEFAULT = 0.5                     # Tuned on validation via grid search
+# ⚠ PROVISIONAL — the fused path is the least-validated of the three routes.
+#
+# α was previously commented "tuned on validation via grid search". No sweep
+# result exists in docs/SOLUTIONS.md or the README, and 0.5 is exactly the value
+# one would pick without tuning. More importantly it is not *currently* tunable:
+# `alpha_grid_search` fuses element-wise, so it needs one writer to have both an
+# image and a trajectory, and **no dataset here does**. `evaluate.py` truncates
+# the two score vectors to a common length and sweeps anyway, which pairs
+# unrelated writers — hence the PROVISIONAL label it already prints.
+#
+# SigComp2011 was the one corpus that could have fixed this: its online and
+# offline halves are the same 84 people (proved by
+# `test_real_sigcomp2011_halves_describe_the_same_people`). The offline half was
+# deleted on 2026-08-03 after losing as a *spatial training* corpus; its second
+# use as the only multimodal calibration set was not considered at the time.
+#
+# Until a writer exists with both modalities, treat every fused number as an
+# estimate and prefer the single-branch routes, whose thresholds are measured.
+ALPHA_DEFAULT = 0.5                     # PROVISIONAL — never validly swept
 ALPHA_GRID_STEP = 0.05
 # τ: S_final ≥ τ → Genuine. Tuned on the validation split, never on test, and
 # re-derive it whenever the weights change. Similarity is S = 1/(1+d), so a
@@ -239,16 +277,26 @@ ALPHA_GRID_STEP = 0.05
 # below it the FRR cost per point of FAR roughly doubles (spatial FAR 10->5 costs
 # +17 FRR), and FAR<=5% would reject one genuine user in three.
 #
-#   spatial  τ=0.7868 -> test FAR 9.25% / FRR 11.17%
+#   spatial  τ=0.6299 -> test FAR 5.71% / FRR 11.87%   (margin-2.0 weights)
 #   temporal τ=0.8524 -> test FAR 7.97% / FRR 14.51%
 #            sigcomp_Dutch, the XPPen deployment condition: FAR 1.80% / FRR 10.26%
+#
+# τ must be re-derived whenever the loss margin changes: margin 2.0 pushes
+# impostors further out, which shifts S = 1/(1+d) and moved spatial τ from
+# 0.7868 to 0.6299. A threshold carried across a margin change is simply wrong.
 #
 # The two branches need different τ because their score distributions differ;
 # one global value cannot serve both. DECISION_THRESHOLD remains the fused-path
 # default, where scores from both branches are mixed.
-SPATIAL_DECISION_THRESHOLD = 0.7868
+SPATIAL_DECISION_THRESHOLD = 0.6299
 TEMPORAL_DECISION_THRESHOLD = 0.8524
-DECISION_THRESHOLD = 0.8196          # midpoint, fused path only
+# ⚠ The fused τ is a GUESS, not a measurement — the arithmetic midpoint of the
+# two measured per-branch values. It cannot be calibrated for the same reason α
+# cannot (see the ALPHA_DEFAULT note): no writer in any available corpus has both
+# an image and a trajectory, so no validation set exists for the fused score.
+# The two values above are measured; this one is a placeholder that keeps the
+# fused route functional. Do not quote it as calibrated.
+DECISION_THRESHOLD = 0.8196          # PROVISIONAL midpoint, fused path only
 
 # ─── Evaluation Targets ──────────────────────────────────────────────
 TARGET_FAR = 0.05
