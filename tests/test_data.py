@@ -17,8 +17,80 @@ from src.data.dataset import (
     augment_image,
     preprocess_image,
     quality_gate,
+    trajectory_gate,
     writer_independent_split,
 )
+
+
+class TestTrajectoryGate:
+    """
+    The temporal counterpart to the image quality gate.
+
+    These exist because the failure this catches is silent and confident: an
+    unnormalized trajectory scored 0.4888 (Forged) where the same signature
+    normalized scored 0.9370 (Genuine), with nothing flagged.
+    """
+
+    def _normalized(self, n=100, seed=0):
+        """A trajectory shaped the way `normalize_trajectory` leaves one."""
+        rng = np.random.default_rng(seed)
+        xy = rng.normal(0.0, 1.0, size=(n, 2))
+        xy = (xy - xy.mean(axis=0)) / xy.std(axis=0)
+        pressure = rng.uniform(0.1, 1.0, size=(n, 1))
+        return np.hstack([xy, pressure]).astype(np.float32)
+
+    def test_normalized_trajectory_passes(self):
+        passed, details = trajectory_gate(self._normalized())
+        assert passed, details
+
+    def test_raw_device_units_are_rejected(self):
+        """The exact failure measured against the deployed path."""
+        raw = self._normalized()
+        raw[:, 0] = raw[:, 0] * 1200 + 8000
+        raw[:, 1] = raw[:, 1] * 1200 + 6000
+        raw[:, 2] = raw[:, 2] * 1023
+
+        passed, details = trajectory_gate(raw)
+        assert not passed
+        assert "z-scored" in details["error"]
+
+    def test_offset_but_scaled_trajectory_is_rejected(self):
+        """A capture that centred nothing still fails — the mean gives it away."""
+        shifted = self._normalized()
+        shifted[:, :2] += 4.0
+        passed, _ = trajectory_gate(shifted)
+        assert not passed
+
+    def test_pressure_outside_unit_range_is_rejected(self):
+        """Scaling by the file's own max instead of the device max lands here."""
+        traj = self._normalized()
+        traj[:, 2] = traj[:, 2] * 1023
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "Pressure" in details["error"]
+
+    def test_flat_unit_pressure_passes(self):
+        """
+        P = 1.0 everywhere is the legitimate pressure-blind device, which
+        `verify` reports as degraded. It must not be mistaken for bad input.
+        """
+        traj = self._normalized()
+        traj[:, 2] = 1.0
+        assert trajectory_gate(traj)[0]
+
+    def test_wrong_shape_is_rejected(self):
+        assert not trajectory_gate(np.zeros((50, 2), dtype=np.float32))[0]
+        assert not trajectory_gate(np.zeros(50, dtype=np.float32))[0]
+
+    def test_too_short_is_rejected(self):
+        assert not trajectory_gate(self._normalized(n=4))[0]
+
+    def test_non_finite_is_rejected(self):
+        traj = self._normalized()
+        traj[10, 0] = np.nan
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "NaN" in details["error"]
 
 
 class TestPreprocessImage:
@@ -175,7 +247,8 @@ class TestGenerateSkilledPairs:
         """
         pairs, labels = generate_skilled_pairs(self._writers(),
                                                num_genuine_per_writer=5,
-                                               num_forged_per_writer=5)
+                                               num_forged_per_writer=5,
+                                               random_impostor_ratio=0.0)
         forgery_pairs = [p for p, y in zip(pairs, labels) if y == 0]
         assert len(forgery_pairs) > 0
 
@@ -187,7 +260,7 @@ class TestGenerateSkilledPairs:
 
     def test_genuine_pairs_are_same_writer_genuines(self):
         """Every label-1 pair must be two genuine samples from one writer."""
-        pairs, labels = generate_skilled_pairs(self._writers())
+        pairs, labels = generate_skilled_pairs(self._writers(), random_impostor_ratio=0.0)
         for (s1, s2), y in zip(pairs, labels):
             if y == 1:
                 assert s1.split("_")[0] == s2.split("_")[0]
@@ -205,7 +278,7 @@ class TestGenerateSkilledPairs:
         """A writer with no forgeries cannot form skilled pairs and must be dropped."""
         writers = self._writers(n=2)
         writers["w0"]["forged"] = []
-        pairs, labels = generate_skilled_pairs(writers)
+        pairs, labels = generate_skilled_pairs(writers, random_impostor_ratio=0.0)
         assert all("w0" not in s1 for s1, _ in pairs)
 
     def test_random_impostor_ratio_introduces_cross_writer_negatives(self):
@@ -242,7 +315,7 @@ class TestGenerateSkilledPairs:
         be separated.
         """
         kwargs = dict(num_genuine_per_writer=4, num_forged_per_writer=4)
-        _, baseline = generate_skilled_pairs(self._writers(), **kwargs)
+        _, baseline = generate_skilled_pairs(self._writers(), **kwargs, random_impostor_ratio=0.0)
         _, mixed = generate_skilled_pairs(self._writers(),
                                           random_impostor_ratio=0.5, **kwargs)
 
@@ -261,10 +334,20 @@ class TestGenerateSkilledPairs:
                 assert s1.split("_")[0] != s2.split("_")[0]
 
     def test_ratio_zero_reproduces_the_skilled_only_pairing(self):
-        """The default must leave the shipped behaviour bit-for-bit unchanged."""
-        assert (generate_skilled_pairs(self._writers(), seed=7)
-                == generate_skilled_pairs(self._writers(), seed=7,
-                                          random_impostor_ratio=0.0))
+        """
+        Ratio 0 must give the pre-2026-08-04 pairing: every negative a same-writer
+        forgery, no cross-writer pair anywhere.
+
+        This used to compare against the *default*, which was 0.0. The default is
+        now 0.5 — the shipped value — so the assertion has to name the behaviour
+        it wants rather than inherit it.
+        """
+        pairs, labels = generate_skilled_pairs(self._writers(), seed=7,
+                                               random_impostor_ratio=0.0)
+        for (s1, s2), y in zip(pairs, labels):
+            if y == 0:
+                assert s1.split("_")[0] == s2.split("_")[0]
+                assert s2.split("_")[1].startswith("f")
 
     def test_ratio_outside_zero_to_one_is_rejected(self):
         """A ratio above 1 would silently produce a negative skilled budget."""
@@ -443,20 +526,23 @@ class TestSkilledPairBalance:
     def test_scarce_forgeries_cap_the_genuine_arm_too(self):
         pairs, labels = generate_skilled_pairs(
             self._dataset(27, 6), num_genuine_per_writer=276,
-            num_forged_per_writer=276, seed=42)
+            num_forged_per_writer=276, seed=42,
+                random_impostor_ratio=0.0)
         assert labels.count(1) == labels.count(0)
 
     def test_balanced_datasets_are_unaffected(self):
         """CEDAR's 24/24 supports 276 of each; this must not reduce it."""
         pairs, labels = generate_skilled_pairs(
             self._dataset(24, 24), num_genuine_per_writer=276,
-            num_forged_per_writer=276, seed=42)
+            num_forged_per_writer=276, seed=42,
+                random_impostor_ratio=0.0)
         assert labels.count(1) == labels.count(0) == 276
 
     def test_small_budget_still_honoured(self):
         pairs, labels = generate_skilled_pairs(
             self._dataset(27, 6), num_genuine_per_writer=40,
-            num_forged_per_writer=40, seed=42)
+            num_forged_per_writer=40, seed=42,
+                random_impostor_ratio=0.0)
         assert labels.count(1) == labels.count(0) == 40
 
 

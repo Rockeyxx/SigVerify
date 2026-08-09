@@ -44,6 +44,9 @@ from config.settings import (
     SPATIAL_INPUT_SIZE,
     SPATIAL_SQUARE_PAD,
     MIN_BBOX_PIXELS,
+    MIN_TRAJECTORY_POINTS,
+    MAX_NORMALIZED_XY_MEAN,
+    NORMALIZED_XY_STD_RANGE,
     MIN_LAPLACIAN_VARIANCE,
     PAIRS_GENUINE_PER_WRITER,
     PAIRS_IMPOSTOR_PER_WRITER,
@@ -143,6 +146,66 @@ def quality_gate(image_path):
         and sharpness >= MIN_LAPLACIAN_VARIANCE
     )
     return passed, details
+
+
+def trajectory_gate(trajectory):
+    """
+    Check a trajectory is shaped and normalized the way the model was trained.
+
+    The temporal counterpart to `quality_gate`, and it exists because the
+    temporal failure mode is the worse of the two. A blurry image degrades a
+    score; a trajectory still in raw device units produces an embedding with no
+    relationship to the enrolled templates, and the system returns a *confident*
+    wrong verdict. Measured on one SigComp writer: the same signature scored
+    0.9370 normalized and 0.4888 in raw tablet units — accepted, then rejected.
+
+    `normalize_trajectory` z-scores X and Y per signature, so the check is
+    cheap: real input has mean ~0 and std ~1 on both axes, and raw tablet units
+    have means in the thousands. This detects the *class* of error rather than a
+    specific device's scale, so it needs no per-device configuration.
+
+    Pressure is checked for range only. It is not z-scored — it is scaled to
+    [0, 1] by a fixed device maximum — and a flat P = 1.0 is the legitimate
+    pressure-blind case that `verify` reports as degraded, not an error.
+
+    Returns: (passed: bool, details: dict) — same contract as `quality_gate`.
+    """
+    trajectory = np.asarray(trajectory, dtype=np.float32)
+
+    if trajectory.ndim != 2 or trajectory.shape[1] != 3:
+        return False, {"error": f"Expected [L, 3] (X, Y, P), got {trajectory.shape}"}
+    if len(trajectory) < MIN_TRAJECTORY_POINTS:
+        return False, {"error": f"Only {len(trajectory)} points, need "
+                                f"{MIN_TRAJECTORY_POINTS}"}
+    if not np.all(np.isfinite(trajectory)):
+        return False, {"error": "Trajectory contains NaN or infinity"}
+
+    xy = trajectory[:, :2]
+    means = np.abs(xy.mean(axis=0))
+    stds = xy.std(axis=0)
+    low, high = NORMALIZED_XY_STD_RANGE
+
+    details = {
+        "points": len(trajectory),
+        "x_mean": round(float(xy[:, 0].mean()), 3),
+        "y_mean": round(float(xy[:, 1].mean()), 3),
+        "x_std": round(float(stds[0]), 3),
+        "y_std": round(float(stds[1]), 3),
+        "pressure_min": round(float(trajectory[:, 2].min()), 3),
+        "pressure_max": round(float(trajectory[:, 2].max()), 3),
+    }
+
+    if np.any(means > MAX_NORMALIZED_XY_MEAN) or np.any(stds < low) or np.any(stds > high):
+        return False, {**details, "error":
+                       "X/Y are not z-scored — call parsers.normalize_trajectory() "
+                       "in the capture layer. Expected mean ~0 and std ~1 per axis."}
+
+    if trajectory[:, 2].min() < 0.0 or trajectory[:, 2].max() > 1.0:
+        return False, {**details, "error":
+                       "Pressure outside [0, 1] — scale by the device's fixed "
+                       "maximum, never the file's own max."}
+
+    return True, details
 
 
 def writer_independent_split(writer_ids, train_ratio=0.7, val_ratio=0.15,
