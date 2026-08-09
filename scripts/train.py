@@ -138,6 +138,20 @@ def parse_args(argv=None):
                         help="Enable training-time augmentation (spatial branch)")
     parser.add_argument("--no-augment", dest="augment", action="store_false",
                         help="Disable training-time augmentation")
+    parser.add_argument("--split-seed", type=int, default=None,
+                        help="Seed for the writer split only. Defaults to --seed. "
+                             "Hold it fixed while varying --seed to re-run a config "
+                             "on the same held-out writers, which is the only way to "
+                             "measure training variance without split variance on top")
+    parser.add_argument("--margin", type=float, default=CONTRASTIVE_MARGIN,
+                        help="Contrastive margin. Never swept — it carries its "
+                             "original guessed value. Embeddings are NOT "
+                             "L2-normalised, so this is not scale-free: at 1.0 it "
+                             "sits just above the impostor mean distance of 0.9393, "
+                             "meaning most impostor pairs contribute zero loss")
+    parser.add_argument("--hard-negative-ratio", type=float, default=HARD_NEGATIVE_RATIO,
+                        help="Fraction of impostor terms kept by mining. Also never "
+                             "swept. 1.0 disables mining")
     parser.add_argument("--random-impostor-ratio", type=float,
                         default=RANDOM_IMPOSTOR_RATIO, metavar="R",
                         help="Fraction of the training negative budget drawn from "
@@ -160,7 +174,10 @@ def parse_args(argv=None):
                         help="Override PRESSURE_DROPOUT_RATE for this run (temporal "
                              "branch only). A Task1 dataset still forces 0, since "
                              "there is no real pressure to drop")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.split_seed is None:
+        args.split_seed = args.seed
+    return args
 
 
 def build_writer_samples(data_dirs, extra_channels=None):
@@ -424,8 +441,13 @@ def main(argv=None):
     # before any pair is formed, so no signer can straddle two partitions.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
         TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
+    # The split seed is separate from the training seed so a config can be
+    # re-run on the *same* held-out writers. Without that, changing --seed
+    # reshuffles the partition and the two runs score different people, which
+    # measures split variance and training variance together — useless for
+    # deciding whether one arm actually beat another.
     train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(writer_samples), *ratios, seed=args.seed)
+        sorted(writer_samples), *ratios, seed=args.split_seed)
     print(f"  Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.branch == "spatial":
@@ -495,8 +517,10 @@ def main(argv=None):
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
 
-    loss_fn = ContrastiveLoss(margin=CONTRASTIVE_MARGIN,
-                              hard_negative_ratio=HARD_NEGATIVE_RATIO)
+    if args.margin != CONTRASTIVE_MARGIN or args.hard_negative_ratio != HARD_NEGATIVE_RATIO:
+        print(f"  Loss: margin {args.margin}, hard-negative ratio {args.hard_negative_ratio}")
+    loss_fn = ContrastiveLoss(margin=args.margin,
+                              hard_negative_ratio=args.hard_negative_ratio)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=WEIGHT_DECAY)
     early_stopping = EarlyStopping(patience=args.patience,
                                    min_delta=EARLY_STOPPING_MIN_DELTA)
