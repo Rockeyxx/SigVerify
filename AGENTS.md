@@ -349,6 +349,22 @@ Scopes: models, data, database, capture, gui, config, scripts
 
 ---
 
+## Run-to-run spread: do not call a sub-point difference an improvement
+
+**Measured 2026-08-09.** The same spatial configuration (margin 2.0), same writer
+split, seeds 42 and 43, scored **8.59%** and **9.27%** pooled. Bengali swung 1.7
+points between the two.
+
+So the noise floor is roughly **0.7 EER points**. Every one of these earlier
+"improvements" is inside it and none is individually proven: compact to wide
+(0.53), wide to augment+LR (0.55), augment+LR to pair diversity (0.65), pair
+diversity to random impostors (0.48). The cumulative 12.31% to 8.59% is real; the
+individual steps are not.
+
+**Before claiming any arm beat another:** the gap must exceed one point, or the
+arm must be run at two seeds with `--split-seed` held fixed so the comparison is
+on identical held-out writers.
+
 ## Evaluation Protocol
 
 - **Writer-independent split** across all datasets — no signer in multiple partitions

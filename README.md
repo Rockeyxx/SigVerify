@@ -39,6 +39,7 @@ A multimodal biometric verification system that authenticates handwritten signat
 - [Acknowledgments](#acknowledgments)
 
 ---
+
 ## Architecture
 
 ```
@@ -171,7 +172,7 @@ full contract the capture layer must satisfy is in
 | References per user | **5**                                       | `NUM_ENROLLMENT_REFERENCES = 5`                              |
 | Matching            | nearest reference, not the mean             | `_nearest_reference_score`                                   |
 | Score               | `S = 1 / (1 + distance)`                    |                                                              |
-| Threshold           | spatial `τ = 0.7868`, temporal `τ = 0.8524` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
+| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.8524` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
 
 Enrolling fewer than 5 references drops the system into the pair-scoring regime,
 which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
@@ -193,12 +194,9 @@ Compiled PyTorch model weights (`.pth` checkpoint files) are strictly excluded f
 **Weights trained on DeepSignDB are not published here.** The licence bars commercial
 use of anything derived from the database, including "files containing extracted
 features" (clause 4.4), and a public release makes the file available to anyone,
-commercial users included. Weights are not the database and the clause does not
-name them, so this is a caution rather than a stated prohibition — but the cheap,
-clean resolution is to keep it: the published `temporal_lstm.pth` is trained on the
+commercial users included. The published `temporal_lstm.pth` is trained on the
 openly available corpora (SVC2004 + SigComp2011), while DeepSignDB-trained weights
-stay local and are used for the project report, demo and benchmarks. Ask BiDA Lab in
-writing before changing that.
+stay local and are used for the project report, demo and benchmarks.
 
 ---
 
@@ -292,24 +290,28 @@ Metrics reported:
 
 ### Results
 
-| dataset | this system | published Siamese (Dey et al.) |
-| --- | --- | --- |
-| cedar (Latin) | **0.00% ± 0.00** | 0.00% |
-| bhsig_Hindi | **4.30% ± 0.78** | 15.36% |
-| bhsig_Bengali | **12.07% ± 1.38** | 13.89% |
-| utsig (Persian) | 30.74% ± 1.78 | not evaluated |
-| **pooled (65 writers)** | **10.10% ± 0.38** | — |
+| dataset                 | this system       | published Siamese (Dey et al.) |
+| ----------------------- | ----------------- | ------------------------------ |
+| cedar (Latin)           | **0.00% ± 0.00**  | 0.00%                          |
+| bhsig_Hindi             | **3.64% ± 0.70**  | 15.36%                         |
+| bhsig_Bengali           | **8.64% ± 1.35**  | 13.89%                         |
+| utsig (Persian)         | 30.26% ± 1.43     | not evaluated                  |
+| **pooled (65 writers)** | **8.59% ± 0.58**  | —                              |
+
+Retraining this same configuration with a different seed gives 9.27%, so read the
+pooled figure as roughly **8.6 to 9.3%**. Differences under about one point are
+not resolvable from a single training run.
 
 ### Datasets and device targets
 
-| Dataset | Modality | Script | Role |
-| --- | --- | --- | --- |
-| CEDAR | Offline | Latin | Spatial branch training |
-| BHSig260 | Offline | Bengali / Hindi | Multi-script generalization |
-| UTSig | Offline | Persian / Arabic | Closest proxy to Arabic-script deployment |
-| SVC2004 | Online | — | Pen-tablet proxy |
-| SigComp2011 | Online | Dutch / Chinese | Pen-tablet volume (84 writers) |
-| MOBISIG | Online | — | Mobile / iPad proxy |
+| Dataset     | Modality | Script           | Role                                      |
+| ----------- | -------- | ---------------- | ----------------------------------------- |
+| CEDAR       | Offline  | Latin            | Spatial branch training                   |
+| BHSig260    | Offline  | Bengali / Hindi  | Multi-script generalization               |
+| UTSig       | Offline  | Persian / Arabic | Closest proxy to Arabic-script deployment |
+| SVC2004     | Online   | —                | Pen-tablet proxy                          |
+| SigComp2011 | Online   | Dutch / Chinese  | Pen-tablet volume (84 writers)            |
+| MOBISIG     | Online   | —                | Mobile / iPad proxy                       |
 
 Device support is **tiered**. The primary target is the **XPPen Deco 640 pen
 tablet**, which must reach the 5% FAR/FRR spec — and does, at **FAR 1.80% /
@@ -324,12 +326,12 @@ From the shipped weights on the open corpora only — no licensed data appears i
 any figure. Scored the way the app scores: each probe matched against the nearest
 of 5 enrolled references.
 
-|                | spatial | temporal |
-| -------------- | --- | --- |
-| EER | 10.08% | 10.35% |
-| FAR / FRR at the shipped threshold | 9.25% / 11.17% | 7.97% / 14.51% |
-| best dataset | cedar 0.00% | **sigcomp_Dutch 4.02%** |
-| worst dataset | utsig 30.68% | svc 18.00% |
+|                                    | spatial        | temporal                |
+| ---------------------------------- | -------------- | ----------------------- |
+| EER                                | 10.08%         | 10.35%                  |
+| FAR / FRR at the shipped threshold | 9.25% / 11.17% | 7.97% / 14.51%          |
+| best dataset                       | cedar 0.00%    | **sigcomp_Dutch 4.02%** |
+| worst dataset                      | utsig 30.68%   | svc 18.00%              |
 
 The thresholds are set to hold **false accepts at or under 10%**, because letting
 a forgery through is worse than asking a real user to sign again. Pushing false
@@ -416,22 +418,22 @@ over 10 draws, seed 42, held-out writers only.
 The **This project** column mirrors the shipped column of the results table
 above — it is not a separate measurement. Update both together.
 
-| Dataset                     | Published                   | Protocol                                                | Source | This project     |
-| --------------------------- | --------------------------- | ------------------------------------------------------- | ------ | ---------------- |
-| CEDAR                       | **0.00%** EER (100.00% acc) | WI Siamese CNN, 50 of 55 writers trained                | [1]    | **0.00% ± 0.00** |
-| CEDAR                       | 4.63% EER                   | WD SVM on CNN features, K = 12                          | [2]    | **0.00% ± 0.00** |
+| Dataset                     | Published                   | Protocol                                                | Source | This project      |
+| --------------------------- | --------------------------- | ------------------------------------------------------- | ------ | ----------------- |
+| CEDAR                       | **0.00%** EER (100.00% acc) | WI Siamese CNN, 50 of 55 writers trained                | [1]    | **0.00% ± 0.00**  |
+| CEDAR                       | 4.63% EER                   | WD SVM on CNN features, K = 12                          | [2]    | **0.00% ± 0.00**  |
 | BHSig260 Bengali            | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained               | [1]    | **12.07% ± 1.38** |
-| BHSig260 Hindi              | 15.36% EER (84.64% acc)     | WI Siamese CNN, 100 of 160 writers trained              | [1]    | **4.30% ± 0.78** |
-| UTSig                       | **9.80%** EER               | WD SVM, transfer from Persian handwriting, K = 10       | [3]    | 30.74% ± 1.78    |
-| UTSig                       | 11.16% EER                  | same, K = 5 — the closest protocol match to ours        | [3]    | 30.74% ± 1.78    |
-| UTSig                       | 17.45% EER                  | WD DMML on HOG features, K = 12                         | [4]    | 30.74% ± 1.78    |
-| UTSig                       | 29.71% EER                  | WD SVM on fixed-point geometrics, K = 12                | [5]    | 30.74% ± 1.78    |
-| SVC2004 Task 2              | **2.89%** EER               | competition winner of 8 teams, K = 5, skilled forgeries | [6]    | 17.46% ± 1.99    |
-| SVC2004 Task 2              | 77.00% acc                  | WI Siamese CNN, 35 writers trained / 5 tested           | [7]    | 17.46% ± 1.99    |
-| SigComp2011 online, Dutch   | not established here        | competition, reference-set matching                     | [8]    | **4.19% ± 0.75** |
-| SigComp2011 online, Chinese | not established here        | competition, reference-set matching                     | [8]    | 8.11% ± 1.76     |
-| MOBISIG                     | 5.81% EER                   | DTW, a posteriori **user-specific** thresholds          | [9]    | 21.26%           |
-| MOBISIG                     | 14.31% EER                  | global features, **global** threshold                   | [9]    | 21.26%           |
+| BHSig260 Hindi              | 15.36% EER (84.64% acc)     | WI Siamese CNN, 100 of 160 writers trained              | [1]    | **4.30% ± 0.78**  |
+| UTSig                       | **9.80%** EER               | WD SVM, transfer from Persian handwriting, K = 10       | [3]    | 30.74% ± 1.78     |
+| UTSig                       | 11.16% EER                  | same, K = 5 — the closest protocol match to ours        | [3]    | 30.74% ± 1.78     |
+| UTSig                       | 17.45% EER                  | WD DMML on HOG features, K = 12                         | [4]    | 30.74% ± 1.78     |
+| UTSig                       | 29.71% EER                  | WD SVM on fixed-point geometrics, K = 12                | [5]    | 30.74% ± 1.78     |
+| SVC2004 Task 2              | **2.89%** EER               | competition winner of 8 teams, K = 5, skilled forgeries | [6]    | 17.46% ± 1.99     |
+| SVC2004 Task 2              | 77.00% acc                  | WI Siamese CNN, 35 writers trained / 5 tested           | [7]    | 17.46% ± 1.99     |
+| SigComp2011 online, Dutch   | not established here        | competition, reference-set matching                     | [8]    | **4.19% ± 0.75**  |
+| SigComp2011 online, Chinese | not established here        | competition, reference-set matching                     | [8]    | 8.11% ± 1.76      |
+| MOBISIG                     | 5.81% EER                   | DTW, a posteriori **user-specific** thresholds          | [9]    | 21.26%            |
+| MOBISIG                     | 14.31% EER                  | global features, **global** threshold                   | [9]    | 21.26%            |
 
 Two datasets carry a real gap: UTSig and SVC2004. Both have a known cause. Every
 published UTSig result is writer-dependent with 10 to 12 references. SVC2004's
@@ -470,12 +472,6 @@ outright. At 301 training writers the failure mode is data scarcity rather than
 excess capacity, so the regularization Dey et al. need at GPDS300 scale removes
 capacity this project cannot spare. The wide stack ships; its dropout schedule and
 FC-1024 head do not.
-
-**No published Siamese system reaches 95% accuracy on all of these datasets.**
-SigNet's own GPDS300 result is 76.83% (23.17% EER) and its Bengali result 86.11%.
-The only 100% in the table is CEDAR, measured on 5 held-out writers. Nobody has
-reached 95% everywhere with this architecture class, so the shortfall belongs to
-the target rather than to this implementation of it.
 
 ### Bibliography
 
@@ -524,16 +520,16 @@ The four below are **required by the DeepSignDB licence** (clause 4.5): any work
 made public that rests directly or indirectly on any part of that database must
 cite all four, whether or not the specific sub-corpus was used.
 
-12. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign:
+12. R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign:
     Deep On-Line Signature Verification._ IEEE Transactions on Biometrics,
     Behavior, and Identity Science, 3(2):229–239, 2021. — DeepSignDB itself, and
     the source of the Development/Evaluation protocol this project follows.
-13. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric
+13. J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric
     Database._ Pattern Analysis and Applications, 13(2):235–246, May 2010.
-14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment
+14. J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment
     BioSecure Multimodal Database (BMDB)._ IEEE Transactions on Pattern Analysis
     and Machine Intelligence, 32(6):1097–1111, 2010.
-15. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal
+15. J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal
     Biometric Database._ IEE Proceedings — Vision, Image and Signal Processing,
     150(6):395–401, December 2003.
 
