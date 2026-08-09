@@ -11,6 +11,24 @@ Read this file before writing or reviewing any code in this repository.
 
 ---
 
+## Which document gets what
+
+**`README.md` is for a user, not a reviewer.** It carries what the system is, how
+to run it, and a bare results table. Every explanation of how a number was
+measured, why a design choice was made, or which experiments failed goes in
+**`SUMMARY.md`**. Rules and contracts go here in `AGENTS.md`; dataset terms go in
+`DATASET_LICENSES.md`.
+
+**Do not move report content into the README.** Protocol derivations, experiment
+history and rejected arms belong in `SUMMARY.md` even when they explain a number
+the README quotes.
+
+**`docs/` is gitignored, so never link to it from a tracked file.** The link is
+dead for anyone who clones. Inline the fact instead. Full conventions are in the
+`docs-style` skill.
+
+---
+
 ## Drift Prevention
 
 The following were **evaluated and deliberately excluded**. Do **not** add
@@ -71,9 +89,8 @@ them, even if they appear in the literature review or older drafts:
   that collapsed the model to one embedding before it partly recovered. **Do not
   set `SPATIAL_CONV_DROPOUT` or `SPATIAL_FC_HIDDEN` without a new reason** — at
   301 writers the failure is data scarcity, not excess capacity, so regularizing
-  removes capacity the model needs. `compact` remains shipped: 0.53 points does
-  not pay for ~11× the training compute plus mandatory gradient checkpointing.
-  Full table in `docs/SOLUTIONS.md`.
+  removes capacity the model needs. **`wide` is what ships** (`SPATIAL_TRUNK =
+  "wide"`); its dropout schedule and FC-1024 head are the parts that do not.
 - **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
@@ -106,7 +123,7 @@ them, even if they appear in the literature review or older drafts:
   This costs the capture device nothing, since deltas come from consecutive
   frames of the three channels it already reports. Feeding raw coordinates alone
   produced a collapsed model with train loss pinned at the theoretical
-  no-discrimination value (see `docs/PROBLEMS_FACED.md` P-002)
+  no-discrimination value (recorded as P-002)
 - Backbone: **Siamese LSTM** → **128-d** embedding
 - **Training:** pressure-channel dropout is **off** (`PRESSURE_DROPOUT_RATE = 0`).
   This rule previously mandated 30–50% and was **measured wrong on 2026-07-29**.
@@ -125,7 +142,7 @@ them, even if they appear in the literature review or older drafts:
   XPPen Deco 640, but −8.38 points is a live argument for a different tablet, and
   the hardware claim is flagged unconfirmed below. `dt` is deployable today.
   Neither is shipped; `SIGCOMP2011` has neither channel, so both cost the branch
-  84 of its 124 writers. Full analysis in `docs/SOLUTIONS.md`.
+  84 of its 124 writers.
 - **A temporal checkpoint carries its own channel count.**
   `TemporalSiamese.from_state_dict` reads it from the LSTM input width
   (`2 x input_features`, because dynamics are concatenated first). Every load
@@ -187,6 +204,76 @@ S_final = α · S_spatial + (1 − α) · S_temporal
 - Match probe against reference set (nearest-reference or mean — fixed at calibration)
 
 ---
+
+## Capture Contract (for the capture and GUI layers)
+
+Moved here from the README on 2026-08-08: it is a contract between teams, not
+user documentation. Every rule below is a documented assumption the training data
+satisfies, so a violation puts the probe in a distribution the model never saw.
+
+Both gates are **enforced in `verify()`** — a failing probe is dropped from
+fusion, not merely flagged. A single-branch verification whose only probe fails
+raises, naming which gate rejected it, rather than returning a verdict built on
+nothing.
+
+### Spatial gate — `quality_gate()`
+
+| gate | rule | constant |
+| --- | --- | --- |
+| Ink bounding box | `min(width, height) >= 64 px` **in the submitted image** | `MIN_BBOX_PIXELS = 64` |
+| Sharpness | Laplacian variance `>= 50.0` | `MIN_LAPLACIAN_VARIANCE = 50.0` |
+
+Gate on these proxies, never on the file's DPI tag.
+
+### What the frontend must do before submitting an image
+
+1. **Apply EXIF rotation.** `cv2.imread` ignores the orientation tag while every
+   phone gallery honours it, so a portrait photo arrives 90° off and looks correct
+   in every viewer you would check it in. The model has no rotation invariance.
+   Use `PIL.ImageOps.exif_transpose`, or re-encode to strip EXIF.
+2. **Crop tight to the ink.** `SPATIAL_SQUARE_PAD = False`, so the image is
+   resized *straight* onto 220×155 with no padding. Desk, margin and shadow are
+   canvas taken from the signature.
+3. **Use one fixed capture frame for enrollment and verification.** Because
+   nothing is padded, different framing stretches the signature by a different
+   amount. Measured on three photos of one signature: aspect ratios 0.67, 1.18
+   and 0.85 left the genuine probe at 0.6498 against a forgery's 0.6366 —
+   correctly ordered but 0.0132 apart and both below τ. Scan datasets are already
+   tight and consistent, so this never appears in the reported EER.
+4. **Dark ink on light paper.** The pipeline inverts internally; do not pre-invert.
+5. Colour is discarded at load — greyscale in is fine.
+
+### Temporal gate — `trajectory_gate()`
+
+The capture layer **must call `parsers.normalize_trajectory()`**. Until
+2026-08-05 nothing checked, and the failure was silent *and* confident: on one
+SigComp writer the same signature scored **0.9370 → Genuine** normalized and
+**0.4888 → Forged** in raw tablet units — a genuine user rejected with no
+`degraded` flag and no error.
+
+| gate | rule | constant |
+| --- | --- | --- |
+| Length | `>= 10` points | `MIN_TRAJECTORY_POINTS = 10` |
+| X / Y centred | `abs(mean) <= 0.5` per axis | `MAX_NORMALIZED_XY_MEAN = 0.5` |
+| X / Y scaled | `std` within `[0.2, 5.0]` per axis | `NORMALIZED_XY_STD_RANGE` |
+| Pressure range | within `[0, 1]` | — |
+| Finite | no NaN or infinity | — |
+
+The X/Y bounds detect the *class* of error rather than a device's particular
+scale, so no per-device configuration is needed. A flat `P = 1.0` **passes**:
+that is the legitimate pressure-blind device, reported as `degraded`, not
+rejected.
+
+### Trajectory format
+
+| requirement | value |
+| --- | --- |
+| Shape | `[L, 3]` float32 — X, Y, Pressure |
+| Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
+| Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
+| Pen-up samples | dropped (`P = 0`) |
+| X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
+| No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
 
 ## Standards
 
@@ -262,6 +349,22 @@ Scopes: models, data, database, capture, gui, config, scripts
 
 ---
 
+## Run-to-run spread: do not call a sub-point difference an improvement
+
+**Measured 2026-08-09.** The same spatial configuration (margin 2.0), same writer
+split, seeds 42 and 43, scored **8.59%** and **9.27%** pooled. Bengali swung 1.7
+points between the two.
+
+So the noise floor is roughly **0.7 EER points**. Every one of these earlier
+"improvements" is inside it and none is individually proven: compact to wide
+(0.53), wide to augment+LR (0.55), augment+LR to pair diversity (0.65), pair
+diversity to random impostors (0.48). The cumulative 12.31% to 8.59% is real; the
+individual steps are not.
+
+**Before claiming any arm beat another:** the gap must exceed one point, or the
+arm must be run at two seeds with `--split-seed` held fixed so the comparison is
+on identical held-out writers.
+
 ## Evaluation Protocol
 
 - **Writer-independent split** across all datasets — no signer in multiple partitions
@@ -315,8 +418,8 @@ is the first. For any such dataset:
 - **Record the expiry.** DeepSignDB's agreement runs to 25 July 2028, after which
   all copies are destroyed.
 
-The full clause-by-clause reading lives in the README's DeepSignDB section — this
-is the operational summary, and the README is the authority if they disagree.
+The clause-by-clause reading lives in DATASET_LICENSES.md. This is the
+operational summary; that file is the authority if the two ever disagree.
 
 ### Pressure Ablation (temporal branch — two required runs)
 

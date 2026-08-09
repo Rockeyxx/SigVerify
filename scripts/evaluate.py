@@ -593,9 +593,13 @@ def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args,
 
     breakdown = {}
     for name, writers in sorted(groups.items()):
-        loader = build_eval_loader(writer_samples, writers, branch, args.batch_size,
-                                   args.num_workers, args.seed)
-        genuine, impostor = score_loader(model, loader, device, desc=f"{branch} · {name}")
+        # Same enrolment protocol τ was tuned under, so each dataset's FAR/FRR is
+        # comparable to the pooled figure and to the deployed operating point.
+        try:
+            genuine, impostor = enrolled_split_scores(
+                model, branch, writer_samples, writers, args, device, desc=name)
+        except ValueError:
+            continue
         if len(genuine) == 0 or len(impostor) == 0:
             continue
 
@@ -609,6 +613,51 @@ def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args,
     return breakdown
 
 
+def enrolled_split_scores(model, branch, writer_samples, writer_ids, args, device,
+                          desc="split",
+                          num_references=NUM_ENROLLMENT_REFERENCES,
+                          trials=ENROLLMENT_TRIALS):
+    """
+    Scores for one writer set under the enrolment protocol.
+
+    Which K genuines a writer happens to enrol moves the scores, so a single draw
+    would fix τ against one lucky enrolment. This averages by taking the
+    **median-EER** draw of `trials`, the same representative-draw rule
+    `scripts/benchmark.enrolled_scores` uses.
+
+    Returns (genuine_scores, impostor_scores).
+    """
+    embedded = embed_writers(model, writer_samples, writer_ids, branch, device,
+                             args.batch_size, desc=f"{branch} · {desc}")
+
+    # A writer needs K+1 genuines and a forgery to contribute both arms, so a
+    # small validation split may not support the deployed K. Step K down rather
+    # than falling back to pair-scoring: a lower K is still the right *protocol*
+    # and its τ is close, whereas pair-scoring is the wrong protocol and its τ is
+    # the bug this function exists to fix. Announce it, because a τ calibrated at
+    # a K the app does not use is an approximation the reader should see.
+    for k in range(num_references, 0, -1):
+        draws = []
+        for trial in range(trials):
+            scores, labels = enrolled_trial_scores(embedded, k, seed=args.seed + trial)
+            if not len(scores) or labels.min() == labels.max():
+                continue
+            eer, _ = compute_eer(scores[labels == 1], scores[labels == 0])
+            draws.append((eer, scores, labels))
+
+        if draws:
+            if k != num_references:
+                print(f"  Enrolled at K={k}, not {num_references}: this writer "
+                      f"set has no writer with {num_references + 1} genuines and a forgery.")
+            draws.sort(key=lambda d: d[0])
+            _, scores, labels = draws[len(draws) // 2]
+            return scores[labels == 1], scores[labels == 0]
+
+    raise ValueError(
+        "No writer in this set has 2 genuines and a forgery, so no enrolment is "
+        "possible at any K. Widen the split.")
+
+
 def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, args, device):
     """
     Score one branch: tune τ on validation, then report on the held-out test set.
@@ -617,19 +666,25 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
     """
     model = load_branch_model(branch, weights_path, device)
 
-    val_loader = build_eval_loader(writer_samples, val_ids, branch, args.batch_size,
-                                   args.num_workers, args.seed)
-    test_loader = build_eval_loader(writer_samples, test_ids, branch, args.batch_size,
-                                    args.num_workers, args.seed)
-
     # τ is tuned on validation ONLY (AGENTS.md). Picking it on test would be
     # reporting the best-case threshold rather than an honest operating point.
-    val_genuine, val_impostor = score_loader(model, val_loader, device,
-                                             desc=f"{branch} · val (tune τ)")
+    #
+    # It is tuned under the **enrolment** protocol, because that is what
+    # `src/verification.py` deploys. Tuning on pair scores — which this did until
+    # 2026-08-04 — puts τ below the deployed distribution: taking a minimum over
+    # K references shrinks every distance, genuine more than impostor, so the
+    # whole score distribution shifts up. At the old pair-tuned τ=0.7143 the
+    # deployed operating point was FAR 19.32%/FRR 2.65% spatial and
+    # FAR 25.00%/FRR 2.18% temporal — a system that barely rejected anything.
+    val_genuine, val_impostor = enrolled_split_scores(
+        model, branch, writer_samples, val_ids, args, device, desc="val (tune τ)")
     _, threshold = compute_eer(val_genuine, val_impostor)
 
-    test_genuine, test_impostor = score_loader(model, test_loader, device,
-                                               desc=f"{branch} · test")
+    # Test is scored under the same protocol τ was tuned on. Mixing them — an
+    # enrolment τ applied to pair-scored test scores — would report a FAR/FRR
+    # pair that describes no real operating point at all.
+    test_genuine, test_impostor = enrolled_split_scores(
+        model, branch, writer_samples, test_ids, args, device, desc="test")
     eer, _ = compute_eer(test_genuine, test_impostor)
     far, frr = compute_far_frr(test_genuine, test_impostor, threshold)
 

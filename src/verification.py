@@ -27,12 +27,14 @@ import torch
 from config.settings import (
     ALPHA_DEFAULT,
     DECISION_THRESHOLD,
+    SPATIAL_DECISION_THRESHOLD,
+    TEMPORAL_DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
     TEMPORAL_EMBEDDING_DIM,
     TEMPORAL_HIDDEN_SIZE,
     TEMPORAL_NUM_LAYERS,
 )
-from src.data.dataset import preprocess_image, quality_gate
+from src.data.dataset import preprocess_image, quality_gate, trajectory_gate
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 
 # Embeddings are persisted as raw little-endian float32. 512-d spatial → 2048 B,
@@ -159,20 +161,38 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
 
-    engine = engine or FusionEngine(alpha=ALPHA_DEFAULT, threshold=DECISION_THRESHOLD)
+    # Each branch carries its own τ: their score distributions differ enough that
+    # one global value cannot serve both (spatial 0.7868 against temporal 0.8524
+    # at the same FAR<=10% target). Routing to a single branch must therefore use
+    # that branch's threshold, not the fused default — using the fused value on a
+    # spatial-only verification would sit 0.03 too high and reject genuine users.
+    if engine is None:
+        if spatial is not None and temporal is not None:
+            threshold = DECISION_THRESHOLD
+        elif spatial is not None:
+            threshold = SPATIAL_DECISION_THRESHOLD
+        else:
+            threshold = TEMPORAL_DECISION_THRESHOLD
+        engine = FusionEngine(alpha=ALPHA_DEFAULT, threshold=threshold)
 
     spatial_score = None
     temporal_score = None
     quality_failed = False
     pressure_imputed = False
+    # Collected so a verification with no usable evidence can say *why* each
+    # branch was dropped. "Re-capture the signature" is not actionable; "X/Y are
+    # not z-scored" is.
+    gate_errors = []
 
     if spatial is not None:
         model, references, probe = spatial
         # The quality gate was defined but never called anywhere; this is its
         # one live wiring point. A blurry or near-empty scan still produces an
         # embedding, so without this the result would look fully confident.
-        passed, _details = quality_gate(probe)
+        passed, details = quality_gate(probe)
         quality_failed = not passed
+        if not passed:
+            gate_errors.append(f"spatial: {details.get('error', 'failed the quality gate')}")
         # A probe that fails the gate is **dropped from fusion**, not merely
         # flagged. Scoring it anyway let a blurry or undersized capture carry the
         # same weight as a clean one and flip the decision, while `degraded` said
@@ -186,15 +206,27 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
 
     if temporal is not None:
         model, references, probe = temporal
-        pressure_imputed = _pressure_is_imputed(probe)
-        temporal_score = _nearest_reference_score(references, embed(model, probe, "temporal", device))
+        # Gated for the same reason the spatial probe is, and the stakes are
+        # higher: a trajectory still in raw device units does not merely score
+        # worse, it scores *meaninglessly*, and the old code returned a confident
+        # verdict on it. Measured: one writer's own signature scored 0.9370
+        # normalized and 0.4888 unnormalized — accepted, then rejected, with no
+        # signal that anything was wrong.
+        passed, details = trajectory_gate(probe)
+        quality_failed = quality_failed or not passed
+        if passed:
+            pressure_imputed = _pressure_is_imputed(probe)
+            temporal_score = _nearest_reference_score(
+                references, embed(model, probe, "temporal", device))
+        else:
+            gate_errors.append(f"temporal: {details.get('error', 'failed the input gate')}")
 
     if spatial_score is None and temporal_score is None:
         raise ValueError(
-            "No usable evidence: the spatial probe failed the quality gate and no "
-            "temporal probe was supplied. Re-capture the signature — a verdict here "
-            "would rest on nothing. See the README's Capture Contract for the "
-            "bounding-box and sharpness minimums.")
+            "No usable evidence — every supplied probe failed its input gate, so a "
+            "verdict here would rest on nothing:\n  "
+            + "\n  ".join(gate_errors or ["no probe was supplied"])
+            + "\nSee the README's Capture Contract.")
 
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
