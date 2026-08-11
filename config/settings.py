@@ -96,7 +96,15 @@ NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # std outside this is not z-scored
 TEMPORAL_INPUT_FEATURES = 3             # (X, Y, Pressure)
 TEMPORAL_EMBEDDING_DIM = 128
 TEMPORAL_HIDDEN_SIZE = 256
-TEMPORAL_NUM_LAYERS = 2
+# Was 2 until 2026-08-10. The shipped weights are 1-layer, so the default has to
+# match or a retrain silently produces a different architecture from the one that
+# ships. **This is not a claim that 1 layer beats 2**: across three seeds the two
+# configs measured 10.47% and 10.88% pooled, a 0.41 gap inside the branch's 2.6
+# noise floor. The shipped checkpoint was chosen on validation from nine
+# candidates, and it happens to be 1-layer. It is also 3.6x smaller (606k vs 2.18M
+# parameters) and 2.4x faster (18.0 ms vs 42.3 ms for K=5 on CPU), which is a real
+# argument for it independent of EER.
+TEMPORAL_NUM_LAYERS = 1
 # Measured 2026-07-29 and set to 0. Pressure dropout was meant to buy degraded-mode
 # robustness by training on flat P for a share of samples. It bought the opposite:
 # at 0.4 it cost 2.47 pooled EER points on normal input (12.73% → 10.26%) *and* 3.00
@@ -278,18 +286,25 @@ ALPHA_GRID_STEP = 0.05
 # +17 FRR), and FAR<=5% would reject one genuine user in three.
 #
 #   spatial  τ=0.6299 -> test FAR 5.71% / FRR 11.87%   (margin-2.0 weights)
-#   temporal τ=0.8524 -> test FAR 7.97% / FRR 14.51%
-#            sigcomp_Dutch, the XPPen deployment condition: FAR 1.80% / FRR 10.26%
+#   temporal τ=0.7695 -> test FAR 11.16% / FRR 6.99%   (1-layer weights, 2026-08-10)
+#            sigcomp_Dutch, the XPPen deployment condition: FAR 2.99% / FRR 6.73%
 #
-# τ must be re-derived whenever the loss margin changes: margin 2.0 pushes
-# impostors further out, which shifts S = 1/(1+d) and moved spatial τ from
-# 0.7868 to 0.6299. A threshold carried across a margin change is simply wrong.
+# **Temporal τ moved 0.8524 -> 0.7695 on 2026-08-10** with the 1-layer weights.
+# The operating point moved with it, and not uniformly: FAR worsened 7.97% ->
+# 11.16% while FRR improved 14.51% -> 6.99%. Both are the validation EER point,
+# so this is the score distribution changing shape, not a policy change. If the
+# deployment cares more about forgeries getting in than about genuine users being
+# asked to sign again, raise τ — evaluate.py reports the FAR<=5% point too.
+#
+# τ must be re-derived whenever the loss margin OR the architecture changes: margin
+# 2.0 pushes impostors further out, which shifts S = 1/(1+d) and moved spatial τ
+# from 0.7868 to 0.6299. A threshold carried across either change is simply wrong.
 #
 # The two branches need different τ because their score distributions differ;
 # one global value cannot serve both. DECISION_THRESHOLD remains the fused-path
 # default, where scores from both branches are mixed.
 SPATIAL_DECISION_THRESHOLD = 0.6299
-TEMPORAL_DECISION_THRESHOLD = 0.8524
+TEMPORAL_DECISION_THRESHOLD = 0.7695
 # ⚠ The fused τ is a GUESS, not a measurement — the arithmetic midpoint of the
 # two measured per-branch values. It cannot be calibrated for the same reason α
 # cannot (see the ALPHA_DEFAULT note): no writer in any available corpus has both

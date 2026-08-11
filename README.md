@@ -172,7 +172,7 @@ full contract the capture layer must satisfy is in
 | References per user | **5**                                       | `NUM_ENROLLMENT_REFERENCES = 5`                              |
 | Matching            | nearest reference, not the mean             | `_nearest_reference_score`                                   |
 | Score               | `S = 1 / (1 + distance)`                    |                                                              |
-| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.8524` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
+| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.7695` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
 
 Enrolling fewer than 5 references drops the system into the pair-scoring regime,
 which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
@@ -328,8 +328,8 @@ of 5 enrolled references.
 
 |                                    | spatial        | temporal                |
 | ---------------------------------- | -------------- | ----------------------- |
-| EER                                | 10.08%         | 10.35%                  |
-| FAR / FRR at the shipped threshold | 9.25% / 11.17% | 7.97% / 14.51%          |
+| EER                                | 8.45%          | 10.35%                  |
+| FAR / FRR at the shipped threshold | 5.71% / 11.87% | 7.97% / 14.51%          |
 | best dataset                       | cedar 0.00%    | **sigcomp_Dutch 4.02%** |
 | worst dataset                      | utsig 30.68%   | svc 18.00%              |
 
@@ -422,16 +422,16 @@ above — it is not a separate measurement. Update both together.
 | --------------------------- | --------------------------- | ------------------------------------------------------- | ------ | ----------------- |
 | CEDAR                       | **0.00%** EER (100.00% acc) | WI Siamese CNN, 50 of 55 writers trained                | [1]    | **0.00% ± 0.00**  |
 | CEDAR                       | 4.63% EER                   | WD SVM on CNN features, K = 12                          | [2]    | **0.00% ± 0.00**  |
-| BHSig260 Bengali            | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained               | [1]    | **12.07% ± 1.38** |
-| BHSig260 Hindi              | 15.36% EER (84.64% acc)     | WI Siamese CNN, 100 of 160 writers trained              | [1]    | **4.30% ± 0.78**  |
-| UTSig                       | **9.80%** EER               | WD SVM, transfer from Persian handwriting, K = 10       | [3]    | 30.74% ± 1.78     |
-| UTSig                       | 11.16% EER                  | same, K = 5 — the closest protocol match to ours        | [3]    | 30.74% ± 1.78     |
-| UTSig                       | 17.45% EER                  | WD DMML on HOG features, K = 12                         | [4]    | 30.74% ± 1.78     |
-| UTSig                       | 29.71% EER                  | WD SVM on fixed-point geometrics, K = 12                | [5]    | 30.74% ± 1.78     |
-| SVC2004 Task 2              | **2.89%** EER               | competition winner of 8 teams, K = 5, skilled forgeries | [6]    | 17.46% ± 1.99     |
-| SVC2004 Task 2              | 77.00% acc                  | WI Siamese CNN, 35 writers trained / 5 tested           | [7]    | 17.46% ± 1.99     |
-| SigComp2011 online, Dutch   | not established here        | competition, reference-set matching                     | [8]    | **4.19% ± 0.75**  |
-| SigComp2011 online, Chinese | not established here        | competition, reference-set matching                     | [8]    | 8.11% ± 1.76      |
+| BHSig260 Bengali            | **13.89%** EER (86.11% acc) | WI Siamese CNN, 50 of 100 writers trained               | [1]    | **8.64% ± 1.35**  |
+| BHSig260 Hindi              | 15.36% EER (84.64% acc)     | WI Siamese CNN, 100 of 160 writers trained              | [1]    | **3.64% ± 0.70**  |
+| UTSig                       | **9.80%** EER               | WD SVM, transfer from Persian handwriting, K = 10       | [3]    | 30.26% ± 1.43     |
+| UTSig                       | 11.16% EER                  | same, K = 5 — the closest protocol match to ours        | [3]    | 30.26% ± 1.43     |
+| UTSig                       | 17.45% EER                  | WD DMML on HOG features, K = 12                         | [4]    | 30.26% ± 1.43     |
+| UTSig                       | 29.71% EER                  | WD SVM on fixed-point geometrics, K = 12                | [5]    | 30.26% ± 1.43     |
+| SVC2004 Task 2              | **2.89%** EER               | competition winner of 8 teams, K = 5, skilled forgeries | [6]    | 14.21% ± 1.53     |
+| SVC2004 Task 2              | 77.00% acc                  | WI Siamese CNN, 35 writers trained / 5 tested           | [7]    | 14.21% ± 1.53     |
+| SigComp2011 online, Dutch   | not established here        | competition, reference-set matching                     | [8]    | **3.95% ± 0.93**  |
+| SigComp2011 online, Chinese | not established here        | competition, reference-set matching                     | [8]    | 7.81% ± 1.34      |
 | MOBISIG                     | 5.81% EER                   | DTW, a posteriori **user-specific** thresholds          | [9]    | 21.26%            |
 | MOBISIG                     | 14.31% EER                  | global features, **global** threshold                   | [9]    | 21.26%            |
 
@@ -439,7 +439,7 @@ Two datasets carry a real gap: UTSig and SVC2004. Both have a known cause. Every
 published UTSig result is writer-dependent with 10 to 12 references. SVC2004's
 contributors were told not to use their real signatures, and its forgers watched
 the signing process on a monitor and were allowed to practise, which is why one
-temporal model scores 17.46% there and 4.19% on SigComp2011's Dutch pen writers.
+temporal model scores 14.21% there and 3.95% on SigComp2011's Dutch pen writers.
 
 Reference [8] reports the SigComp2011 online results per system. Those figures
 are left out here because the tables circulating in secondary sources could not

@@ -351,19 +351,46 @@ Scopes: models, data, database, capture, gui, config, scripts
 
 ## Run-to-run spread: do not call a sub-point difference an improvement
 
+**The noise floor is per branch. They are not close. Never carry one to the other.**
+
+### Spatial — roughly 0.7 EER points
+
 **Measured 2026-08-09.** The same spatial configuration (margin 2.0), same writer
 split, seeds 42 and 43, scored **8.59%** and **9.27%** pooled. Bengali swung 1.7
 points between the two.
 
-So the noise floor is roughly **0.7 EER points**. Every one of these earlier
-"improvements" is inside it and none is individually proven: compact to wide
-(0.53), wide to augment+LR (0.55), augment+LR to pair diversity (0.65), pair
-diversity to random impostors (0.48). The cumulative 12.31% to 8.59% is real; the
-individual steps are not.
+Every one of these earlier "improvements" is inside it and none is individually
+proven: compact to wide (0.53), wide to augment+LR (0.55), augment+LR to pair
+diversity (0.65), pair diversity to random impostors (0.48). The cumulative
+12.31% to 8.59% is real; the individual steps are not.
 
-**Before claiming any arm beat another:** the gap must exceed one point, or the
-arm must be run at two seeds with `--split-seed` held fixed so the comparison is
-on identical held-out writers.
+### Temporal — roughly **2.6 EER points pooled**, and **3.5 on sigcomp_Dutch**
+
+**Measured 2026-08-10.** The same temporal configuration, `--split-seed 42` so the
+held-out writers are identical, training seeds 42/43/44:
+
+| seed | pooled | svc | Dutch | Chinese |
+| --- | --- | --- | --- | --- |
+| 42 | 9.61% | 16.32% | 4.24% | 7.94% |
+| 43 | 10.86% | 15.85% | 6.69% | 8.38% |
+| 44 | 12.18% | 16.95% | 7.72% | 7.14% |
+| **range** | **2.57** | 1.10 | **3.48** | 1.24 |
+
+The temporal branch trains on **62 writers** against spatial's 301, and tests
+sigcomp_Dutch on 15, so it is far noisier. The 0.7 figure was measured on spatial
+and **was wrongly applied to twelve temporal arms on 2026-08-10** before this was
+checked; most of those arms were ranked inside noise and their verdicts do not
+stand. A single temporal run at 9.61% is a lucky draw from a distribution whose
+mean is about **10.9%** — which also makes the shipped 10.26% an ordinary draw
+rather than a special one.
+
+**Before claiming any temporal arm beat another:** the gap must exceed **3 points**,
+or the arm must be run at three seeds with `--split-seed` held fixed. Two seeds is
+not enough at this spread.
+
+**Before claiming any spatial arm beat another:** the gap must exceed one point, or
+the arm must be run at two seeds with `--split-seed` held fixed so the comparison
+is on identical held-out writers.
 
 ## Evaluation Protocol
 

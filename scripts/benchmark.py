@@ -45,7 +45,7 @@ from tqdm.auto import tqdm
 from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               enrolled_trial_scores, enrolled_writer_count,
                               load_branch_model, score_pairs,
-                              writer_dependent_scores)
+                              writer_dependent_scores, znorm_trial_scores)
 from src.data.dataset import writer_independent_split
 from src.data.parsers import merge_datasets, parse_dataset
 
@@ -172,6 +172,11 @@ def parse_args(argv=None):
     parser.add_argument("--limit-pairs", type=int, default=None,
                         help="Subsample the test pairs to this many for a fast, reproducible "
                              "run instead of scoring the full held-out split")
+    parser.add_argument("--temporal-features", choices=["raw", "derived"], default="raw",
+                        help="Must match what the weights were trained with. The model "
+                             "recovers its channel count from the checkpoint but the "
+                             "parser cannot, so a mismatch is a loud shape error here "
+                             "rather than a plausible wrong number")
     parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"], default="xyp",
                         help="Must match the channels the weights were trained on. "
                              "The model recovers its own width from the checkpoint, "
@@ -188,6 +193,14 @@ def parse_args(argv=None):
                         help="Independent reference draws to average, reported as "
                              "mean +/- std. Which K signatures a user happens to enroll "
                              "moves the result, so a single draw is not the protocol")
+    parser.add_argument("--znorm", action="store_true",
+                        help="Standardize each probe distance by that writer's own "
+                             "reference spread before thresholding. Requires --enroll. "
+                             "Scores become negated z-scores rather than S = 1/(1+d), "
+                             "so EER is comparable but thresholds do not carry across. "
+                             "The Cohen's d and mean-distance columns are MEANINGLESS "
+                             "under this flag: separation_report recovers d = 1/S - 1, "
+                             "which assumes the 1/(1+d) scoring. Read EER only.")
     parser.add_argument("--wd-classifier", action="store_true",
                         help="Fit a per-user linear SVM on the enrolled references, "
                              "with other writers' genuines as negatives, instead of "
@@ -212,6 +225,13 @@ def parse_args(argv=None):
         parser.error("--wd-classifier requires --enroll: the per-user classifier is "
                      "fitted on the enrolled reference set, which single-pair scoring "
                      "does not have")
+
+    if args.znorm and not args.enroll:
+        parser.error("--znorm requires --enroll: the normalizing statistics come from "
+                     "the enrolled reference set, which single-pair scoring does not have")
+
+    if args.znorm and args.wd_classifier:
+        parser.error("--znorm and --wd-classifier are two different scorers; pick one")
 
     return args
 
@@ -262,6 +282,13 @@ def main(argv=None):
                   and "svc2004" in os.path.basename(os.path.normpath(directory)).lower()
                   else {})
         merge_datasets(writer_samples, parse_dataset(directory, **kwargs))
+
+    if args.branch == "temporal" and args.temporal_features == "derived":
+        # Same transform, applied the same way as training. Importing it from
+        # train.py rather than duplicating it means the two can never drift.
+        from scripts.train import apply_derived_features
+        print("Deriving kinematic time functions to match the checkpoint's channel count")
+        apply_derived_features(writer_samples)
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
@@ -316,7 +343,12 @@ def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="bench
     print(f"Enrollment protocol: {args.enroll} references x {args.enroll_trials} draws, "
           f"{decision}, {scoreable} of {len(writer_ids)} writers scoreable")
 
-    scorer = writer_dependent_scores if args.wd_classifier else enrolled_trial_scores
+    if args.wd_classifier:
+        scorer = writer_dependent_scores
+    elif args.znorm:
+        scorer = znorm_trial_scores
+    else:
+        scorer = enrolled_trial_scores
 
     trials = []
     for trial in range(args.enroll_trials):
