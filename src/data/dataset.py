@@ -576,13 +576,21 @@ class TemporalSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels, augment=False):
+    def __init__(self, pairs, labels, augment=False, augment_scale=1.0):
         self.pairs = pairs
         self.labels = labels
         # Training only. Perturbing validation or test data would measure the
         # model against inputs the deployed system never sees.
         self.augment = augment
+        self.augment_scale = augment_scale
         self._rng = np.random.RandomState(0)
+
+    def _augment(self, sequence):
+        """Perturb one side of a pair, with every range scaled by `augment_scale`."""
+        return augment_trajectory(sequence, self._rng,
+                                  max_rotation_deg=6.0 * self.augment_scale,
+                                  jitter=0.02 * self.augment_scale,
+                                  max_speed_change=0.15 * self.augment_scale)
 
     def __len__(self):
         return len(self.pairs)
@@ -593,8 +601,15 @@ class TemporalSignatureDataset(Dataset):
             # Each side is perturbed independently: two recordings of the same
             # signature differ by exactly this kind of variation, so the pair
             # stays honest.
-            seq1 = augment_trajectory(seq1, self._rng)
-            seq2 = augment_trajectory(seq2, self._rng)
+            #
+            # `augment_scale` shrinks all three ranges together. At the default
+            # 1.0 strength, augmentation measured 2.54 EER points *worse* than
+            # none, and the spatial branch's rule — "keep the ranges small;
+            # forgery detection keys on fine stroke geometry" — applies with
+            # more force to a trajectory, which is nothing but fine geometry.
+            # Strength is therefore a tunable, not a fixed cost of enabling.
+            seq1 = self._augment(seq1)
+            seq2 = self._augment(seq2)
         return (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),

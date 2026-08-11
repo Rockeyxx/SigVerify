@@ -39,6 +39,7 @@ from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, writer_independent_split,
 )
+from src.data.features import NUM_DERIVED_CHANNELS
 from src.data.parsers import merge_datasets, parse_dataset, svc2004_has_pressure
 from src.models.siamese import (
     SPATIAL_TRUNKS, SpatialSiamese, TemporalSiamese, ContrastiveLoss,
@@ -86,6 +87,24 @@ def parse_args(argv=None):
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
+    parser.add_argument("--augment-scale", type=float, default=1.0,
+                        help="Multiplier on every temporal augmentation range "
+                             "(rotation, jitter, speed change). 1.0 is the default "
+                             "strength, which measured 2.54 EER points worse than no "
+                             "augmentation at all — so strength is the untested axis")
+    parser.add_argument("--hidden-size", type=int, default=TEMPORAL_HIDDEN_SIZE,
+                        help="Temporal LSTM width. 256x2 layers is ~2.2M parameters on "
+                             "62 training writers; TA-RNN uses 46+46->23 memory blocks "
+                             "and DsDTW a GRU-128, so smaller is worth measuring")
+    parser.add_argument("--num-layers", type=int, default=TEMPORAL_NUM_LAYERS,
+                        help="Temporal LSTM depth. Inter-layer dropout only exists when "
+                             "this is above 1, so dropping to 1 removes that too")
+    parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY,
+                        help="Adam L2 penalty. The temporal branch best-validates at "
+                             "epoch 1 on 62 writers, which is the shape of an "
+                             "over-capacity model, so this is a lever worth sweeping "
+                             "there. Note the opposite finding on spatial: at 301 "
+                             "writers regularizing removed capacity the model needed")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume training from")
     parser.add_argument("--init-weights", type=str, default=None,
@@ -134,8 +153,10 @@ def parse_args(argv=None):
                              "back. Pass the same value to benchmark.py or the split "
                              "will not match the one the model trained on.")
     parser.add_argument("--augment", dest="augment", action="store_true",
-                        default=SPATIAL_AUGMENT,
-                        help="Enable training-time augmentation (spatial branch)")
+                        default=None,
+                        help="Enable training-time augmentation. Defaults to the "
+                             "branch's config constant (SPATIAL_AUGMENT / "
+                             "TEMPORAL_AUGMENT); passing this overrides it")
     parser.add_argument("--no-augment", dest="augment", action="store_false",
                         help="Disable training-time augmentation")
     parser.add_argument("--split-seed", type=int, default=None,
@@ -165,6 +186,11 @@ def parse_args(argv=None):
                              "without validation improvement. The spatial validation "
                              "curve is non-monotone, so decaying on a plateau fits it "
                              "better than a fixed step schedule")
+    parser.add_argument("--temporal-features", choices=["raw", "derived"], default="raw",
+                        help="raw: the [L, 3] capture contract, deltas appended inside "
+                             "the model. derived: 16 z-scored kinematic time functions "
+                             "from src/data/features.py, all computed from those same 3 "
+                             "channels, so the capture contract is unchanged")
     parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"], default="xyp",
                         help="Extra SVC2004 channels to feed the temporal branch. "
                              "'xyp' is the shipped 3-channel contract; 'tilt' adds "
@@ -178,6 +204,32 @@ def parse_args(argv=None):
     if args.split_seed is None:
         args.split_seed = args.seed
     return args
+
+
+def apply_derived_features(writer_samples):
+    """
+    Replace every trajectory with its 16 z-scored time functions, in place.
+
+    Applied once here rather than in `__getitem__` because the Butterworth
+    filter would otherwise re-run on every sample on every epoch. The z-scoring
+    is per signature and matches `tools.dtw_baseline.standardized_time_functions`
+    exactly, so the training input is the input Arm 0 measured — a different
+    normalization here would make the two numbers describe different
+    experiments.
+
+    Measured 2026-08-09 with DTW under the enrolment protocol: worth ~6 EER
+    points on practised-signature corpora (sigcomp_Dutch 11.53% -> 5.02%,
+    sigcomp_Chinese 15.31% -> 9.35%) and **costly on SVC2004** (8.63% ->
+    17.02%), whose signers invented the signatures they enrolled and whose
+    dynamics are therefore uninformative. Expect the same split here.
+    """
+    from tools.dtw_baseline import standardized_time_functions
+
+    for record in writer_samples.values():
+        for label in ("genuine", "forged"):
+            if label in record:
+                record[label] = [standardized_time_functions(s) for s in record[label]]
+    return writer_samples
 
 
 def build_writer_samples(data_dirs, extra_channels=None):
@@ -217,7 +269,8 @@ def _seed_worker(worker_id):
 
 
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
-                 augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO):
+                 augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
+                 augment_scale=1.0):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -251,8 +304,16 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
             random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, which is also the only
         # split that may be augmented.
+        #
+        # This read `shuffle and TEMPORAL_AUGMENT`, which pinned the branch to the
+        # config constant and made `--augment` a no-op for temporal while the
+        # spatial path above honoured it. `augment_trajectory` had therefore never
+        # run. The symptom that exposed it: temporal best-validates at epoch 1,
+        # which is the same data-variety starvation augmentation fixed on spatial
+        # (best epoch 1 -> 6, 11.78% -> 11.19%). Config still supplies the default.
         dataset = TemporalSignatureDataset(pairs, labels,
-                                           augment=shuffle and TEMPORAL_AUGMENT)
+                                           augment=shuffle and augment,
+                                           augment_scale=augment_scale)
         collate = collate_temporal_pairs
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
@@ -437,6 +498,14 @@ def main(argv=None):
         args.data_dir,
         extra_channels=None if args.temporal_channels == "xyp" else args.temporal_channels)
 
+    # Each branch keeps its own documented default; --augment/--no-augment override.
+    if args.augment is None:
+        args.augment = SPATIAL_AUGMENT if args.branch == "spatial" else TEMPORAL_AUGMENT
+
+    if args.branch == "temporal" and args.temporal_features == "derived":
+        print("  Deriving kinematic time functions (once, before pairing)")
+        apply_derived_features(writer_samples)
+
     # Writer-independent partitioning (ISO/IEC 23053) happens on writer IDs
     # before any pair is formed, so no signer can straddle two partitions.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
@@ -482,14 +551,18 @@ def main(argv=None):
                     pressure_dropout = 0.0
                     has_pressure = False
 
-        channel_count = {"xyp": 3, "dt": 4, "tilt": 5}[args.temporal_channels]
-        if channel_count != 3:
+        channel_count = (NUM_DERIVED_CHANNELS if args.temporal_features == "derived"
+                         else {"xyp": 3, "dt": 4, "tilt": 5}[args.temporal_channels])
+        if args.temporal_features == "derived":
+            print(f"  Temporal features: derived ({channel_count}ch) — kinematic time "
+                  f"functions computed from the [L, 3] capture contract, not captured")
+        elif channel_count != 3:
             print(f"  Temporal channels: {args.temporal_channels} "
                   f"({channel_count}ch) — NOT the shipped [L, 3] capture contract")
         model = TemporalSiamese(
             input_features=channel_count,
-            hidden_size=TEMPORAL_HIDDEN_SIZE,
-            num_layers=TEMPORAL_NUM_LAYERS,
+            hidden_size=args.hidden_size,
+            num_layers=args.num_layers,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
             pressure_dropout=pressure_dropout,
         ).to(device)
@@ -499,12 +572,21 @@ def main(argv=None):
         weights_filename = ("temporal_lstm.pth" if has_pressure
                             else "temporal_lstm_task1.pth")
 
+        # Same reasoning, extended to the channel set. A derived-feature run
+        # produces a 16-channel model that the shipped 3-channel verifier cannot
+        # load, so writing it to the shipped name replaces working weights with
+        # ones no deployed path can use. This is not hypothetical: it happened
+        # on 2026-08-09 and the file had to be recovered from release v0.6.0.
+        if args.temporal_features == "derived":
+            weights_filename = weights_filename.replace(".pth", "_derived.pth")
+
     if args.weights_name:
         weights_filename = args.weights_name
 
     train_loader, num_train = build_loader(writer_samples, train_ids, args.branch, args.batch_size,
                                            args.num_workers, True, args.seed,
                                            augment=args.augment,
+                                           augment_scale=args.augment_scale,
                                            random_impostor_ratio=args.random_impostor_ratio)
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
                                        args.num_workers, False, args.seed,
@@ -521,7 +603,7 @@ def main(argv=None):
         print(f"  Loss: margin {args.margin}, hard-negative ratio {args.hard_negative_ratio}")
     loss_fn = ContrastiveLoss(margin=args.margin,
                               hard_negative_ratio=args.hard_negative_ratio)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=WEIGHT_DECAY)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     early_stopping = EarlyStopping(patience=args.patience,
                                    min_delta=EARLY_STOPPING_MIN_DELTA)
     start_epoch = 0

@@ -372,8 +372,21 @@ def embed_writers(model, writer_samples, writer_ids, branch, device, batch_size=
     return embedded
 
 
+def _draw(samples, indices):
+    """
+    Index a sample collection that may be a stacked matrix or a ragged list.
+
+    Embeddings arrive as `[N, D]` and index directly. Raw trajectories do not —
+    they are variable-length `[L, C]` arrays that cannot stack — so the
+    enrollment draw has to work on a plain list too.
+    """
+    if isinstance(samples, np.ndarray):
+        return samples[indices]
+    return [samples[i] for i in indices]
+
+
 def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
-                          seed=42):
+                          seed=42, distance=None):
     """
     Score one enrollment draw: K genuine references per writer, everything else a probe.
 
@@ -389,6 +402,16 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
     A writer needs `num_references` + 1 genuines and at least one forgery, or it
     cannot contribute both arms and is skipped rather than half-counted.
 
+    `distance` swaps the metric without touching the protocol. It defaults to
+    None, meaning the vectorized L2 over stacked embeddings that every model
+    path uses; passing a callable `(probe, reference) -> float` routes scoring
+    through it instead. This exists so the DTW baseline
+    (`tools/dtw_baseline.py`) can be measured on the same writers, the same K
+    references and the same RNG sequence as the model it is compared against —
+    a second copy of this loop is how two measurements drift apart. The
+    callable path costs O(probes x references) Python calls, so it is for
+    diagnostics, not for scoring a model.
+
     Returns: (scores, labels) as numpy arrays, genuine probes labelled 1.
     """
     rng = np.random.default_rng(seed)
@@ -402,15 +425,91 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
             continue
 
         order = rng.permutation(len(genuine))
-        references = genuine[order[:num_references]]
-        genuine_probes = genuine[order[num_references:]]
+        references = _draw(genuine, order[:num_references])
+        genuine_probes = _draw(genuine, order[num_references:])
+
+        for probes, label in ((genuine_probes, 1), (forged, 0)):
+            if not len(probes):
+                continue
+            if distance is None:
+                distances = np.linalg.norm(
+                    probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
+            else:
+                distances = np.array(
+                    [min(distance(probe, reference) for reference in references)
+                     for probe in probes])
+            all_scores.append(1.0 / (1.0 + distances))
+            all_labels.append(np.full(len(probes), label))
+
+    if not all_scores:
+        return np.array([]), np.array([])
+
+    return np.concatenate(all_scores), np.concatenate(all_labels)
+
+
+def znorm_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES, seed=42):
+    """
+    Enrollment scoring with the probe distance standardized per writer.
+
+    Identical draw to `enrolled_trial_scores` — same RNG, same K references, same
+    probes — so the two are directly comparable. Only the metric differs.
+
+    **The problem this addresses.** `S = 1/(1+d)` is compared against one global
+    threshold for every writer in every corpus, which asks every signer to be
+    equally self-consistent. They are not: this branch reads 4.24% EER on
+    sigcomp_Dutch and 16.32% on svc2004, and a single threshold cannot sit well
+    for both. A naturally variable signer's genuine probe can land further away
+    than a precise signer's skilled forgery, and no threshold fixes that.
+
+    **The fix.** The enrolled references already measure that writer's own scale,
+    for free and without any extra capture: the pairwise distances of the K
+    genuine references *to each other*. Standardizing the probe distance by their
+    mean and spread is the Z-norm the biometrics literature has used for decades.
+
+    This learns no decision boundary, only a scale — which is why the earlier
+    per-user SVM result (EER 2-3x worse) does not transfer. That failed because
+    random-forgery negatives cannot teach a skilled-forgery boundary; Z-norm
+    never looks at a negative.
+
+    Scores are **negated z-scores**, not `S = 1/(1+d)`: higher still means more
+    genuine and EER is rank-based, so it is directly comparable, but a threshold
+    tuned on one scoring does not carry to the other. Same caveat as
+    `writer_dependent_scores`.
+
+    Returns: (scores, labels) as numpy arrays, genuine probes labelled 1.
+    """
+    rng = np.random.default_rng(seed)
+    all_scores, all_labels = [], []
+
+    for writer in sorted(embedded):
+        genuine = embedded[writer]["genuine"]
+        forged = embedded[writer]["forged"]
+
+        if len(genuine) < num_references + 1 or not len(forged):
+            continue
+
+        order = rng.permutation(len(genuine))
+        references = _draw(genuine, order[:num_references])
+        genuine_probes = _draw(genuine, order[num_references:])
+
+        # The writer's own scale: how far their enrolled references sit from one
+        # another. Upper triangle only — the diagonal is zero by construction and
+        # would drag the mean toward it.
+        intra = np.linalg.norm(references[:, None, :] - references[None, :, :], axis=2)
+        upper = intra[np.triu_indices(len(references), k=1)]
+        centre = float(upper.mean()) if upper.size else 0.0
+        # A writer who signed identically twice has zero spread. Floor it rather
+        # than clean up the inf afterwards.
+        spread = max(float(upper.std()), 1e-6) if upper.size else 1.0
 
         for probes, label in ((genuine_probes, 1), (forged, 0)):
             if not len(probes):
                 continue
             distances = np.linalg.norm(
                 probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
-            all_scores.append(1.0 / (1.0 + distances))
+            # Negated: the convention everywhere else is that a larger score
+            # means more genuine, and a z-score runs the other way.
+            all_scores.append(-(distances - centre) / spread)
             all_labels.append(np.full(len(probes), label))
 
     if not all_scores:
