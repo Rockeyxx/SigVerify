@@ -565,6 +565,10 @@ def main(argv=None):
             num_layers=args.num_layers,
             embedding_dim=TEMPORAL_EMBEDDING_DIM,
             pressure_dropout=pressure_dropout,
+            # The derived set already carries dx, dy, ddx, ddy. Appending deltas
+            # to it differentiates them a second time, which is what invalidated
+            # the 2026-08-10 arm.
+            derive_deltas=args.temporal_features != "derived",
         ).to(device)
 
         # Distinct filenames so the pressure-blind ablation can never silently

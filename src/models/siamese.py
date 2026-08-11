@@ -245,10 +245,19 @@ class TemporalSiamese(nn.Module):
     """
 
     def __init__(self, input_features=3, hidden_size=256,
-                 num_layers=2, embedding_dim=128, pressure_dropout=0.4):
+                 num_layers=2, embedding_dim=128, pressure_dropout=0.4,
+                 derive_deltas=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.pressure_dropout = pressure_dropout
+        self.derive_deltas = derive_deltas
+
+        # Stored as a buffer so it lands in `state_dict` and a checkpoint keeps
+        # declaring its own architecture. Width alone cannot say: a 6-wide LSTM
+        # is either 3 channels with deltas or 6 channels without, and guessing
+        # wrong yields a plausible meaningless number rather than an error.
+        self.register_buffer("derive_deltas_flag",
+                             torch.tensor(float(derive_deltas)), persistent=True)
 
         # The capture device reports position and pressure, but what separates a
         # signer from a forger is mostly how the pen moves: a forger can copy the
@@ -257,7 +266,14 @@ class TemporalSiamese(nn.Module):
         # it is derived here from consecutive frames rather than being demanded
         # from the tablet. The capture contract stays (X, Y, P); the LSTM sees
         # (X, Y, P, dX, dY, dP).
-        lstm_features = input_features * 2
+        #
+        # **Off for pre-derived inputs.** `src/data/features.py` already emits
+        # dx, dy, ddx and ddy, so appending deltas there differentiates them
+        # again — ddx becomes a third derivative of raw tablet coordinates,
+        # which is essentially amplified noise, and the width doubles for
+        # nothing. The 2026-08-10 derived-feature arm ran with this on, so its
+        # 14.00% result says nothing about the features themselves.
+        lstm_features = input_features * 2 if derive_deltas else input_features
 
         # Bidirectional LSTM to capture stroke dynamics forward and backward in time
         self.lstm = nn.LSTM(
@@ -293,10 +309,15 @@ class TemporalSiamese(nn.Module):
         """
         weight = state_dict["lstm.weight_ih_l0"]
         hidden_size = weight.shape[0] // 4
-        doubled = weight.shape[1]
-        if doubled % 2:
+        width = weight.shape[1]
+
+        # Checkpoints saved before `derive_deltas` existed have no flag, and all
+        # of them derived deltas — so absence means True, never a guess.
+        derive_deltas = bool(state_dict.get("derive_deltas_flag", torch.tensor(1.0)).item())
+
+        if derive_deltas and width % 2:
             raise ValueError(
-                f"LSTM input width {doubled} is odd, so it cannot be "
+                f"LSTM input width {width} is odd, so it cannot be "
                 "2 * input_features. This checkpoint predates derived dynamics "
                 "and cannot be scored by this class."
             )
@@ -309,14 +330,22 @@ class TemporalSiamese(nn.Module):
             default=0,
         )
         params = {
-            "input_features": doubled // 2,
+            "input_features": width // 2 if derive_deltas else width,
             "hidden_size": hidden_size,
             "num_layers": layers,
             "embedding_dim": state_dict["embedding.weight"].shape[0],
+            "derive_deltas": derive_deltas,
         }
         params.update(overrides)
 
         model = cls(**params)
+        # Every checkpoint saved before the flag existed lacks this key, and
+        # `load_state_dict` is strict. Supply the one key that is legitimately
+        # absent rather than dropping to strict=False, which would also swallow
+        # a genuinely mismatched architecture.
+        if "derive_deltas_flag" not in state_dict:
+            state_dict = {**state_dict,
+                          "derive_deltas_flag": torch.tensor(float(derive_deltas))}
         model.load_state_dict(state_dict)
         return model
 
@@ -360,8 +389,10 @@ class TemporalSiamese(nn.Module):
 
         # Deltas are taken after pressure dropout so a sample whose pressure was
         # flattened to 1.0 also reports a flat dP, which is what a real capture
-        # without pressure looks like.
-        x = self._add_dynamics(x)
+        # without pressure looks like. Skipped when the input already carries
+        # its own derivatives (see __init__).
+        if self.derive_deltas:
+            x = self._add_dynamics(x)
 
         if lengths is not None:
             # Packing hides the padded tail from both LSTM directions. Without it

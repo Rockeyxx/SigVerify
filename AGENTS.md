@@ -143,11 +143,25 @@ them, even if they appear in the literature review or older drafts:
   the hardware claim is flagged unconfirmed below. `dt` is deployable today.
   Neither is shipped; `SIGCOMP2011` has neither channel, so both cost the branch
   84 of its 124 writers.
-- **A temporal checkpoint carries its own channel count.**
-  `TemporalSiamese.from_state_dict` reads it from the LSTM input width
-  (`2 x input_features`, because dynamics are concatenated first). Every load
-  path uses it, so a 4- or 5-channel experiment can never be silently scored as
-  the 3-channel default.
+- **A temporal checkpoint carries its own channel count *and* whether it derives
+  deltas.** `TemporalSiamese.from_state_dict` reads the width from
+  `lstm.weight_ih_l0` and the delta policy from the `derive_deltas_flag` buffer,
+  which is persisted in `state_dict`. Every load path uses it, so a 4- or
+  5-channel experiment can never be silently scored as the 3-channel default.
+
+  The flag is stored rather than inferred because **width alone is ambiguous**: a
+  6-wide LSTM is either 3 channels with deltas appended or 6 channels without,
+  and guessing wrong produces a plausible meaningless number instead of an error.
+  Checkpoints saved before the flag existed have no key and default to `True`,
+  which is what they were trained with.
+
+- **`derive_deltas=False` is required for pre-derived inputs.**
+  `src/data/features.py` already emits `dx`, `dy`, `ddx`, `ddy`. Appending deltas
+  on top differentiates them again — `ddx` becomes a *third* derivative of raw
+  tablet coordinates, which is amplified noise — and doubles the input width for
+  nothing. `--temporal-features derived` sets this automatically. The 2026-08-10
+  derived-feature arm ran with deltas still on, so its 14.00% pooled result is
+  **not** evidence against the derived features.
 
 #### Capture Output Contract (device → model)
 

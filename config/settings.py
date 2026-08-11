@@ -286,15 +286,18 @@ ALPHA_GRID_STEP = 0.05
 # +17 FRR), and FAR<=5% would reject one genuine user in three.
 #
 #   spatial  τ=0.6299 -> test FAR 5.71% / FRR 11.87%   (margin-2.0 weights)
-#   temporal τ=0.7695 -> test FAR 11.16% / FRR 6.99%   (1-layer weights, 2026-08-10)
-#            sigcomp_Dutch, the XPPen deployment condition: FAR 2.99% / FRR 6.73%
+#   temporal τ=0.7900 -> test FAR 7.69% / FRR 12.45%   (1-layer weights, 2026-08-11)
+#            sigcomp_Dutch, the XPPen deployment condition: FAR 1.38% / FRR 13.53%
 #
-# **Temporal τ moved 0.8524 -> 0.7695 on 2026-08-10** with the 1-layer weights.
-# The operating point moved with it, and not uniformly: FAR worsened 7.97% ->
-# 11.16% while FRR improved 14.51% -> 6.99%. Both are the validation EER point,
-# so this is the score distribution changing shape, not a policy change. If the
-# deployment cares more about forgeries getting in than about genuine users being
-# asked to sign again, raise τ — evaluate.py reports the FAR<=5% point too.
+# **Temporal τ moved 0.8524 -> 0.7900 on 2026-08-11** with the 1-layer weights,
+# and the new operating point is better than the old one on *both* axes
+# (FAR 7.97 -> 7.69, FRR 14.51 -> 12.45).
+#
+# ⚠ **Do not take the validation EER point as τ.** It was briefly set to 0.7695,
+# which is where validation EER is minimized, and that lands at test FAR 11.16% —
+# breaking the FAR<=10% rule this whole block exists to enforce. The EER point and
+# the policy point are different thresholds, and only the second one may ship.
+# Pick τ by sweeping FAR on validation, not by reading evaluate.py's EER row.
 #
 # τ must be re-derived whenever the loss margin OR the architecture changes: margin
 # 2.0 pushes impostors further out, which shifts S = 1/(1+d) and moved spatial τ
@@ -304,7 +307,7 @@ ALPHA_GRID_STEP = 0.05
 # one global value cannot serve both. DECISION_THRESHOLD remains the fused-path
 # default, where scores from both branches are mixed.
 SPATIAL_DECISION_THRESHOLD = 0.6299
-TEMPORAL_DECISION_THRESHOLD = 0.7695
+TEMPORAL_DECISION_THRESHOLD = 0.7900
 # ⚠ The fused τ is a GUESS, not a measurement — the arithmetic midpoint of the
 # two measured per-branch values. It cannot be calibrated for the same reason α
 # cannot (see the ALPHA_DEFAULT note): no writer in any available corpus has both

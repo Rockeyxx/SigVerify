@@ -162,10 +162,10 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
         raise ValueError("At least one modality must be provided to verify().")
 
     # Each branch carries its own τ: their score distributions differ enough that
-    # one global value cannot serve both (spatial 0.7868 against temporal 0.8524
+    # one global value cannot serve both (spatial 0.6299 against temporal 0.7900
     # at the same FAR<=10% target). Routing to a single branch must therefore use
     # that branch's threshold, not the fused default — using the fused value on a
-    # spatial-only verification would sit 0.03 too high and reject genuine users.
+    # spatial-only verification would sit too high and reject genuine users.
     if engine is None:
         if spatial is not None and temporal is not None:
             threshold = DECISION_THRESHOLD

@@ -172,7 +172,7 @@ full contract the capture layer must satisfy is in
 | References per user | **5**                                       | `NUM_ENROLLMENT_REFERENCES = 5`                              |
 | Matching            | nearest reference, not the mean             | `_nearest_reference_score`                                   |
 | Score               | `S = 1 / (1 + distance)`                    |                                                              |
-| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.7695` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
+| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.7900` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
 
 Enrolling fewer than 5 references drops the system into the pair-scoring regime,
 which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
@@ -328,17 +328,17 @@ of 5 enrolled references.
 
 |                                    | spatial        | temporal                |
 | ---------------------------------- | -------------- | ----------------------- |
-| EER                                | 8.45%          | 10.35%                  |
-| FAR / FRR at the shipped threshold | 5.71% / 11.87% | 7.97% / 14.51%          |
-| best dataset                       | cedar 0.00%    | **sigcomp_Dutch 4.02%** |
-| worst dataset                      | utsig 30.68%   | svc 18.00%              |
+| EER                                | 8.45%          | 9.26%                   |
+| FAR / FRR at the shipped threshold | 5.71% / 11.87% | 7.69% / 12.45%          |
+| best dataset                       | cedar 0.00%    | **sigcomp_Dutch 4.18%** |
+| worst dataset                      | utsig 30.68%   | svc 14.52%              |
 
 The thresholds are set to hold **false accepts at or under 10%**, because letting
 a forgery through is worse than asking a real user to sign again. Pushing false
 accepts below 5% is possible but turns away more than one genuine user in five,
 so it is not the shipped setting. On **SigComp Dutch — the pen-tablet condition
-matching the XPPen** — the system runs at FAR 1.80% / FRR 7.05%, inside the 5%
-target.
+matching the XPPen** — the system runs at FAR 1.38% / FRR 13.53%, well inside the
+5% target.
 
 #### Confusion matrices
 
