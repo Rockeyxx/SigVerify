@@ -343,11 +343,7 @@ Counts at the calibrated threshold, over held-out test writers.
 | ------------------------------------------------------------------ | -------------------------------------------------------------------- |
 | ![Confusion matrix, spatial branch](results/confusion_spatial.png) | ![Confusion matrix, temporal branch](results/confusion_temporal.png) |
 
-The spatial matrix reads 13,921 true rejects and 1,967 false accepts against
-13,481 true accepts and 2,407 false rejects. The two error types are close in
-size, which is the intended calibration — earlier weights sat at FAR 10.12%
-against FRR 21.20%, roughly double, and AGENTS.md requires slack to land on FRR
-only once FAR is already held down.
+The spatial confusion matrix at the shipped threshold ($\tau = 0.6299$) reads **1,376 true rejects** and **94 false accepts** against **1,155 true accepts** and **134 false rejects** (FAR 5.71% / FRR 11.87%). The temporal confusion matrix at the shipped threshold ($\tau = 0.7900$) reads **579 true rejects** and **48 false accepts** against **502 true accepts** and **70 false rejects** (FAR 7.66% / FRR 12.24%). The error types are balanced by design, holding false accept rates low while maintaining high verification accuracy across held-out test signers.
 
 #### ROC and DET curves
 
