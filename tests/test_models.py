@@ -508,3 +508,75 @@ class TestTemporalArchitectureRecovery:
         broken["lstm.weight_ih_l0"] = broken["lstm.weight_ih_l0"][:, :5]
         with pytest.raises(ValueError, match="odd"):
             TemporalSiamese.from_state_dict(broken)
+
+
+class TestDeriveDeltas:
+    """
+    `_add_dynamics` appends first differences to whatever it is given. That is
+    right for the 3-channel capture contract, where velocity has to be derived,
+    and wrong for the derived feature set in `src/data/features.py`, which
+    already carries dx, dy, ddx and ddy — appending deltas there makes ddx a
+    *third* derivative of raw tablet coordinates, which is amplified noise.
+
+    The width alone cannot say which case a checkpoint is: a 6-wide LSTM is
+    either 3 channels with deltas or 6 channels without. So the flag has to be
+    stored in the checkpoint, not inferred, or every load path guesses.
+    """
+
+    def test_disabling_deltas_halves_the_lstm_input_width(self):
+        with_deltas = TemporalSiamese(input_features=16)
+        without = TemporalSiamese(input_features=16, derive_deltas=False)
+        assert with_deltas.lstm.input_size == 32
+        assert without.lstm.input_size == 16
+
+    def test_the_flag_survives_a_checkpoint_round_trip(self):
+        """The ambiguity this exists to resolve: same width, different meaning."""
+        for channels, derive in ((3, True), (6, False), (16, False), (8, True)):
+            original = TemporalSiamese(input_features=channels, derive_deltas=derive)
+            restored = TemporalSiamese.from_state_dict(original.state_dict())
+            assert restored.derive_deltas is derive
+            assert restored.lstm.input_size == original.lstm.input_size
+
+    def test_six_wide_is_not_silently_read_as_three_channels(self):
+        """
+        Without a stored flag, a 6-channel no-delta model and a 3-channel
+        with-delta model are indistinguishable and one would be scored as the
+        other — a plausible wrong number, the exact failure this contract exists
+        to prevent.
+        """
+        no_deltas = TemporalSiamese(input_features=6, derive_deltas=False)
+        restored = TemporalSiamese.from_state_dict(no_deltas.state_dict())
+        assert restored.derive_deltas is False
+
+    def test_a_checkpoint_without_the_flag_defaults_to_deriving(self):
+        """Every existing checkpoint predates the flag and used deltas."""
+        legacy = TemporalSiamese(input_features=3).state_dict()
+        legacy.pop("derive_deltas_flag", None)
+        restored = TemporalSiamese.from_state_dict(legacy)
+        assert restored.derive_deltas is True
+        assert restored.lstm.input_size == 6
+
+    def test_restored_model_scores_identically_without_deltas(self):
+        torch.manual_seed(0)
+        original = TemporalSiamese(input_features=16, derive_deltas=False).eval()
+        restored = TemporalSiamese.from_state_dict(original.state_dict()).eval()
+        batch = torch.randn(2, 25, 16)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(batch), restored.encode(batch))
+
+    def test_padded_batch_still_matches_a_single_sample(self):
+        """
+        The invariant that guards every temporal change. Packing must still hide
+        padding when deltas are off, or a sample's embedding depends on which
+        batch it landed in.
+        """
+        torch.manual_seed(0)
+        model = TemporalSiamese(input_features=16, derive_deltas=False).eval()
+        short, long = torch.randn(1, 12, 16), torch.randn(1, 30, 16)
+        padded = torch.zeros(2, 30, 16)
+        padded[0, :12], padded[1] = short[0], long[0]
+        lengths = torch.tensor([12, 30])
+        with torch.no_grad():
+            batched = model.encode(padded, lengths)
+            alone = model.encode(short, torch.tensor([12]))
+        assert torch.allclose(batched[0], alone[0], atol=1e-6)

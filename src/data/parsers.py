@@ -1,18 +1,20 @@
 """
-Real-Dataset Parsers — Signature Verification System
+Dataset Parser Integrations — Signature Verification System
 
-Each parser returns the same shape, so downstream code never branches on which
-writer_samples it is looking at:
+Standardized parsing layer outputting uniform data structures across diverse biometric datasets:
 
     {writer_id: {"genuine": [...], "forged": [...]}}
 
-Writer IDs are namespaced (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
-so several datasets can be merged into one writer-independent split without two
-different people colliding on the same integer.
+Writer identifiers utilize structured namespaces (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
+to ensure global uniqueness when aggregating datasets into writer-independent split partitions.
 
-Spatial parsers yield file paths (images are loaded lazily by the Dataset).
-Temporal parsers yield [L, 3] float32 arrays — trajectories are small enough
-to hold in memory, and eager loading keeps the collate path simple.
+Offline visual parsers emit file path strings (lazy loading handled by Dataset classes).
+Online temporal parsers load dynamic [L, 3] float32 arrays into memory.
+
+For full dataset schema details, parser design explanations, pressure scaling rules, and
+merging protocols, see:
+  - SUMMARY.md (Part 1 — Reading the datasets)
+  - AGENTS.md (Merging a New Online Dataset & Temporal Branch Constraints)
 """
 
 import csv
@@ -34,42 +36,22 @@ from config.settings import (
     UTSIG_DIR,
 )
 
-# SVC2004 tablet pressure is reported on a fixed 0–1023 scale. Normalizing by
-# this constant (rather than each file's own max) keeps pressure comparable
-# across signatures — a light signature must stay light.
+# Standard pressure normalization scale factor for SVC2004 (0–1023 hardware dynamic range).
 SVC_PRESSURE_MAX = 1023.0
-# WACOM tilt maxima, in tenths of a degree, from the SVC2004 device spec. Fixed
-# divisors rather than per-file ranges, for the same reason pressure uses one.
+# Angular tilt boundaries from digitizer specifications (expressed in tenths of a degree).
 SVC_AZIMUTH_MAX = 3600.0
 SVC_ALTITUDE_MAX = 900.0
-# Inter-sample gaps clip here before scaling. Measured across SVC2004 Task2:
-# 10 ms median, 50 ms p99, 311 ms max. Clipping keeps one long pause from
-# compressing every ordinary gap toward zero.
+# Maximum gap threshold in milliseconds applied to inter-sample duration deltas.
 SVC_MAX_GAP_MS = 100.0
 
-# SigComp2011 was captured on a WACOM Intuos3, which reports pen force on the
-# same 0–1023 scale as the SVC2004 tablet. Kept as its own name so that a
-# future dataset on a different scale cannot silently inherit the wrong divisor.
+# Pressure scaling constant for SigComp2011 datasets (WACOM Intuos3 force resolution).
 SIGCOMP_PRESSURE_MAX = 1023.0
 
-# SigComp2011 sampled at 200 Hz; SVC2004 sampled at 100 Hz (measured: its
-# timestamp column steps by 10 ms). The model derives its velocity channels from
-# consecutive-frame deltas, so at 200 Hz the *same* physical pen speed produces
-# half the delta. Keeping every second sample puts both datasets on one time base
-# rather than asking one encoder to read the velocity channel two ways.
+# Decimation step factor aligning 200 Hz SigComp2011 data to 100 Hz target sampling rate.
 SIGCOMP_DECIMATION = 2
 
 # ─── DeepSignDB ───────────────────────────────────────────────────────
-# DeepSignDB is an aggregate: each writer belongs to one of four source
-# databases, and the source decides how its files are laid out. The mapping is
-# by user-ID range and comes from the dataset's own
-# `Comparison_Files/TBIOM_2021_Journal/README.pdf`, not from inspection.
-#
-# **Development and Evaluation reuse the same integers for different people.**
-# MCYT's 330 signers are split 230 into Development and 100 into Evaluation, so
-# `Development/u0001` and `Evaluation/u0001` are two unrelated humans. Merging
-# on the bare ID would be a writer leak of exactly the kind the split protocol
-# exists to prevent, which is why the split tag is part of every writer ID.
+# Mapping definition matching source database distributions across Development and Evaluation partitions.
 DEEPSIGN_SOURCE_RANGES = {
     "Development": ((1, 230, "MCYT"), (231, 498, "BiosecurID"),
                     (1009, 1038, "eBioSign_DS1"), (1039, 1084, "eBioSign_DS2")),
@@ -78,35 +60,15 @@ DEEPSIGN_SOURCE_RANGES = {
                    (408, 442, "eBioSign_DS2")),
 }
 
-# Which 0-indexed column holds pen force. X, Y and the timestamp are always the
-# first three; everything after that is source-specific, so a single fixed
-# column would read azimuth as pressure for most of the corpus.
+# Column index mapping for pen force across constituent source formats.
 DEEPSIGN_PRESSURE_COLUMN = {"MCYT": 5, "BiosecurID": 6, "BiosecureDS2": 6,
                             "eBioSign_DS1": 3, "eBioSign_DS2": 3}
 
-# The Wacom pen-tablet corpora, all on the same 0–1023 force scale (measured:
-# min 0, max 1023 across all three). These are the DeepSignDB writers in the
-# deployment device's domain, and the default this project trains on.
-#
-# e-BioSign is deliberately excluded. Its five capture devices report incompatible
-# force maxima — measured 353, 424, 485, 505, 511, 954, 1003 and 1023 across
-# device/subset combinations — so no fixed divisor is defensible, and normalizing
-# per file would make one signature's scale depend on its own extremes, the same
-# mistake a per-file pressure max would be. Two of those devices (Samsung Galaxy
-# Note 10.1 and ATIV 7) are general-purpose tablets rather than pen tablets,
-# which is the MOBISIG domain, not this one.
+# Digitizer pen sources included in default training splits.
 DEEPSIGN_PEN_SOURCES = ("MCYT", "BiosecurID", "BiosecureDS2")
 DEEPSIGN_PRESSURE_MAX = 1023.0
 
-# Target sampling period, matching SVC2004's measured 10 ms grid.
-#
-# Unlike SigComp2011, DeepSignDB's rate is **not** uniform per dataset, so it
-# cannot use a fixed decimation constant. Measured over a 5% sample: MCYT is
-# 10 ms in every file, but BiosecurID Development is a near-even mix — 196 files
-# at 10 ms and 180 at 5 ms — because it was captured across four sessions on two
-# tablet models. The model derives its velocity channels from consecutive-frame
-# deltas, so a 200 Hz file shows half the pen speed of a 100 Hz one for the same
-# hand. The decimation factor is therefore measured per file.
+# Target temporal period in milliseconds (10 ms period = 100 Hz frequency).
 DEEPSIGN_TARGET_PERIOD_MS = 10.0
 
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)

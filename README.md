@@ -7,7 +7,7 @@
 
 > **Senior Design Project (EE 499)** — Department of Electrical and Computer Engineering, King Abdulaziz University (KAU), Jeddah, Saudi Arabia — Team 06
 
-A multimodal biometric verification system that authenticates handwritten signatures using dual Siamese neural networks. Combines **offline** (image-based) and **online** (dynamic pen-trajectory) analysis through late fusion to deliver robust forgery detection.
+A multimodal biometric verification platform engineering authentic handwritten signature validation through dual Siamese deep network architectures. Merges **offline** (scanned static visual representations) and **online** (dynamic spatial-temporal stroke dynamics) representations via late fusion strategy to yield high-confidence forgery detection.
 
 ---
 
@@ -73,21 +73,21 @@ A multimodal biometric verification system that authenticates handwritten signat
          [Genuine/Forged, Confidence %]
 ```
 
-**Automatic fallback:** if only one modality is available, the system routes to the corresponding unimodal branch (α = 1 for image-only, α = 0 for dynamic-only).
+**Automatic Fallback Protocol:** When only a single input modality is supplied, verification routes to the matching unimodal processing pipeline (α = 1 for spatial image processing, α = 0 for temporal dynamic tracking).
 
 ---
 
 ## Features
 
-- **Dual-modality verification** — offline image analysis + online pen-trajectory analysis
-- **Late-fusion scoring** — weighted combination with automatic unimodal fallback
-- **Few-shot enrollment** — register users with one or more reference signatures, add more later
-- **Encrypted storage** — AES-256-GCM encryption of embedding payloads at rest
-- **Privacy by design** — only derived embeddings stored, never raw biometric data
-- **Cross-platform** — runs on Windows and Linux with no native build steps
-- **Desktop GUI** — PyQt5 application with enrollment and verification workflows
-- **Audit logging** — every verification event recorded for offline QA
-- **Device-agnostic capture** — abstract tablet interface with concrete driver implementations
+- **Dual-Modality Processing Pipeline** — Static image representation analysis paired with dynamic tablet trajectory stroke modeling
+- **Late-Fusion Combination Engine** — Adaptively weighted score combination supporting automatic unimodal fallback
+- **Few-Shot Template Enrollment** — Enables subject registration using one or multiple reference samples, supporting subsequent template additions
+- **Cryptographic Template Security** — Implements AES-256-GCM application-layer encryption for stored vector representations
+- **Privacy-Preserving Architecture** — Stores extracted continuous vector embeddings exclusively, discarding raw biometric input samples
+- **Cross-Platform Compatibility** — Runs natively on Windows and Linux platforms without native compilation requirements
+- **Desktop Graphical Interface** — PyQt5 desktop environment handling enrollment workflows and verification interaction
+- **Audit Verification Logging** — Logged audit records capture every verification transaction for quality assurance
+- **Hardware-Agnostic Abstraction Layer** — Standardized digitizer hardware abstraction layer interfacing platform drivers
 
 ---
 
@@ -156,14 +156,10 @@ python -m src.gui.app
 
 ### Input Specifications
 
-- **Spatial (offline):** any image format (JPG, PNG, etc.); app resizes to 155×220, inverts, normalizes internally.
-- **Temporal (online):** trajectory at 100 Hz with X, Y, Pressure channels; app z-scores X/Y per signature and scales pressure to [0.0, 1.0].
+- **Spatial (offline):** Standard image formats (JPG, PNG, etc.); pre-processed internally to 155×220 resolution with pixel polarity inversion and normalization.
+- **Temporal (online):** Trajectory coordinates sampled at 100 Hz containing X, Y, Pressure components; standardized via per-signature z-score and unit pressure scaling [0.0, 1.0].
 
-Both are enforced at the door. A photo that is too small or too blurry, or a
-trajectory that was not normalized by the capture layer, is **rejected rather
-than scored** — a wrong answer given confidently is worse than no answer. The
-full contract the capture layer must satisfy is in
-[AGENTS.md](AGENTS.md#capture-contract-for-the-capture-and-gui-layers).
+Validation gates enforce input standards upon ingestion. Low-resolution visual samples or unnormalized dynamic trajectories are rejected prior to model scoring. Detailed specifications governing input ingestion are defined in [AGENTS.md](AGENTS.md#capture-contract-for-the-capture-and-gui-layers).
 
 #### Enrollment and decision
 
@@ -172,10 +168,9 @@ full contract the capture layer must satisfy is in
 | References per user | **5**                                       | `NUM_ENROLLMENT_REFERENCES = 5`                              |
 | Matching            | nearest reference, not the mean             | `_nearest_reference_score`                                   |
 | Score               | `S = 1 / (1 + distance)`                    |                                                              |
-| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.7695` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
+| Threshold           | spatial `τ = 0.6299`, temporal `τ = 0.7900` | `SPATIAL_DECISION_THRESHOLD` / `TEMPORAL_DECISION_THRESHOLD` |
 
-Enrolling fewer than 5 references drops the system into the pair-scoring regime,
-which is a few EER points worse — see [Evaluation Figures](#evaluation-figures).
+Registering fewer than 5 reference signatures reduces match accuracy by switching to single-pair scoring baseline metrics — refer to [Evaluation Figures](#evaluation-figures).
 
 ---
 
@@ -328,17 +323,17 @@ of 5 enrolled references.
 
 |                                    | spatial        | temporal                |
 | ---------------------------------- | -------------- | ----------------------- |
-| EER                                | 8.45%          | 10.35%                  |
-| FAR / FRR at the shipped threshold | 5.71% / 11.87% | 7.97% / 14.51%          |
-| best dataset                       | cedar 0.00%    | **sigcomp_Dutch 4.02%** |
-| worst dataset                      | utsig 30.68%   | svc 18.00%              |
+| EER                                | 8.45%          | 9.26%                   |
+| FAR / FRR at the shipped threshold | 5.71% / 11.87% | 7.69% / 12.45%          |
+| best dataset                       | cedar 0.00%    | **sigcomp_Dutch 4.18%** |
+| worst dataset                      | utsig 30.68%   | svc 14.52%              |
 
 The thresholds are set to hold **false accepts at or under 10%**, because letting
 a forgery through is worse than asking a real user to sign again. Pushing false
 accepts below 5% is possible but turns away more than one genuine user in five,
 so it is not the shipped setting. On **SigComp Dutch — the pen-tablet condition
-matching the XPPen** — the system runs at FAR 1.80% / FRR 7.05%, inside the 5%
-target.
+matching the XPPen** — the system runs at FAR 1.38% / FRR 13.53%, well inside the
+5% target.
 
 #### Confusion matrices
 

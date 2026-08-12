@@ -1,27 +1,21 @@
 """
-EER Regression Harness — Signature Verification System
+EER & Separation Quality Regression Benchmarking Suite — Signature Verification System
 
-Judges a model on threshold-independent separation quality (EER, Cohen's d)
-over held-out test writers, instead of FAR/FRR at a fixed decision threshold.
-Reading FAR/FRR at a fixed tau is what masked the P-001 accuracy failure
-(docs/PROBLEMS_FACED.md): a 98.58% FAR looked like a broken model, but the
-real defect was tau=0.5 sitting exactly on the contrastive margin — a
-calibration bug, not evidence about the embedding quality itself. EER and
-Cohen's d slide the threshold out of the picture entirely, so this harness is
-the regression gate for representation changes.
+Evaluates representation capacity and threshold-independent separation quality (EER metrics, Cohen's d)
+across held-out test writer partitions.
 
-All distance/pairing/EER math is imported from scripts.evaluate — this module
-only adds effect size and margin diagnostics on top of it.
+Distance metrics and pairing routines are imported from scripts.evaluate;
+this module computes effect size separation metrics and margin distribution statistics.
 
-Usage:
-    python scripts/benchmark.py --branch spatial \\
-        --weights models/weights/spatial_cnn.pth \\
+CLI Examples:
+    python scripts/benchmark.py --branch spatial \
+        --weights models/weights/spatial_cnn.pth \
         --data-dir data/cedar data/bhsig260 data/utsig --seed 42
 
-    # Fast, reproducible run over a fixed-size sample of the test pairs:
-    python scripts/benchmark.py --branch spatial \\
-        --weights models/weights/spatial_cnn.pth \\
-        --data-dir data/cedar data/bhsig260 data/utsig \\
+    # Fast evaluation run over a designated pair sample count:
+    python scripts/benchmark.py --branch spatial \
+        --weights models/weights/spatial_cnn.pth \
+        --data-dir data/cedar data/bhsig260 data/utsig \
         --seed 42 --limit-pairs 800
 """
 
@@ -48,6 +42,7 @@ from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               writer_dependent_scores, znorm_trial_scores)
 from src.data.dataset import writer_independent_split
 from src.data.parsers import merge_datasets, parse_dataset
+
 
 
 def cohens_d(impostor_distances, genuine_distances):

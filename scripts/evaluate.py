@@ -1,10 +1,10 @@
 """
-Evaluation Script — Signature Verification System
+Evaluation & Calibration Execution Script — Signature Verification System
 
-Standalone evaluation and calibration script. Imports from src.models
-and runs analysis independently of the training pipeline.
+Independent evaluation and parameter calibration suite. Imports model architecture module
+definitions from src.models and performs statistical error analysis.
 
-Usage:
+CLI Examples:
     python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth --data-dir ./data
     python scripts/evaluate.py --alpha-sweep --spatial-weights ... --temporal-weights ... --data-dir ./data
 """
@@ -43,10 +43,9 @@ from src.models.siamese import SpatialSiamese, TemporalSiamese
 
 def compute_eer(genuine_scores, impostor_scores):
     """
-    Compute Equal Error Rate (EER) from genuine and impostor similarity scores.
+    Calculate Equal Error Rate (EER) value from genuine and forgery distribution scores.
 
-    EER occurs at the operating threshold where False Acceptance Rate (FAR)
-    equals False Rejection Rate (FRR).
+    Identifies decision point where False Acceptance Rate (FAR) intersects False Rejection Rate (FRR).
 
     Returns: (eer: float, threshold_at_eer: float)
     """
@@ -56,17 +55,18 @@ def compute_eer(genuine_scores, impostor_scores):
     fpr, tpr, thresholds = roc_curve(labels, scores)
     fnr = 1 - tpr
 
-    # Identify the threshold index where FPR and FNR intersect
+    # Compute minimal absolute difference index where FPR equals FNR
     idx = np.nanargmin(np.abs(fpr - fnr))
     eer = (fpr[idx] + fnr[idx]) / 2
     return float(eer), float(thresholds[idx])
 
 
 def compute_far_frr(genuine_scores, impostor_scores, threshold):
-    """Calculate False Acceptance Rate (FAR) and False Rejection Rate (FRR) at a given threshold."""
+    """Calculate False Acceptance Rate (FAR) and False Rejection Rate (FRR) at specified decision threshold."""
     far = np.mean(impostor_scores >= threshold)
     frr = np.mean(genuine_scores < threshold)
     return float(far), float(frr)
+
 
 
 def _finish_plot(fig, output_path, kind):
