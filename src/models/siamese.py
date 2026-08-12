@@ -1,14 +1,14 @@
 """
-Dual-Siamese Signature Verification — Model Architecture
+Dual-Siamese Signature Verification — Model Architecture Specifications
 
-Consolidated module containing:
-  - SpatialSiamese:   CNN backbone for offline (image) signature verification
-  - TemporalSiamese:  LSTM backbone for online (dynamic) signature verification
-  - ContrastiveLoss:  Contrastive loss with hard-negative mining
-  - FusionEngine:     Late-fusion score combination with unimodal fallback
+Unified model definitions module providing:
+  - SpatialSiamese:   Convolutional backbone processing offline (image) signature representations
+  - TemporalSiamese:  Recurrent LSTM backbone processing online (dynamic) signature trajectories
+  - ContrastiveLoss:  Pairwise metric distance loss supporting hard-negative sample mining
+  - FusionEngine:     Late-fusion combination pipeline supporting unimodal execution routing
 
-Architecture follows the approved Term-1 baseline (Alternative 3 — Late-Fusion
-Dual Siamese Networks). See AGENTS.md for hard constraints.
+System architecture conforms to Term-1 design requirements (Late-Fusion Dual Siamese Networks).
+Refer to AGENTS.md for detailed architectural boundaries.
 """
 
 import math

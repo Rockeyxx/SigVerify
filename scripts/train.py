@@ -1,9 +1,9 @@
 """
-Training Script — Signature Verification System
+Training Pipeline Entry Point — Signature Verification System
 
-Entry point for training the Siamese networks.
+Execution entry point for training dual Siamese neural network architectures.
 
-Usage:
+CLI Examples:
     OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch spatial --data-dir data/cedar data/bhsig260 data/utsig --epochs 100 --batch-size 32 --num-workers 4 --seed 42
     OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch temporal --data-dir ./data/svc2004
     OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch spatial --resume models/weights/checkpoint_spatial.pth
@@ -48,8 +48,8 @@ from src.models.siamese import (
 
 class EarlyStopping:
     """
-    Early Stopping monitor to halt training if validation loss stops improving.
-    Prevents model overfitting by saving the best performing weight checkpoint.
+    Early stopping monitor tracking validation loss to halt training when convergence plateaus.
+    Saves state parameters corresponding to lowest validation error.
     """
 
     def __init__(self, patience=EARLY_STOPPING_PATIENCE, min_delta=EARLY_STOPPING_MIN_DELTA):
@@ -76,6 +76,7 @@ class EarlyStopping:
                 self.early_stop = True
                 return True
             return False
+
 
 
 def parse_args(argv=None):

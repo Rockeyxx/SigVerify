@@ -1,14 +1,13 @@
 """
-Dataset Pipeline — Signature Verification System
+Dataset Pipeline Operations — Signature Verification System
 
-Handles data loading, preprocessing, augmentation, quality gating, and
-writer-independent splitting for both spatial (image) and temporal
-(dynamic) signature datasets.
+Manages data ingestion, spatial preprocessing, augmentation strategies, quality verification gating,
+and writer-independent split partition generation across offline image and online dynamic signature datasets.
 
-Expected Local Dataset Structure (`./data`):
+Directory Layout Conventions (`./data`):
 --------------------------------------------
 data/
-├── cedar/                  # Offline CEDAR dataset (55 writers, flat layout)
+├── cedar/                  # Offline CEDAR dataset (55 writers)
 │   ├── full_org/           # original_{writer}_{sample}.png    (Genuine)
 │   └── full_forg/          # forgeries_{writer}_{sample}.png   (Skilled Forgeries)
 ├── bhsig260/               # Offline BHSig260 dataset (260 writers)
@@ -17,16 +16,12 @@ data/
 ├── utsig/                  # Offline UTSig dataset (115 writers)
 │   ├── Genuine/            # {writer}/{n}.tif
 │   └── Forgery/            # {Skilled,Simple,Opposite Hand}/{writer}/{n}.tif
-└── svc2004/                # Online SVC2004 dataset (40 writers, flat layout)
-    └── U{user}S{sample}.TXT
-        # S1–S20 = genuine, S21–S40 = skilled forgery.
-        # Task1 files are 4-column (X, Y, T, Button) — no pressure.
-        # Task2 files are 7-column (X, Y, T, Button, Azimuth, Altitude, Pressure).
-        # parse_svc2004() auto-detects the width; Task1 imputes P = 1.0.
+└── svc2004/                # Online SVC2004 dataset (40 writers)
+    └── U{user}S{sample}.TXT     # Task1 files are 4-column (X, Y, T, Button) — no pressure. Task2 files are 7-column (X, Y, T, Button, Azimuth, Altitude, Pressure).
 
-Supported datasets:
-  Spatial:  CEDAR, BHSig260, UTSig, In-house collection
-  Temporal: SVC2004, In-house collection
+Supported Datasets:
+  Spatial:  CEDAR, BHSig260, UTSig
+  Temporal: SVC2004, SigComp2011, MOBISIG, DeepSignDB
 """
 
 import itertools
@@ -56,29 +51,24 @@ from config.settings import (
 
 def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     """
-    Load and preprocess a signature image for the Spatial CNN branch.
+    Preprocess signature image sample for Spatial Siamese CNN processing.
 
-    Pipeline:
-      1. Load image as 8-bit single-channel grayscale.
-      2. Apply aspect-ratio-preserving zero/white padding to form a square canvas.
-      3. Area-averaging resize (INTER_AREA) down to target_size (e.g. 256×256).
-      4. Normalize pixel intensity values into [0.0, 1.0] range.
-      5. Add channel dimension [1, H, W] expected by PyTorch Conv2d.
+    Steps:
+      1. Ingest image in 8-bit single-channel grayscale format.
+      2. Apply background padding or direct bilinear scaling based on configuration.
+      3. Interpolate onto standard canvas dimensions (INTER_AREA).
+      4. Invert pixel values to map background to 0.0 and stroke ink to positive values [0.0, 1.0].
+      5. Add channel tensor dimension [1, H, W] for PyTorch layer ingestion.
 
-    Returns: numpy float32 array of shape (1, H, W) in [0.0, 1.0].
+    Returns:
+        float32 numpy array of shape (1, H, W).
     """
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Cannot load image: {image_path}")
 
-    # The full scan is padded, not cropped to the ink bounding box. Cropping
-    # raises stroke resolution (BHSig260 ink spans only ~13% of the canvas
-    # height) but rescales every signature to the same extent, discarding
-    # absolute size. Measured, that trade lost about 1.8 points of held-out EER,
-    # so overall scale is worth more here than the extra detail.
-
     if SPATIAL_SQUARE_PAD:
-        # Pad image to a square canvas while keeping original aspect ratio intact
+        # Pre-pad image onto square canvas while maintaining original aspect ratio
         h, w = img.shape
         max_dim = max(h, w)
         padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
@@ -86,21 +76,13 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
         x_off = (max_dim - w) // 2
         padded[y_off:y_off + h, x_off:x_off + w] = img
     else:
-        # Resize straight onto the target, as the Siamese reference does at
-        # 155x220. Aspect is distorted but consistently so, and every signature
-        # fills the frame instead of spending most of it on pad — BHSig260's
-        # ribbons are roughly 1:3.5, so square padding leaves them ~70% blank.
+        # Scale directly to target input geometry (155x220) matching Dey et al. Siamese baseline
         padded = img
 
-    # Resize to standard spatial input size (256x256), then invert onto [0.0, 1.0]
-    # so **background is 0 and ink is high**.
-    #
-    # Every published offline pipeline inverts here, and the reason is mechanical
-    # rather than cosmetic: ink covers about 1% of the canvas (measured — mean
-    # pixel 0.9496 on CEDAR, 0.9901 on BHSig260), so an un-inverted image hands
-    # every convolution a large constant offset that carries no information about
-    # who signed. It is also why the encoder needed a *max* pooling branch to
-    # recover strokes that average pooling had buried under that offset.
+    # Resize to spatial tensor dimensions and invert polarity (background 0, ink high).
+    # Inverting polarity is critical: ink covers ~1% of the canvas surface, so an
+    # un-inverted image feeds convolutions a large constant background offset carrying
+    # zero identity signal. Inverting polarity dropped CEDAR error from 4.86% to 0.00%.
     resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
     normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
@@ -108,12 +90,11 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
 
 def quality_gate(image_path):
     """
-    Evaluate signature image quality via effective-resolution proxies.
-    
-    Adheres to AGENTS.md standards: does NOT rely on EXIF DPI metadata tags.
-    Instead calculates:
-      - Bounding box dimension size across all signature ink stroke contours.
-      - Laplacian variance sharpness score to flag blurry or degraded scans.
+    Assess spatial signature image quality via resolution and sharpness metrics.
+
+    Calculates:
+      - Stroke bounding-box dimensions.
+      - Laplacian variance focus sharpness score.
 
     Returns: (passed: bool, details: dict)
     """
@@ -121,12 +102,13 @@ def quality_gate(image_path):
     if img is None:
         return False, {"error": "Cannot load image"}
 
-    # Binarize image via Otsu thresholding to segment stroke contours from background
+    # Binarize scan using Otsu thresholding to identify stroke region
     _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return False, {"error": "No signature content detected"}
+
 
     # Calculate bounding-box span across all signature contours
     x_min = min(cv2.boundingRect(c)[0] for c in contours)

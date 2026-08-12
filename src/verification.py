@@ -1,17 +1,17 @@
 """
 Integration Facade — Signature Verification System
 
-The single seam between the model workstream and everyone else. The GUI and
-database teams import from here and nothing deeper: no distance math, no tensor
-construction, no knowledge of which class implements which branch.
+Primary operational abstraction linking backend inference models with application components.
+GUI views and database operations import directly from this layer, decoupling downstream consumers
+from tensor formatting, distance calculations, and model execution mechanics.
 
-Typical enrollment (store embeddings only — ISO/IEC 24745:2022):
+Typical enrollment workflow (persisting embeddings only — ISO/IEC 24745:2022 standard):
 
     model = load_model("spatial", "models/weights/spatial_cnn.pth")
     blob = embedding_to_bytes(embed(model, "sig.png", "spatial"))   # 2048 bytes
-    # ... DB team wraps `blob` in AES-256-GCM and stores it
+    # ... Database layer encrypts `blob` payload via AES-256-GCM prior to storage
 
-Typical verification:
+Typical verification workflow:
 
     refs = [bytes_to_embedding(b) for b in stored_blobs]
     result = verify(spatial=(model, refs, probe_path))
@@ -37,19 +37,17 @@ from config.settings import (
 from src.data.dataset import preprocess_image, quality_gate, trajectory_gate
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 
-# Embeddings are persisted as raw little-endian float32. 512-d spatial → 2048 B,
-# 128-d temporal → 512 B. The DB team encrypts these bytes; changing this dtype
-# silently invalidates every enrolled template already in the database.
+# Vector representations are serialized as raw little-endian float32 arrays. 512-d spatial → 2048 B,
+# 128-d temporal → 512 B. Encrypted byte structures rely on this layout; altering data types invalidates stored templates.
 EMBEDDING_DTYPE = np.float32
 
 
 def load_model(branch, weights_path, device="cpu"):
     """
-    Load a trained branch ready for inference.
+    Instantiate and initialize a trained model branch for evaluation.
 
-    Always maps to CPU first, so weights trained on a GPU (Colab) load on the
-    deployment machine, which has none. Returns the model in `.eval()` mode —
-    inference must never run with dropout active.
+    Maps parameters to CPU by default to ensure GPU-trained weights evaluate cleanly
+    on CPU deployment environments. The returned model is set to `.eval()` mode.
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights not found: {weights_path}")
@@ -57,14 +55,10 @@ def load_model(branch, weights_path, device="cpu"):
     state_dict = torch.load(weights_path, map_location="cpu")
 
     if branch == "spatial":
-        # Architecture comes from the checkpoint, not from config: a deployed
-        # weights file outlives the config that trained it, and an embedding
-        # whose width silently disagreed with the enrolled templates would be
-        # unrecoverable once encrypted into the database.
+        # Model architecture is reconstructed directly from checkpoint metadata to match original parameters.
         model = SpatialSiamese.from_state_dict(state_dict)
     elif branch == "temporal":
-        # Architecture from the checkpoint, not config: a 4- or 5-channel
-        # experiment must never be silently reinterpreted as the 3-channel default.
+        # Reconstruction reads channel parameters and state dict parameters from stored weights.
         model = TemporalSiamese.from_state_dict(state_dict)
     else:
         raise ValueError(f"Unknown branch '{branch}' — expected 'spatial' or 'temporal'")
@@ -74,13 +68,15 @@ def load_model(branch, weights_path, device="cpu"):
 
 def embed(model, sample, branch, device="cpu"):
     """
-    Turn one raw sample into its embedding vector.
+    Transform raw input sample into continuous feature vector embedding.
 
     Args:
-        sample: an image path for `spatial`, or an [L, 3] trajectory array for
-                `temporal` (already normalized via `parsers.normalize_trajectory`).
+        sample: Image file path for `spatial` branch, or normalized [L, 3] trajectory array for `temporal`.
+        branch: Modality identifier ('spatial' or 'temporal').
+        device: Target execution device.
 
-    Returns: float32 numpy vector — 512-d spatial, 128-d temporal.
+    Returns:
+        float32 numpy array — 512-d for spatial, 128-d for temporal.
     """
     if branch == "spatial":
         tensor = torch.from_numpy(preprocess_image(sample)).unsqueeze(0)
@@ -95,9 +91,9 @@ def embed(model, sample, branch, device="cpu"):
 
 def embedding_to_bytes(embedding):
     """
-    Serialize an embedding for encrypted storage.
+    Convert vector array representation into contiguous byte payload for encrypted storage.
 
-    Accepts a numpy array or torch tensor. 512-d → 2048 bytes, 128-d → 512 bytes.
+    Accepts numpy array or PyTorch tensor representations.
     """
     if isinstance(embedding, torch.Tensor):
         embedding = embedding.detach().cpu().numpy()
@@ -106,26 +102,19 @@ def embedding_to_bytes(embedding):
 
 def bytes_to_embedding(blob):
     """
-    Deserialize a stored embedding.
+    Reconstruct numpy feature vector from binary byte buffer.
 
-    Returns a writable copy — `np.frombuffer` would alias read-only memory and
-    blow up the first time a caller tried to modify it. A payload whose length
-    is not a multiple of 4 raises rather than being reinterpreted as a shorter
-    (silently wrong) embedding.
+    Returns a writable array copy to prevent read-only buffer mutation errors.
     """
     return np.frombuffer(blob, dtype=EMBEDDING_DTYPE).copy()
 
 
 def _nearest_reference_score(references, probe_embedding):
     """
-    Score a probe against an enrolled reference set.
+    Compute similarity match score between probe embedding and enrolled references.
 
-    Uses **nearest-reference** matching (not the mean): a person's signature
-    varies, and the closest enrolled sample is the fairest comparison. This
-    choice is fixed at calibration per AGENTS.md — do not switch it to mean
-    matching after τ has been tuned.
-
-    Returns S = 1 / (1 + d) ∈ (0, 1], matching the evaluation script's scoring.
+    Evaluates minimum distance (nearest-reference matching) across registered templates.
+    Returns calculated similarity score S = 1 / (1 + d).
     """
     stacked = np.vstack([np.asarray(r, dtype=EMBEDDING_DTYPE) for r in references])
     distances = np.linalg.norm(stacked - probe_embedding[None, :], axis=1)
@@ -133,39 +122,27 @@ def _nearest_reference_score(references, probe_embedding):
 
 
 def _pressure_is_imputed(trajectory):
-    """True when the trajectory carries no real pressure (every P == 1.0)."""
+    """Check whether input sequence uses flat imputed pressure values."""
     trajectory = np.asarray(trajectory, dtype=np.float32)
     return bool(np.allclose(trajectory[:, 2], PRESSURE_IMPUTATION_VALUE))
 
 
 def verify(spatial=None, temporal=None, engine=None, device="cpu"):
     """
-    Verify a probe signature against an enrolled reference set.
+    Perform signature verification evaluating probe inputs against enrolled references.
 
     Args:
-        spatial:  (model, reference_embeddings, probe_image_path) or None
-        temporal: (model, reference_embeddings, probe_trajectory) or None
-        engine:   a configured FusionEngine; defaults to the calibrated settings.
+        spatial: Optional tuple of (model, reference_embeddings, probe_image_path).
+        temporal: Optional tuple of (model, reference_embeddings, probe_trajectory).
+        engine: FusionEngine instance for combining branch scores.
 
-    Supplying one branch routes to it automatically (α collapses to 1 or 0);
-    supplying both fuses them. At least one is required.
-
-    Returns the GUI contract:
+    Returns dictionary containing verification verdict:
         {"decision": str, "confidence": float, "routing": str, "degraded": bool}
-
-    `degraded` is True when the result rests on reduced evidence — a missing
-    branch, imputed pressure, or a probe image that failed the quality gate.
-    The GUI must surface it: a degraded "Genuine" is a weaker claim than a
-    clean multimodal one.
     """
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
 
-    # Each branch carries its own τ: their score distributions differ enough that
-    # one global value cannot serve both (spatial 0.6299 against temporal 0.7900
-    # at the same FAR<=10% target). Routing to a single branch must therefore use
-    # that branch's threshold, not the fused default — using the fused value on a
-    # spatial-only verification would sit too high and reject genuine users.
+    # Select single-branch decision threshold or combined fusion threshold based on active inputs.
     if engine is None:
         if spatial is not None and temporal is not None:
             threshold = DECISION_THRESHOLD
@@ -179,39 +156,22 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
     temporal_score = None
     quality_failed = False
     pressure_imputed = False
-    # Collected so a verification with no usable evidence can say *why* each
-    # branch was dropped. "Re-capture the signature" is not actionable; "X/Y are
-    # not z-scored" is.
     gate_errors = []
 
     if spatial is not None:
         model, references, probe = spatial
-        # The quality gate was defined but never called anywhere; this is its
-        # one live wiring point. A blurry or near-empty scan still produces an
-        # embedding, so without this the result would look fully confident.
+        # Screen spatial image inputs against quality criteria before feature extraction.
         passed, details = quality_gate(probe)
         quality_failed = not passed
         if not passed:
             gate_errors.append(f"spatial: {details.get('error', 'failed the quality gate')}")
-        # A probe that fails the gate is **dropped from fusion**, not merely
-        # flagged. Scoring it anyway let a blurry or undersized capture carry the
-        # same weight as a clean one and flip the decision, while `degraded` said
-        # only that the result was weaker. Dropping it routes through the
-        # existing missing-modality path, so a spatial-only verification whose
-        # image fails the gate has no evidence left and raises, rather than
-        # returning a confident verdict built on nothing.
         if passed:
             spatial_score = _nearest_reference_score(
                 references, embed(model, probe, "spatial", device))
 
     if temporal is not None:
         model, references, probe = temporal
-        # Gated for the same reason the spatial probe is, and the stakes are
-        # higher: a trajectory still in raw device units does not merely score
-        # worse, it scores *meaninglessly*, and the old code returned a confident
-        # verdict on it. Measured: one writer's own signature scored 0.9370
-        # normalized and 0.4888 unnormalized — accepted, then rejected, with no
-        # signal that anything was wrong.
+        # Screen temporal trajectory points against normalization and sequence gates.
         passed, details = trajectory_gate(probe)
         quality_failed = quality_failed or not passed
         if passed:
@@ -235,3 +195,4 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
         result["degraded"] = True
 
     return result
+

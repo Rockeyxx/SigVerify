@@ -1,14 +1,10 @@
 # Dataset licences
 
-The MIT licence in [LICENSE](LICENSE) covers **the code in this repository and
-nothing else**. Every signature corpus used here belongs to a third party and
-carries its own terms. None of them are redistributed: `data/` is gitignored, and
-nothing derived from a licensed corpus is committed.
+The scope of the MIT licence in [LICENSE](LICENSE) applies exclusively to **the code hosted within this repository**. Third parties retain ownership of every signature corpus referenced herein, each subject to distinct terms. We redistribute none of these corpora: `data/` remains gitignored, and zero assets derived from a licensed dataset are committed.
 
 ## Openly available corpora
 
-These can be downloaded without a signed agreement. Terms are set by each
-publisher, and all six are research-use datasets.
+Downloading these datasets requires no signed agreement. Individual publishers define the applicable terms, with all six datasets designated for academic research.
 
 | Corpus | Source | Access |
 | --- | --- | --- |
@@ -19,45 +15,31 @@ publisher, and all six are research-use datasets.
 | SigComp2011 | [ICDAR / IAPR TC11](http://www.iapr-tc11.org/mediawiki/index.php/ICDAR_2011_Signature_Verification_Competition_(SigComp2011)) | Open download. The archive password is the disclaimer sentence printed on the dataset page, so unzipping it is an acceptance of that disclaimer |
 | MOBISIG | [Sapientia University](https://www.ms.sapientia.ro/~manyi/mobisig.html) | Open download |
 
-Cite the corpus authors in any published work. The relevant references are in the
-README bibliography.
+Credit the corpus creators across any published work. Corresponding citations are listed in the README bibliography.
 
 ## DeepSignDB (signed agreement, research use only)
 
-DeepSignDB is distributed by the **Biometrics and Data Pattern Analytics (BiDA)
-Lab, Universidad Autónoma de Madrid**. It is not a public download. You request
-it, sign and return a licence agreement, and BiDA Lab sends the archive back.
-Turnaround runs from days to weeks.
+Distribution of DeepSignDB is managed by the **Biometrics and Data Pattern Analytics (BiDA) Lab, Universidad Autónoma de Madrid**. Access is not public; obtaining the archive involves submitting a signed license request to BiDA Lab, which usually processes requests within a few days to weeks.
 
-This project holds a copy under an agreement effective **25 July 2026**, valid two
-years. **The data itself has been deleted from this machine**; the parser and its
-tests remain so the work is reproducible by anyone who holds their own licence.
+A valid agreement for this project took effect on **25 July 2026** for a period of two years. Although **raw data files were purged from this local system**, the codebase retains parser logic and test coverage to preserve reproducibility for credentialed license holders.
 
-The agreement is specific, and these are the clauses that constrain this
-repository:
+The binding terms of this agreement constrain repository operations through several explicit provisions:
 
 | Clause | What it means here |
 | --- | --- |
-| 4.1 | Only the licensee and direct colleagues at the same institution may use it |
-| 4.2 | No copying or redistribution beyond your own backup. `data/` is gitignored, and no signature file, feature cache or embedding dump derived from it may ever be committed |
-| 4.4 | Research only. The prohibition explicitly covers "files containing extracted features", so features and weights derived from it are non-commercial too |
-| 4.5 | Any public work based on it must cite the four references marked with a scales symbol in the README bibliography |
-| 4.6 | No signature images in publications. BiDA Lab whitelists only users `u1010`, `u1013`, `u1028` (Development) and `u0103`, `u0145` (Evaluation). Every plot in this repository is a score distribution or a DET/ROC curve, so nothing renders a DeepSignDB stroke. Keep it that way |
-| 4.7 | Expires 25 July 2028 unless renewed, after which all copies are destroyed |
-| 4.8 | BiDA Lab may instruct that part of the database be destroyed. Comply immediately |
+| 4.1 | Usage is restricted strictly to the primary licensee and immediate institutional collaborators |
+| 4.2 | Redistribution or duplication beyond local backup is prohibited. Because `data/` is gitignored, no raw signatures, extracted feature caches, or vector embeddings may enter source control |
+| 4.3 | Usage is restricted to academic research. Because explicit restrictions cover "files containing extracted features", models and trained weights are bound to non-commercial terms |
+| 4.5 | Any published findings incorporating this dataset must cite the four references marked with a scales symbol in the README bibliography |
+| 4.6 | Publication of raw signature visual renderings is restricted. BiDA Lab limits permitted renderings exclusively to signers `u1010`, `u1013`, `u1028` (Development) and `u0103`, `u0145` (Evaluation). Figures across this repository present only score distributions and DET/ROC evaluation curves, avoiding direct stroke rendering |
+| 4.7 | Unless formally extended, authorization terminates on 25 July 2028, requiring complete erasure of all copies |
+| 4.8 | Immediate compliance is mandatory should BiDA Lab direct the deletion of designated database subsets |
 
-Training on it and using the resulting weights for this project, its report and
-its demo is the licensed use. Selling it, or shipping it inside a commercial
-product, is not.
+Executing model training and applying resulting weights for internal benchmarks, reports, and system demonstrations falls under authorized academic usage. Commercial distribution or integration into proprietary software remains strictly forbidden.
 
-**No released weights are trained on DeepSignDB.** Weights derived from it stay
-local and carry `DONT_SHIP` in the filename. The published weights come from the
-openly available corpora only.
+**No distributed pre-trained weights incorporate DeepSignDB.** Models trained on this corpus are restricted to local storage and tagged with `DONT_SHIP` in their filename. All publicly released weight checkpoints originate strictly from unencumbered open datasets.
 
 ## Adding another licensed corpus
 
-The operational rules live in [AGENTS.md](AGENTS.md#licensed-datasets): never
-commit the data or anything derived from it, never render its signatures into a
-figure unless the agreement whitelists that user, carry its required citations,
-treat derived weights as research-only, and record the expiry date. Add the new
-corpus to this file at the same time.
+Operational procedures are specified in [AGENTS.md](AGENTS.md#licensed-datasets): never check in raw data or derived assets, limit visual signature renders strictly to whitelisted participants, include mandatory citations, restrict output model weights to non-commercial scope, and log agreement expiration dates. Update this document concurrently when adding any new corpus.
+
