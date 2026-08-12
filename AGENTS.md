@@ -159,9 +159,13 @@ them, even if they appear in the literature review or older drafts:
   `src/data/features.py` already emits `dx`, `dy`, `ddx`, `ddy`. Appending deltas
   on top differentiates them again — `ddx` becomes a *third* derivative of raw
   tablet coordinates, which is amplified noise — and doubles the input width for
-  nothing. `--temporal-features derived` sets this automatically. The 2026-08-10
-  derived-feature arm ran with deltas still on, so its 14.00% pooled result is
-  **not** evidence against the derived features.
+  nothing. `--temporal-features derived` sets this automatically.
+
+  **The bug was real; it was not the explanation.** Re-run at three seeds with
+  deltas correctly off, the derived features measured **14.99% pooled** against a
+  10.88% control — statistically identical to the 14.00% the buggy version
+  produced. Derived features genuinely hurt this model. Do not re-litigate this
+  without a new mechanism to test.
 
 #### Capture Output Contract (device → model)
 
