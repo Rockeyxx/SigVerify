@@ -101,6 +101,9 @@ PRESSURE_IMPUTATION_VALUE = 1.0
 PAIRS_GENUINE_PER_WRITER = 276
 PAIRS_IMPOSTOR_PER_WRITER = 276
 
+
+
+
 # Proportion of negative pair allocations assigned to **random impostors** —
 # genuine signatures from non-matching signers — rather than targeted skilled forgeries.
 # Evaluated during training phase only; benchmark scoring continues to evaluate strictly against skilled forgeries (refer to AGENTS.md).

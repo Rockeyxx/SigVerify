@@ -749,6 +749,57 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
     return writers
 
 
+def parse_sigcomp2011_offline(root=None):
+    """
+    Parse ICDAR SigComp2011 offline scanned image signature dataset.
+
+    Returns:
+        {writer_id: {"genuine": [img_path_strings], "forged": [img_path_strings]}}
+    """
+    if root is None:
+        root = os.path.join("data", "sigcomp2011_offline")
+    _require_dir(root, "SigComp2011 Offline")
+
+    writers = {}
+    base_dir = os.path.join(root, "trainingSet", "OfflineSignatures")
+    if not os.path.exists(base_dir):
+        base_dir = root
+
+    for script in ("Chinese", "Dutch"):
+        script_dir = os.path.join(base_dir, script, "TrainingSet")
+        if not os.path.exists(script_dir):
+            continue
+
+        gen_dir = os.path.join(script_dir, "Offline Genuine")
+        forg_dir = os.path.join(script_dir, "Offline Forgeries")
+
+        if os.path.exists(gen_dir):
+            for fname in sorted(os.listdir(gen_dir)):
+                if not (fname.lower().endswith(".png") or fname.lower().endswith(".jpg")):
+                    continue
+                prefix = fname.split('_')[0]
+                try:
+                    w_num = int(prefix)
+                    w_id = f"sigcomp11_off_{script}_{w_num:03d}"
+                    writers.setdefault(w_id, _new_writer())["genuine"].append(os.path.join(gen_dir, fname))
+                except ValueError:
+                    continue
+
+        if os.path.exists(forg_dir):
+            for fname in sorted(os.listdir(forg_dir)):
+                if not (fname.lower().endswith(".png") or fname.lower().endswith(".jpg")):
+                    continue
+                prefix = fname.split('_')[0]
+                try:
+                    w_num = int(prefix[-3:])
+                    w_id = f"sigcomp11_off_{script}_{w_num:03d}"
+                    writers.setdefault(w_id, _new_writer())["forged"].append(os.path.join(forg_dir, fname))
+                except ValueError:
+                    continue
+
+    return writers
+
+
 # Registered after definition so parse_dataset can dispatch by directory name.
 _PARSERS = {
     "cedar": parse_cedar,
@@ -761,8 +812,10 @@ _PARSERS = {
     "svc2004_task2": parse_svc2004,
     "mobisig": parse_mobisig,
     "sigcomp2011": parse_sigcomp2011,
+    "sigcomp2011_offline": parse_sigcomp2011_offline,
     "deepsigndb": parse_deepsigndb,
 }
 
-SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig")
+SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig", "sigcomp2011_offline")
 TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011", "deepsigndb")
+
