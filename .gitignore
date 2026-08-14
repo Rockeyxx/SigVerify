@@ -52,4 +52,5 @@ tools/diagnose_error_sources.py
 *.log
 logs/
 
-
+#graphy
+graphify-out/

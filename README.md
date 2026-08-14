@@ -297,6 +297,17 @@ Retraining this same configuration with a different seed gives 9.27%, so read th
 pooled figure as roughly **8.6 to 9.3%**. Differences under about one point are
 not resolvable from a single training run.
 
+### Temporal Branch — Extended Pre-Training with DeepSignDB
+
+When pre-trained on DeepSignDB Development (498 stylus signers combined with SVC2004 + SigComp2011, totaling 311 train signers), the 1-layer temporal branch achieves major accuracy gains across all pen-tablet datasets under the $K=5$ enrolment protocol:
+
+| Temporal Model (1-layer Siamese LSTM) | Train Signers | Pooled EER | SigComp Dutch | SigComp Chinese | SVC2004 | BiosecurID | MCYT | Cohen's d |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Shipped Open Baseline (SVC2004 + SigComp2011) | 62 | 9.41% ± 0.64% | 3.95% ± 0.93% | 7.81% ± 1.34% | 14.21% ± 1.53% | 10.58% | 13.25% | 1.633 |
+| **+ DeepSignDB Development** | **311** | **7.57% ± 0.29%** | **3.54% ± 0.43%** | **8.01% ± 1.50%** | **10.93% ± 1.23%** | **5.35% ± 0.46%** | **6.34% ± 0.36%** | **1.737** |
+
+*Note: Per DeepSignDB license clause 4.4, weights trained on DeepSignDB (`DONT_SHIP_*.pth`) are restricted to local academic evaluation and are excluded from public release binaries.*
+
 ### Datasets and device targets
 
 | Dataset     | Modality | Script           | Role                                      |
