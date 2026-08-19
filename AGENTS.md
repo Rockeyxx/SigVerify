@@ -23,6 +23,10 @@ measured, why a design choice was made, or which experiments failed goes in
 history and rejected arms belong in `SUMMARY.md` even when they explain a number
 the README quotes.
 
+**Before proposing any improvement, read `SUMMARY.md` Part 9 — Negative
+Results.** It records every approach that was run and measured worse, with the
+numbers and the mechanism. Most re-proposed ideas are already in it.
+
 **`docs/` is gitignored, so never link to it from a tracked file.** The link is
 dead for anyone who clones. Inline the fact instead. Full conventions are in the
 `docs-style` skill.
@@ -138,11 +142,36 @@ them, even if they appear in the literature review or older drafts:
   On SVC2004 Task2 (40 writers, seed 42, 3-channel control 19.55% at K=10):
   adding `azimuth + altitude` reaches **11.17% (−8.38)**, adding real `dt`
   reaches **15.17% (−4.38)**. `button` is near-constant (mean 1.0) and carries
-  nothing. Tilt is still banned under Drift Prevention **and** unusable on the
-  XPPen Deco 640, but −8.38 points is a live argument for a different tablet, and
-  the hardware claim is flagged unconfirmed below. `dt` is deployable today.
-  Neither is shipped; `SIGCOMP2011` has neither channel, so both cost the branch
-  84 of its 124 writers.
+  nothing. Tilt is banned under Drift Prevention, unconfirmed on the XPPen Deco
+  640 (flagged below), and **deferred by the user 2026-08-19 until the tablet is
+  actually bought** — do not build for it before then.
+
+- **`dt` is available on both pen corpora and is worth 1.49 pooled points.**
+  The old claim that `SIGCOMP2011` lacks the channel, costing the branch 84 of
+  its 124 writers, was wrong. That archive has no clock column, but it samples at
+  a fixed 200 Hz and records pen-up travel as `force = 0` — 20–36% of every file,
+  5–9 lifts per signature — which `load_sigcomp2011_file` drops. **The length of
+  the dropped run is the elapsed time.** So `dt` is a measured duration in both
+  corpora, not a constant that would merely tag which corpus a sample came from
+  (the failure recorded against padding SigComp with constant tilt). Verified
+  over all 5295 signatures: identical medians (0.1000) and only **0.364 pooled
+  sd** of separation between corpora.
+
+  Six seeds paired against a same-code control: **10.45% → 8.97%, t = 3.25**,
+  beating the shipped branch's 10.26%. `--attention` is independently worth 1.16
+  points, but the two **do not stack** (combined 9.53%, worse than `dt` alone) —
+  they recover the same information. See `SUMMARY.md` Part 9 §10.
+
+  Not shipped: it widens the capture contract from 3 channels to 4. A timestamp
+  is channel 3 of the standard 7 and every tablet emits it, so the Drift
+  Prevention ban — written for channels the hardware cannot deliver — arguably
+  does not apply. That call belongs to the user, not to an agent.
+
+- **`supports_extra_channel()` in `src/data/parsers.py` is the single authority**
+  on which corpus can supply which channel, and `build_writer_samples` raises
+  rather than letting a corpus quietly contribute narrower samples to one merge.
+  SVC2004 Task1 is excluded — its four columns carry neither channel, and asking
+  it for one used to return `[L, 3]` silently.
 - **A temporal checkpoint carries its own channel count *and* whether it derives
   deltas.** `TemporalSiamese.from_state_dict` reads the width from
   `lstm.weight_ih_l0` and the delta policy from the `derive_deltas_flag` buffer,
@@ -179,15 +208,22 @@ but no tilt or azimuth. The 3-channel contract is therefore what the hardware
 can actually deliver, not merely a preference. (not confirmed yet editable)
 
 `src/capture/` is responsible for narrowing whatever the device produces down
-to the 3 channels the model takes. Widening the _captured_ contract is banned
-under Drift Prevention. Deriving further features from those 3 channels inside
-the model is not.
+to the **4** channels the model takes — `X, Y, Pressure, dt`, i.e. `[L, 4]`.
+Widening the _captured_ contract beyond those four is banned under Drift
+Prevention. Deriving further features from them inside the model is not.
+
+**The contract moved from 3 to 4 on 2026-08-19.** `dt` was admitted because it is
+worth 1.49 pooled EER points at t = 3.25 over six paired seeds, and because a
+timestamp is channel 3 of the standard 7 that every digitizer already reports —
+the Drift Prevention ban exists for channels the hardware cannot deliver, which
+this is not. `src/capture/` is still unimplemented; whatever driver lands there
+must emit `[L, 4]`, and a 3-channel capture path will not feed a shipped model.
 
 | Device channel          | Fate                                                                     |
 | ----------------------- | ------------------------------------------------------------------------ |
 | X, Y                    | **Kept** — z-scored per signature (zero mean, unit variance per axis)    |
 | Pressure                | **Kept** — scaled to `[0.0, 1.0]`; absent ⇒ impute `1.0` + degraded flag |
-| Timestamp               | Dropped                                                                  |
+| Timestamp               | **Kept** — as `dt`, the gap to the previous sample, clipped 100 ms → `[0,1]` |
 | Button / contact state  | Dropped — it is pen-down/up, **not** a pressure substitute               |
 | Azimuth, altitude, tilt | Dropped                                                                  |
 
@@ -402,9 +438,31 @@ stand. A single temporal run at 9.61% is a lucky draw from a distribution whose
 mean is about **10.9%** — which also makes the shipped 10.26% an ordinary draw
 rather than a special one.
 
-**Before claiming any temporal arm beat another:** the gap must exceed **3 points**,
-or the arm must be run at three seeds with `--split-seed` held fixed. Two seeds is
-not enough at this spread.
+**Before claiming any temporal arm beat another (revised 2026-08-19):** run
+**six seeds, paired by seed, against a control re-run under current code.**
+
+Three seeds is not enough, and the "3 points or 3 seeds" rule above did real
+damage. On 2026-08-19 it produced three wrong readings on a single arm — a
+claimed variance collapse (F = 42.6 at three seeds, F = 1.20 at six), a claimed
+Chinese regression (+1.29, which vanished to −0.01), and a dismissal of a Dutch
+effect that turned out to be real in variance. Only the pooled result survived,
+and it *grew* with more seeds. Worse, the rule had already caused two genuine
+~1.2–1.5 point effects to be rejected: `dt`, and attention pooling, which was
+deleted from the codebase outright on a 1.12-point gap.
+
+Two further corrections to the table above:
+
+- **sigcomp_Dutch is much noisier than 3.48.** A 6-seed control spans **6.90
+  points** there (3.42% to 10.32%). Treat any Dutch-only claim under ~5 points as
+  unmeasurable.
+- **Individual seeds are not reproducible across sessions,** though the
+  distribution is. Seed 42 of the identical config scored 9.61% on 2026-08-10 and
+  10.62% on 2026-08-19; the 6-seed mean (10.45%) matches the recorded 3-seed mean
+  (10.88%) fine. **Never compare a new arm against numbers recorded in an earlier
+  session** — re-run the control.
+
+Runs cost ~12 minutes each with early stopping, so six seeds is ~75 minutes.
+There is no longer a cost argument for three.
 
 **Before claiming any spatial arm beat another:** the gap must exceed one point, or
 the arm must be run at two seeds with `--split-seed` held fixed so the comparison
@@ -421,6 +479,40 @@ is on identical held-out writers.
   both pen-tablet datasets, and one training run scores 29.62% on the first and
   10.92% on the second. A pooled figure averages those into a number that
   describes neither. Same rule the spatial branch already follows for UTSig.
+
+### Two thresholding protocols — never mix them
+
+Every EER here can be computed two ways, and they are **different measurements**
+that differ by 2-3x on the same model. Added 2026-08-18, after a comparison
+against published SVC2004 numbers turned out to be comparing protocols rather
+than models.
+
+| protocol | how | what it answers |
+| --- | --- | --- |
+| **pooled** (global threshold) | every writer's scores concatenated, one EER | what a system shipping **one** threshold achieves |
+| **per-writer** (user threshold) | EER computed inside each writer, then averaged | what the literature quotes, and what per-user enrolment can reach |
+
+Measured on one model, same writers, same draws:
+
+| | pooled | per-writer |
+| --- | --- | --- |
+| SynSig2Vec, 31 test writers | 8.92% | **4.41%** (median 0.79%) |
+| the same model, SVC2004 only | 18.58% | **9.93%** |
+
+**Rules:**
+
+- **Report both.** `tools/train_synsig2vec.py` prints them side by side per
+  corpus; `per_writer_eer()` is the implementation.
+- **Pooled is the honest headline** for this project, because the deployed system
+  ships a single `τ`. Per-writer exists for comparison against published work.
+- **Never compare across protocols.** A per-writer number placed beside a pooled
+  one makes the model look 2-3x better than it is. Published SVC2004 figures near
+  2-3% — including the competition's own winning 2.89% — are user-threshold
+  numbers. The two MOBISIG rows in `README.md` show the same effect within one
+  paper: 5.81% user-specific against 14.31% global.
+- **Per-writer EER is optimistic.** It is computed post-hoc, choosing each
+  writer's best threshold with the labels known, so it is a best case rather than
+  a fieldable operating point.
 
 ### Merging a New Online Dataset
 

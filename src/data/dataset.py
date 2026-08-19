@@ -209,6 +209,49 @@ def writer_independent_split(writer_ids, train_ratio=0.7, val_ratio=0.15,
     return ids[:t1], ids[t1:t2], ids[t2:]
 
 
+def pin_holdout(writer_ids, pinned, train_ratio=0.7, val_ratio=0.15,
+                test_ratio=0.15, seed=42):
+    """
+    Split writers, forcing `pinned` into the test partition.
+
+    `writer_independent_split` shuffles every ID it is handed, so the partition a
+    writer lands in depends on how many *other* writers are present. That makes
+    it impossible to add a corpus and still compare against an earlier number:
+    adding DeepSignDB's 498 writers relocates the 31 SVC2004/SigComp writers the
+    current result was scored on, and some of them land in training. The run
+    still completes and still reports a plausible EER, so the leak is silent.
+
+    Pinning holds those writers out no matter what else joins the corpus. The
+    remainder is split by the same seeded shuffle, so the unpinned partition is
+    reproducible and unaffected by the pinned set's size.
+
+    An unknown ID raises rather than being ignored: a typo would otherwise hold
+    out nothing and quietly score the model on the wrong writers.
+    """
+    ids = list(writer_ids)
+    unknown = sorted(set(pinned) - set(ids))
+    if unknown:
+        raise ValueError(
+            f"Cannot pin writers absent from the corpus: {', '.join(unknown)}. "
+            f"Check the IDs against the datasets passed to --data-dir."
+        )
+
+    pinned = set(pinned)
+    rest = [w for w in ids if w not in pinned]
+
+    # The pinned writers already occupy the test partition, so the remaining
+    # ratios are renormalized over train and val only. Splitting `rest` by the
+    # original test_ratio as well would hold out far more than asked.
+    denominator = train_ratio + val_ratio
+    if denominator <= 0:
+        raise ValueError("train_ratio + val_ratio must be positive to pin a holdout")
+
+    rng = random.Random(seed)
+    rng.shuffle(rest)
+    cut = int(len(rest) * (train_ratio / denominator))
+    return rest[:cut], rest[cut:], sorted(pinned)
+
+
 def generate_pairs(samples_by_writer, num_genuine_per_writer=5,
                    num_impostor_per_writer=5, seed=42):
     """

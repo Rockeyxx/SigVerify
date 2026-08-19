@@ -7,7 +7,7 @@
 
 > **Senior Design Project (EE 499)** — Department of Electrical and Computer Engineering, King Abdulaziz University (KAU), Jeddah, Saudi Arabia — Team 06
 
-A multimodal biometric verification platform engineering authentic handwritten signature validation through dual Siamese deep network architectures. Merges **offline** (scanned static visual representations) and **online** (dynamic spatial-temporal stroke dynamics) representations via late fusion strategy to yield high-confidence forgery detection.
+A multimodal signature verification system built with dual Siamese deep neural networks. It verifies signatures using both **offline** (scanned images) and **online** (dynamic tablet pen strokes) inputs, combining their scores via late fusion to detect genuine signatures and skilled forgeries.
 
 ---
 
@@ -53,7 +53,7 @@ A multimodal biometric verification platform engineering authentic handwritten s
 │   Spatial Branch     │      │    Temporal Branch        │
 │   Siamese CNN        │      │    Siamese LSTM           │
 │                      │      │                           │
-│  [1, 1, 155, 220]    │      │  [1, L, 3] (X, Y, P)     │
+│  [1, 1, 155, 220]    │      │  [1, L, 4] (X,Y,P,dt)    │
 │       ↓              │      │       ↓                   │
 │  512-d embedding     │      │  128-d embedding          │
 │       ↓              │      │       ↓                   │
@@ -73,21 +73,22 @@ A multimodal biometric verification platform engineering authentic handwritten s
          [Genuine/Forged, Confidence %]
 ```
 
-**Automatic Fallback Protocol:** When only a single input modality is supplied, verification routes to the matching unimodal processing pipeline (α = 1 for spatial image processing, α = 0 for temporal dynamic tracking).
+**Single-Modality Fallback:** When only one input modality is provided, the system automatically routes to that branch ($\alpha = 1$ for spatial images, $\alpha = 0$ for temporal trajectories).
 
 ---
 
 ## Features
 
-- **Dual-Modality Processing Pipeline** — Static image representation analysis paired with dynamic tablet trajectory stroke modeling
-- **Late-Fusion Combination Engine** — Adaptively weighted score combination supporting automatic unimodal fallback
-- **Few-Shot Template Enrollment** — Enables subject registration using one or multiple reference samples, supporting subsequent template additions
-- **Cryptographic Template Security** — Implements AES-256-GCM application-layer encryption for stored vector representations
-- **Privacy-Preserving Architecture** — Stores extracted continuous vector embeddings exclusively, discarding raw biometric input samples
-- **Cross-Platform Compatibility** — Runs natively on Windows and Linux platforms without native compilation requirements
-- **Desktop Graphical Interface** — PyQt5 desktop environment handling enrollment workflows and verification interaction
-- **Audit Verification Logging** — Logged audit records capture every verification transaction for quality assurance
-- **Hardware-Agnostic Abstraction Layer** — Standardized digitizer hardware abstraction layer interfacing platform drivers
+- **Dual-Modality Pipeline** — Combines static image analysis with dynamic pen stroke trajectory modeling
+- **Late-Fusion Engine** — Weighted score fusion with automatic single-modality fallback
+- **Few-Shot Enrollment** — Registers users with one or more reference signatures, supporting template updates
+- **AES-256-GCM Encryption** — Application-layer encryption for stored embedding payloads at rest
+- **Privacy-Preserving Storage** — Persists derived feature embeddings only; raw images and raw coordinate streams are never saved
+- **Cross-Platform** — Runs natively on Windows and Linux with standard prebuilt Python packages
+- **PyQt5 Desktop Interface** — User-friendly UI for enrollment and real-time signature verification
+- **Audit Logging** — Plaintext queryable audit trail capturing every verification event and decision confidence
+- **Digitizer Tablet Layer** — Platform-independent tablet capture abstraction supporting digitizer pads (e.g. XPPen Deco 640)
+
 
 ---
 
@@ -157,9 +158,55 @@ python -m src.gui.app
 ### Input Specifications
 
 - **Spatial (offline):** Standard image formats (JPG, PNG, etc.); pre-processed internally to 155×220 resolution with pixel polarity inversion and normalization.
-- **Temporal (online):** Trajectory coordinates sampled at 100 Hz containing X, Y, Pressure components; standardized via per-signature z-score and unit pressure scaling [0.0, 1.0].
+- **Temporal (online):** Trajectory coordinates sampled at 100 Hz containing X, Y, Pressure and **`dt`** components; X/Y standardized via per-signature z-score, pressure scaled to [0.0, 1.0], `dt` clipped at 100 ms and scaled to [0.0, 1.0]. See [The `dt` channel](#the-dt-channel) below.
 
-Validation gates enforce input standards upon ingestion. Low-resolution visual samples or unnormalized dynamic trajectories are rejected prior to model scoring. Detailed specifications governing input ingestion are defined in [AGENTS.md](AGENTS.md#capture-contract-for-the-capture-and-gui-layers).
+#### The `dt` channel
+
+`dt` is the elapsed time between one recorded sample and the next — the fourth
+temporal channel, added 2026-08-19. The input contract moved from `[1, L, 3]` to
+**`[1, L, 4]`**.
+
+Without it the model assumes every sample is equally spaced, so pauses and pen
+lifts are invisible: a signature written in one fluid motion and one written with
+long hesitations present identically. `dt` is 10 ms while the pen is writing and
+jumps at every stroke boundary. On a real 174-point SigComp2011 signature:
+
+```
+sample:   0    1    2   ...   46   ...   93   ...  100  ...  136  ...  160
+dt (ms):  0   10   10   ...   40   ...   60   ...   40  ...  100  ...   40
+                                ^          ^          ^        ^         ^
+                              pen lifts - 0.28 s of the 1.96 s was in-air
+```
+
+Pause structure is writer-characteristic and hard to forge. A signer reproduces
+their own rhythm from motor memory; a forger is *drawing* a shape, hesitating in
+different places. The outline can be copied closely — the timing much less so.
+
+**Where it comes from per corpus.** SVC2004 and DeepSignDB carry a millisecond
+clock, so `dt` is read directly. SigComp2011 has no clock column, but samples on
+a fixed 200 Hz grid and records pen-up travel as `force = 0` — 20-36% of every
+file, which the loader drops. The *length of the dropped run is the elapsed
+time*. Verified across all 5295 signatures: identical medians (10 ms) and only
+0.364 pooled sd of separation between corpora, so the channel encodes duration
+rather than tagging which dataset a sample came from.
+
+**Measured effect** (six seeds, paired against a control re-run under the same
+code, K=5 enrolment, identical held-out writers):
+
+| | pooled EER | sigcomp_Dutch |
+| --- | --- | --- |
+| `[1, L, 3]` — X, Y, P | 10.45% | 6.43% |
+| **`[1, L, 4]` — X, Y, P, dt** | **8.97%** | **3.94%** |
+
+-1.49 points pooled, t = 3.25, 5 of 6 seeds. Selected by `--temporal-channels`,
+defaulting to `TEMPORAL_CHANNELS` in `config/settings.py`; pass `xyp` to score
+the legacy 3-channel weights. Full result in [SUMMARY.md](SUMMARY.md) Part 9 §10.
+
+> **Capture must supply it.** A timestamp is channel 3 of the standard 7 every
+> digitizer reports, so the hardware can deliver it — but `src/capture/` is still
+> unimplemented, and the driver that lands there has to emit `[L, 4]`.
+
+Validation gates check inputs before processing. Low-resolution image crops or unnormalized dynamic trajectory streams fail the quality checks before model inference. Full specifications for input requirements are documented in [AGENTS.md](AGENTS.md#capture-contract-for-the-capture-and-gui-layers).
 
 #### Enrollment and decision
 
@@ -297,6 +344,17 @@ Retraining this same configuration with a different seed gives 9.27%, so read th
 pooled figure as roughly **8.6 to 9.3%**. Differences under about one point are
 not resolvable from a single training run.
 
+### Temporal Branch — Extended Pre-Training with DeepSignDB
+
+When pre-trained on DeepSignDB Development (498 stylus signers combined with SVC2004 + SigComp2011, totaling 311 train signers), the 1-layer temporal branch achieves major accuracy gains across all pen-tablet datasets under the $K=5$ enrolment protocol:
+
+| Temporal Model (1-layer Siamese LSTM) | Train Signers | Pooled EER | SigComp Dutch | SigComp Chinese | SVC2004 | BiosecurID | MCYT | Cohen's d |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Shipped Open Baseline (SVC2004 + SigComp2011) | 62 | 9.41% ± 0.64% | 3.95% ± 0.93% | 7.81% ± 1.34% | 14.21% ± 1.53% | 10.58% | 13.25% | 1.633 |
+| **+ DeepSignDB Development** | **311** | **7.57% ± 0.29%** | **3.54% ± 0.43%** | **8.01% ± 1.50%** | **10.93% ± 1.23%** | **5.35% ± 0.46%** | **6.34% ± 0.36%** | **1.737** |
+
+*Note: Per DeepSignDB license clause 4.4, weights trained on DeepSignDB (`DONT_SHIP_*.pth`) are restricted to local academic evaluation and are excluded from public release binaries.*
+
 ### Datasets and device targets
 
 | Dataset     | Modality | Script           | Role                                      |
@@ -426,11 +484,27 @@ above — it is not a separate measurement. Update both together.
 | MOBISIG                     | 5.81% EER                   | DTW, a posteriori **user-specific** thresholds          | [9]    | 21.26%            |
 | MOBISIG                     | 14.31% EER                  | global features, **global** threshold                   | [9]    | 21.26%            |
 
-Two datasets carry a real gap: UTSig and SVC2004. Both have a known cause. Every
-published UTSig result is writer-dependent with 10 to 12 references. SVC2004's
-contributors were told not to use their real signatures, and its forgers watched
-the signing process on a monitor and were allowed to practise, which is why one
-temporal model scores 14.21% there and 3.95% on SigComp2011's Dutch pen writers.
+Two datasets carry a real gap: UTSig and SVC2004. Every published UTSig result is
+writer-dependent with 10 to 12 references, which accounts for that one.
+
+SVC2004 is different: it is simply the hardest corpus here, and this was measured
+rather than assumed. An earlier version of this section blamed the collection
+protocol — invented signatures, coached forgers — and predicted a tail of weak
+forgeries that could be curated away. Keeping only the skilled forgeries and
+dropping the "poor" ones was tried, and it did not help, because that tail does
+not exist. Ranking every forgery by DTW distance to its writer's genuines (no
+model involved, so the measurement is not circular) puts SVC2004's **median z at
+1.37** against 1.86 for Chinese and 2.23 for Dutch, with only **26.0%** of its
+forgeries easy (z > 3) versus Dutch's **39.2%**. Its genuines also cluster
+tightest (intra-genuine 0.226) while separating worst (ratio 1.44 against 1.61).
+That is why one temporal model scores 14.21% there and 3.95% on SigComp2011's
+Dutch pen writers.
+
+Note also that the two MOBISIG rows above differ only in thresholding — 5.81%
+with user-specific thresholds against 14.31% with a global one, from the same
+reference. Published SVC2004 figures near 2-3% are user-threshold numbers, so
+they are not directly comparable to the pooled, global-threshold EERs reported
+throughout this project.
 
 Reference [8] reports the SigComp2011 online results per system. Those figures
 are left out here because the tables circulating in secondary sources could not

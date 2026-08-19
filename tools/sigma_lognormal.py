@@ -61,10 +61,23 @@ _ADMISSIBLE = {
 # middle, so it is reliably further away. The exclusion is what keeps the two
 # groups separable — a plain wider uniform would overlap G1 and the ranking
 # objective would have nothing to learn.
+#
+# These radii were once calibrated to real corpus statistics and the result was
+# MEASURABLY WORSE — see docs/plans/2026-08-18-synsig2vec-sota-gap.md. Putting G1
+# on the real genuine spread (1.48 against 1.44) and G2 on the real forgery
+# spread (1.66 against 1.71) narrowed the training margin from 1.15 to 0.18 and
+# pushed pooled EER from 8.78% to 10.62% across three seeds, ranges disjoint. The
+# wide margin is not a defect to fix: the AP loss needs a cleanly *learnable*
+# ordering, and a realistically hard one leaves it almost nothing to rank. Do not
+# re-narrow these without re-running all three seeds.
+#
+# Level 2's scale is 1.0 rather than the paper's per-parameter values because
+# `_draw` used to ignore `scale` whenever an annulus was set. That bug is fixed,
+# so 1.0 is what reproduces the measured 8.78% baseline exactly.
 _LEVELS = {
     1: {"scale": {"D": 0.25, "t0": 0.25, "mu": 0.17, "sigma": 0.25},
         "annulus": None, "theta": 0.10},
-    2: {"scale": {"D": 0.65, "t0": 0.65, "mu": 0.43, "sigma": 0.65},
+    2: {"scale": {"D": 1.0, "t0": 1.0, "mu": 1.0, "sigma": 1.0},
         "annulus": (0.40, 0.65), "theta": 0.20},
 }
 
@@ -385,12 +398,20 @@ def reconstruct(params):
 
 
 def _draw(rng, low, high, scale, annulus):
-    """One distortion variable: inner band for G1, outer annulus for G2."""
+    """
+    One distortion variable: a signed draw from an annulus of the admissible
+    range, or from a plain scaled band when no annulus is given.
+
+    `scale` applies in both branches. It used to be dropped whenever an annulus
+    was set, which silently made level 2's per-parameter scales inert — every
+    parameter got the same band regardless of what the table said.
+    """
     if annulus is None:
         return rng.uniform(scale * low, scale * high)
     inner, outer = annulus
-    return (rng.uniform(outer * low, inner * low) if rng.random() < 0.5
-            else rng.uniform(inner * high, outer * high))
+    return (rng.uniform(scale * outer * low, scale * inner * low)
+            if rng.random() < 0.5
+            else rng.uniform(scale * inner * high, scale * outer * high))
 
 
 def distort(params, level, rng):

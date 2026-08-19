@@ -1,8 +1,8 @@
 """
-Evaluation & Calibration Execution Script — Signature Verification System
+Evaluation & Calibration — Signature Verification System
 
-Independent evaluation and parameter calibration suite. Imports model architecture module
-definitions from src.models and performs statistical error analysis.
+Independent evaluation and threshold calibration script. Loads saved weights,
+computes EER/FAR/FRR metrics, and generates ROC/DET curves and confusion matrices.
 
 CLI Examples:
     python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth --data-dir ./data
@@ -25,13 +25,14 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
-    ALPHA_GRID_STEP, TARGET_FAR, TARGET_FRR,
+    ALPHA_GRID_STEP, TARGET_ACCURACY, TARGET_FAR, TARGET_FRR, TARGET_ACCURACY,
     TEMPORAL_EMBEDDING_DIM,
     TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
 )
+
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, preprocess_image,
@@ -43,12 +44,13 @@ from src.models.siamese import SpatialSiamese, TemporalSiamese
 
 def compute_eer(genuine_scores, impostor_scores):
     """
-    Calculate Equal Error Rate (EER) value from genuine and forgery distribution scores.
+    Compute Equal Error Rate (EER) from genuine and forgery score distributions.
 
-    Identifies decision point where False Acceptance Rate (FAR) intersects False Rejection Rate (FRR).
+    Finds the decision threshold where False Acceptance Rate (FAR) equals False Rejection Rate (FRR).
 
     Returns: (eer: float, threshold_at_eer: float)
     """
+
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
 
@@ -650,8 +652,11 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=42,
                         help="Must match the training seed to reproduce the same split")
+    parser.add_argument("--temporal-channels", default="dt", choices=["xyp", "dt", "tilt"],
+                        help="Temporal channel mode: 'xyp' (3ch), 'dt' (4ch), or 'tilt' (5ch)")
     parser.add_argument("--alpha-sweep", action="store_true", help="Run α grid search")
     return parser.parse_args(argv)
+
 
 
 def dataset_key(writer_id):
@@ -811,6 +816,15 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
     if far > TARGET_FAR:
         # AGENTS.md: when the FAR target is missed, keeping FAR low outranks FRR.
         print(f"  FAR target ({TARGET_FAR*100:.0f}%) MISSED — raise τ to trade FRR for FAR.")
+    if frr > TARGET_FRR:
+        print(f"  FRR target ({TARGET_FRR*100:.0f}%) MISSED — genuine users are being "
+              f"rejected at this τ.")
+    # Accuracy at the EER operating point is 1 - EER by definition, so this is a
+    # restatement of the EER against the Term-1 requirement rather than a fourth
+    # measurement. It is printed because the requirement is written in accuracy.
+    if 1.0 - eer < TARGET_ACCURACY:
+        print(f"  Accuracy target ({TARGET_ACCURACY*100:.0f}%) MISSED — "
+              f"{(1.0 - eer)*100:.2f}% at the EER point.")
 
     report["per_dataset"] = per_dataset_report(branch, model, writer_samples, test_ids,
                                                threshold, args, device)
@@ -834,15 +848,17 @@ def main(argv=None):
     print(f"Hardware Device: {device}")
     print(f"Output directory: {args.output_dir}")
 
-    writer_samples = {}
-    for directory in args.data_dir:
-        merge_datasets(writer_samples, parse_dataset(directory))
+    from scripts.train import build_writer_samples
+    channels = getattr(args, "temporal_channels", "xyp") if args.branch in ("temporal", "fused") else None
+    writer_samples = build_writer_samples(
+        args.data_dir, None if channels in (None, "xyp") else channels)
 
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
               else SPATIAL_SPLIT_RATIOS)
     train_ids, val_ids, test_ids = writer_independent_split(
         sorted(writer_samples), *ratios, seed=args.seed)
+
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.branch in ("spatial", "temporal"):

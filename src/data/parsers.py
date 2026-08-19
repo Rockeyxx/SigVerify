@@ -1,21 +1,21 @@
 """
-Dataset Parser Integrations — Signature Verification System
+Dataset Parsers — Signature Verification System
 
-Standardized parsing layer outputting uniform data structures across diverse biometric datasets:
+Parser layer that outputs a uniform data dictionary format across datasets:
 
     {writer_id: {"genuine": [...], "forged": [...]}}
 
-Writer identifiers utilize structured namespaces (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
-to ensure global uniqueness when aggregating datasets into writer-independent split partitions.
+Writer IDs use namespaced prefixes (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
+to ensure global uniqueness when partitioning writers into independent splits.
 
-Offline visual parsers emit file path strings (lazy loading handled by Dataset classes).
-Online temporal parsers load dynamic [L, 3] float32 arrays into memory.
+Offline parsers return image file paths (loaded lazily by dataset classes).
+Online parsers return memory-resident `[L, 3]` float32 trajectory arrays.
 
-For full dataset schema details, parser design explanations, pressure scaling rules, and
-merging protocols, see:
-  - SUMMARY.md (Part 1 — Reading the datasets)
-  - AGENTS.md (Merging a New Online Dataset & Temporal Branch Constraints)
+For details on parser design, pressure scaling, and dataset schemas, see:
+  - SUMMARY.md (Part 1 — Dataset Parsers)
+  - AGENTS.md (Capture Contract & Temporal Branch Constraints)
 """
+
 
 import csv
 import os
@@ -42,13 +42,16 @@ SVC_PRESSURE_MAX = 1023.0
 SVC_AZIMUTH_MAX = 3600.0
 SVC_ALTITUDE_MAX = 900.0
 # Maximum gap threshold in milliseconds applied to inter-sample duration deltas.
-SVC_MAX_GAP_MS = 100.0
+MAX_GAP_MS = 100.0
 
 # Pressure scaling constant for SigComp2011 datasets (WACOM Intuos3 force resolution).
 SIGCOMP_PRESSURE_MAX = 1023.0
 
 # Decimation step factor aligning 200 Hz SigComp2011 data to 100 Hz target sampling rate.
 SIGCOMP_DECIMATION = 2
+# Milliseconds per row *after* decimation — 200 Hz halved. This is what makes
+# a dropped pen-up run measurable as elapsed time rather than just a hole.
+SIGCOMP_SAMPLE_MS = 10.0
 
 # ─── DeepSignDB ───────────────────────────────────────────────────────
 # Mapping definition matching source database distributions across Development and Evaluation partitions.
@@ -312,7 +315,14 @@ def load_svc2004_file(path, extra_channels=None):
     pressure = rows[:, 6] / SVC_PRESSURE_MAX if rows.shape[1] >= 7 else None
 
     extra = None
-    if extra_channels and rows.shape[1] >= 7:
+    if extra_channels and rows.shape[1] < 7:
+        # Task1 has four columns and can supply neither channel. Returning [L, 3]
+        # here would merge ragged widths into one run instead of failing.
+        raise ValueError(
+            f"{path} has {rows.shape[1]} columns, so it cannot supply "
+            f"'{extra_channels}' — only 7-column Task2 files can."
+        )
+    if extra_channels:
         if extra_channels == "tilt":
             # WACOM reports both in tenths of a degree against documented maxima
             # (azimuth 0-3600, altitude 0-900), so these are fixed divisors, not
@@ -325,7 +335,7 @@ def load_svc2004_file(path, extra_channels=None):
             # so pauses and pen lifts are currently invisible to it.
             gaps = np.zeros(len(rows), dtype=np.float32)
             gaps[1:] = np.diff(rows[:, 2])
-            extra = np.clip(gaps, 0.0, SVC_MAX_GAP_MS)[:, None] / SVC_MAX_GAP_MS
+            extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
         else:
             raise ValueError(f"Unknown extra_channels '{extra_channels}' "
                              "— expected 'tilt', 'dt' or None")
@@ -434,7 +444,7 @@ def parse_mobisig(root=MOBISIG_DIR):
     return writers
 
 
-def load_sigcomp2011_file(path):
+def load_sigcomp2011_file(path, extra_channels=None):
     """
     Load one SigComp2011 `.HWR` file into the model's [L, 3] input.
 
@@ -458,20 +468,49 @@ def load_sigcomp2011_file(path):
     The cost is stated plainly: in-air trajectory is discriminative in the
     online-verification literature, and this discards it. It is discarded
     because the dataset the deployment device matches does not have it.
+
+    `extra_channels="dt"` recovers the one thing the drop throws away that the
+    model can still use: **how long** the pen was in the air. This archive has no
+    clock column, but it samples on a fixed grid, so the elapsed time between two
+    surviving pen-down points is just how far apart they sat before filtering.
+    That is a measured duration, on the same millisecond scale as SVC2004's real
+    timestamps — not a constant standing in for a channel this corpus lacks.
+    The distinction matters: a constant would let the model identify the corpus
+    instead of the writer, which is the failure recorded against padding
+    SigComp with constant tilt.
+
+    `extra_channels="tilt"` is refused rather than ignored. Silently returning
+    three channels would let a five-channel run score this corpus and report a
+    plausible number instead of failing.
     """
     rows = np.loadtxt(path, dtype=np.float32, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
     rows = rows[::SIGCOMP_DECIMATION]
-    rows = rows[rows[:, 2] > 0]
-    if len(rows) < 2:
+    pen_down = np.flatnonzero(rows[:, 2] > 0)
+    if len(pen_down) < 2:
         raise ValueError(
             f"{path} has fewer than 2 pen-down samples after alignment — "
             f"the file carries no usable trajectory."
         )
 
-    return normalize_trajectory(rows[:, :2], rows[:, 2] / SIGCOMP_PRESSURE_MAX)
+    extra = None
+    if extra_channels == "dt":
+        # Row distance before filtering *is* elapsed time on a fixed grid: 10 ms
+        # inside a stroke, one lift's full duration across a dropped run.
+        gaps = np.zeros(len(pen_down), dtype=np.float32)
+        gaps[1:] = np.diff(pen_down) * SIGCOMP_SAMPLE_MS
+        extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+    elif extra_channels is not None:
+        raise ValueError(
+            f"SigComp2011 cannot supply '{extra_channels}' — the archive ships "
+            f"three columns (X, Y, force). Only 'dt' is reconstructable."
+        )
+
+    rows = rows[pen_down]
+    return normalize_trajectory(rows[:, :2], rows[:, 2] / SIGCOMP_PRESSURE_MAX,
+                                extra)
 
 
 def _sigcomp_parts(dirpath, root):
@@ -566,7 +605,7 @@ def _sigcomp_test_entry(filename, writer_dir):
     return writer, "genuine" if genuine else "forged"
 
 
-def parse_sigcomp2011(root=SIGCOMP2011_DIR):
+def parse_sigcomp2011(root=SIGCOMP2011_DIR, extra_channels=None):
     """
     Parse the SigComp2011 **online** writer_samples into the standard writer dict.
 
@@ -614,7 +653,8 @@ def parse_sigcomp2011(root=SIGCOMP2011_DIR):
             writer_id = f"sigcomp_{language}_{writer}"
             writers.setdefault(writer_id, _new_writer())
             writers[writer_id][label].append(
-                load_sigcomp2011_file(os.path.join(dirpath, filename)))
+                load_sigcomp2011_file(os.path.join(dirpath, filename),
+                                      extra_channels))
 
     return writers
 
@@ -633,7 +673,7 @@ def deepsigndb_source(user_id, split):
     return None
 
 
-def load_deepsigndb_file(path, source):
+def load_deepsigndb_file(path, source, extra_channels=None):
     """
     Load one DeepSignDB signature into the model's [L, 3] input.
 
@@ -681,11 +721,27 @@ def load_deepsigndb_file(path, source):
             f"the file carries no usable trajectory."
         )
 
-    return normalize_trajectory(rows[:, :2], rows[:, column] / DEEPSIGN_PRESSURE_MAX)
+    extra = None
+    if extra_channels == "dt":
+        # Unlike SigComp2011 this corpus carries a real millisecond clock, so the
+        # gap is read directly rather than reconstructed from dropped rows. Both
+        # end up on the same scale, which is what lets the three corpora train
+        # one encoder.
+        gaps = np.zeros(len(rows), dtype=np.float32)
+        gaps[1:] = np.diff(rows[:, 2])
+        extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+    elif extra_channels is not None:
+        raise ValueError(
+            f"DeepSignDB cannot supply '{extra_channels}' — only 'dt' is "
+            f"available from its columns."
+        )
+
+    return normalize_trajectory(rows[:, :2], rows[:, column] / DEEPSIGN_PRESSURE_MAX,
+                                extra)
 
 
 def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus",
-                     sources=DEEPSIGN_PEN_SOURCES):
+                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None):
     """
     Parse DeepSignDB: `DeepSignDB/{split}/{modality}/u{id}_{g|s}_*.txt`.
 
@@ -744,7 +800,59 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
 
         writers.setdefault(writer_id, _new_writer())
         writers[writer_id][label].append(
-            load_deepsigndb_file(os.path.join(directory, filename), source))
+            load_deepsigndb_file(os.path.join(directory, filename), source,
+                                 extra_channels))
+
+    return writers
+
+
+def parse_sigcomp2011_offline(root=None):
+    """
+    Parse ICDAR SigComp2011 offline scanned image signature dataset.
+
+    Returns:
+        {writer_id: {"genuine": [img_path_strings], "forged": [img_path_strings]}}
+    """
+    if root is None:
+        root = os.path.join("data", "sigcomp2011_offline")
+    _require_dir(root, "SigComp2011 Offline")
+
+    writers = {}
+    base_dir = os.path.join(root, "trainingSet", "OfflineSignatures")
+    if not os.path.exists(base_dir):
+        base_dir = root
+
+    for script in ("Chinese", "Dutch"):
+        script_dir = os.path.join(base_dir, script, "TrainingSet")
+        if not os.path.exists(script_dir):
+            continue
+
+        gen_dir = os.path.join(script_dir, "Offline Genuine")
+        forg_dir = os.path.join(script_dir, "Offline Forgeries")
+
+        if os.path.exists(gen_dir):
+            for fname in sorted(os.listdir(gen_dir)):
+                if not (fname.lower().endswith(".png") or fname.lower().endswith(".jpg")):
+                    continue
+                prefix = fname.split('_')[0]
+                try:
+                    w_num = int(prefix)
+                    w_id = f"sigcomp11_off_{script}_{w_num:03d}"
+                    writers.setdefault(w_id, _new_writer())["genuine"].append(os.path.join(gen_dir, fname))
+                except ValueError:
+                    continue
+
+        if os.path.exists(forg_dir):
+            for fname in sorted(os.listdir(forg_dir)):
+                if not (fname.lower().endswith(".png") or fname.lower().endswith(".jpg")):
+                    continue
+                prefix = fname.split('_')[0]
+                try:
+                    w_num = int(prefix[-3:])
+                    w_id = f"sigcomp11_off_{script}_{w_num:03d}"
+                    writers.setdefault(w_id, _new_writer())["forged"].append(os.path.join(forg_dir, fname))
+                except ValueError:
+                    continue
 
     return writers
 
@@ -761,8 +869,44 @@ _PARSERS = {
     "svc2004_task2": parse_svc2004,
     "mobisig": parse_mobisig,
     "sigcomp2011": parse_sigcomp2011,
+    "sigcomp2011_offline": parse_sigcomp2011_offline,
     "deepsigndb": parse_deepsigndb,
 }
 
-SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig")
+# Which corpora can supply which extra temporal channel, keyed exactly as
+# `_PARSERS` is — a substring test would let `sigcomp2011_offline` claim its
+# online sibling's channels.
+#
+# Every corpus merged into one run has to return the same width, so a channel is
+# usable only when *every* requested corpus appears here with it. `dt` is the
+# only channel two corpora share: SVC2004 measures it against a real clock,
+# SigComp2011 reconstructs it from the length of the pen-up runs it drops.
+# SVC2004 Task1 is absent because its four columns carry neither.
+EXTRA_CHANNEL_SUPPORT = {
+    "svc2004": frozenset({"tilt", "dt"}),
+    "svc2004_task2": frozenset({"tilt", "dt"}),
+    "sigcomp2011": frozenset({"dt"}),
+    "deepsigndb": frozenset({"dt"}),
+}
+
+
+def is_known_dataset(path):
+    """
+    Whether `path`'s basename dispatches to a parser.
+
+    Callers validating channels need this so an unrecognized directory reports
+    *that*, rather than a confusing complaint about a channel it was never going
+    to supply either way.
+    """
+    return os.path.basename(os.path.normpath(path)).lower() in _PARSERS
+
+
+def supports_extra_channel(path, channel):
+    """Whether the corpus rooted at `path` can supply `channel`."""
+    name = os.path.basename(os.path.normpath(path)).lower()
+    return channel in EXTRA_CHANNEL_SUPPORT.get(name, frozenset())
+
+
+SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig", "sigcomp2011_offline")
 TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011", "deepsigndb")
+

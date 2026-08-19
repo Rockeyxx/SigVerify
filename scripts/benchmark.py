@@ -1,11 +1,8 @@
 """
-EER & Separation Quality Regression Benchmarking Suite — Signature Verification System
+Benchmark Suite — Signature Verification System
 
-Evaluates representation capacity and threshold-independent separation quality (EER metrics, Cohen's d)
+Evaluates representation quality and threshold-independent separation (EER, Cohen's d, margin statistics)
 across held-out test writer partitions.
-
-Distance metrics and pairing routines are imported from scripts.evaluate;
-this module computes effect size separation metrics and margin distribution statistics.
 
 CLI Examples:
     python scripts/benchmark.py --branch spatial \
@@ -19,6 +16,7 @@ CLI Examples:
         --seed 42 --limit-pairs 800
 """
 
+
 import argparse
 import os
 import sys
@@ -30,6 +28,7 @@ from torch.utils.data import Subset, DataLoader
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    TEMPORAL_CHANNELS,
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
@@ -172,7 +171,8 @@ def parse_args(argv=None):
                              "recovers its channel count from the checkpoint but the "
                              "parser cannot, so a mismatch is a loud shape error here "
                              "rather than a plausible wrong number")
-    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"], default="xyp",
+    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"],
+                        default=TEMPORAL_CHANNELS,
                         help="Must match the channels the weights were trained on. "
                              "The model recovers its own width from the checkpoint, "
                              "but the parser cannot, so a mismatch fails loudly here")
@@ -270,13 +270,12 @@ def main(argv=None):
     print(f"Benchmark branch: {args.branch}")
     print(f"Hardware device: {device}")
 
-    writer_samples = {}
-    for directory in args.data_dir:
-        kwargs = ({"extra_channels": args.temporal_channels}
-                  if getattr(args, "temporal_channels", "xyp") != "xyp"
-                  and "svc2004" in os.path.basename(os.path.normpath(directory)).lower()
-                  else {})
-        merge_datasets(writer_samples, parse_dataset(directory, **kwargs))
+    # The same builder training uses, so a channel refused at train time is
+    # refused here too, rather than silently benchmarked at a different width.
+    from scripts.train import build_writer_samples
+    channels = getattr(args, "temporal_channels", "xyp")
+    writer_samples = build_writer_samples(
+        args.data_dir, None if channels == "xyp" else channels)
 
     if args.branch == "temporal" and args.temporal_features == "derived":
         # Same transform, applied the same way as training. Importing it from

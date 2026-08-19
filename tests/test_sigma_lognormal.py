@@ -153,3 +153,51 @@ class TestSynthesize:
         a, _ = synthesize(_spiral(), n_low=2, n_median=2, seed=5)
         b, _ = synthesize(_spiral(), n_low=2, n_median=2, seed=5)
         assert np.allclose(a[0], b[0])
+
+
+def test_draw_applies_scale_inside_the_annulus():
+    """
+    `scale` must act in both branches of `_draw`.
+
+    It used to be dropped whenever an annulus was set, which silently made
+    level 2's per-parameter scales inert: `mu` was declared at 0.43 against
+    `D`'s 0.65 and then drew from the identical band anyway. Halving `scale`
+    must halve the magnitude of the draw.
+    """
+    import numpy as np
+
+    from tools.sigma_lognormal import _draw
+
+    low, high, annulus = -1.0, 1.0, (0.40, 0.65)
+    full = [abs(_draw(np.random.default_rng(i), low, high, 1.0, annulus))
+            for i in range(200)]
+    half = [abs(_draw(np.random.default_rng(i), low, high, 0.5, annulus))
+            for i in range(200)]
+    assert 0.40 <= min(full) and max(full) <= 0.65
+    assert np.allclose(np.array(full) * 0.5, half)
+
+
+def test_distortion_levels_keep_a_learnable_ranking_margin():
+    """
+    The radii are a *data* property and cannot be gated here — but the shape of
+    the table can be.
+
+    Calibrating these to real corpus statistics was tried and measured worse:
+    pooled EER 8.78% -> 10.62% over three seeds, ranges disjoint. The AP loss
+    needs a cleanly learnable ordering, not a realistic one. Level 2 must
+    therefore stay strictly outside level 1's band.
+
+    Level 2's scale is 1.0 by design: `_draw` once ignored `scale` under an
+    annulus, so 1.0 is what reproduces the measured baseline.
+    """
+    from tools.sigma_lognormal import _ADMISSIBLE, _LEVELS
+
+    assert set(_LEVELS) == {1, 2}
+    assert _LEVELS[1]["annulus"] is None, "G1 draws from an inner band"
+    inner, outer = _LEVELS[2]["annulus"]
+    assert 0.0 < inner < outer <= 1.0
+    for level in (1, 2):
+        assert set(_LEVELS[level]["scale"]) == set(_ADMISSIBLE)
+        assert all(0.0 < v <= 1.0 for v in _LEVELS[level]["scale"].values())
+    # G2's inner edge must clear G1's widest draw, or the ranking has no signal.
+    assert max(_LEVELS[1]["scale"].values()) <= inner
