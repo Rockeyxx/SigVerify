@@ -1,13 +1,14 @@
 """
-Training Pipeline Entry Point — Signature Verification System
+Training Pipeline — Signature Verification System
 
-Execution entry point for training dual Siamese neural network architectures.
+Entry point script for training spatial (CNN) and temporal (LSTM) Siamese networks.
 
 CLI Examples:
     OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch spatial --data-dir data/cedar data/bhsig260 data/utsig --epochs 100 --batch-size 32 --num-workers 4 --seed 42
     OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch temporal --data-dir ./data/svc2004
     OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch spatial --resume models/weights/checkpoint_spatial.pth
 """
+
 
 import argparse
 import os
@@ -22,6 +23,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS,
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     CONTRASTIVE_MARGIN, LEARNING_RATE, BATCH_SIZE,
     NUM_EPOCHS, WEIGHT_DECAY, MODEL_WEIGHTS_DIR,
@@ -37,10 +39,15 @@ from config.settings import (
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
-    collate_temporal_pairs, generate_skilled_pairs, writer_independent_split,
+    collate_temporal_pairs, generate_skilled_pairs, pin_holdout,
+    writer_independent_split,
 )
 from src.data.features import NUM_DERIVED_CHANNELS
-from src.data.parsers import merge_datasets, parse_dataset, svc2004_has_pressure
+from src.data.parsers import (
+    EXTRA_CHANNEL_SUPPORT, is_known_dataset, merge_datasets, parse_dataset,
+    supports_extra_channel,
+    svc2004_has_pressure,
+)
 from src.models.siamese import (
     SPATIAL_TRUNKS, SpatialSiamese, TemporalSiamese, ContrastiveLoss,
 )
@@ -174,6 +181,12 @@ def parse_args(argv=None):
     parser.add_argument("--hard-negative-ratio", type=float, default=HARD_NEGATIVE_RATIO,
                         help="Fraction of impostor terms kept by mining. Also never "
                              "swept. 1.0 disables mining")
+    parser.add_argument("--holdout-writers", nargs="+", metavar="ID", default=None,
+                        help="Writer IDs forced into the test partition. Adding a "
+                             "corpus otherwise reshuffles every writer, moving the "
+                             "ones an earlier result was scored on — some into "
+                             "training. Pin them to keep a comparison honest, and "
+                             "pass the same IDs to benchmark.py --writers")
     parser.add_argument("--random-impostor-ratio", type=float,
                         default=RANDOM_IMPOSTOR_RATIO, metavar="R",
                         help="Fraction of the training negative budget drawn from "
@@ -192,11 +205,14 @@ def parse_args(argv=None):
                              "the model. derived: 16 z-scored kinematic time functions "
                              "from src/data/features.py, all computed from those same 3 "
                              "channels, so the capture contract is unchanged")
-    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"], default="xyp",
-                        help="Extra SVC2004 channels to feed the temporal branch. "
-                             "'xyp' is the shipped 3-channel contract; 'tilt' adds "
+    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"],
+                        default=TEMPORAL_CHANNELS,
+                        help="Extra channels to feed the temporal branch. 'xyp' is "
+                             "the shipped 3-channel contract; 'tilt' adds "
                              "azimuth+altitude (SVC2004 only, and the XPPen reports "
-                             "neither); 'dt' adds real inter-sample time")
+                             "neither); 'dt' adds inter-sample time, measured from "
+                             "SVC2004's clock and reconstructed on SigComp2011 from "
+                             "the pen-up runs it drops, so both corpora can supply it")
     parser.add_argument("--pressure-dropout", type=float, default=None,
                         help="Override PRESSURE_DROPOUT_RATE for this run (temporal "
                              "branch only). A Task1 dataset still forces 0, since "
@@ -237,11 +253,19 @@ def build_writer_samples(data_dirs, extra_channels=None):
     """Parse and merge every requested dataset into one writer-keyed mapping."""
     writer_samples = {}
     for directory in data_dirs:
-        # Only SVC2004 declares extra channels; asking any other parser for them
-        # would raise, which is why this is conditional rather than always passed.
-        kwargs = ({"extra_channels": extra_channels}
-                  if extra_channels and "svc2004" in os.path.basename(
-                      os.path.normpath(directory)).lower() else {})
+        # Refusing here is the point. Every corpus in one run must return the
+        # same width, so a corpus that cannot supply the channel has to stop the
+        # run rather than quietly contribute narrower samples to the same merge.
+        kwargs = {}
+        if extra_channels:
+            if is_known_dataset(directory) and not supports_extra_channel(
+                    directory, extra_channels):
+                raise ValueError(
+                    f"'{directory}' cannot supply the '{extra_channels}' channel. "
+                    f"Corpora that can: "
+                    f"{', '.join(sorted(c for c, ch in EXTRA_CHANNEL_SUPPORT.items() if extra_channels in ch))}."
+                )
+            kwargs = {"extra_channels": extra_channels}
         parsed = parse_dataset(directory, **kwargs)
         print(f"  {directory}: {len(parsed)} writers")
         merge_datasets(writer_samples, parsed)
@@ -497,7 +521,12 @@ def main(argv=None):
     print("Discovering writers:")
     writer_samples = build_writer_samples(
         args.data_dir,
-        extra_channels=None if args.temporal_channels == "xyp" else args.temporal_channels)
+        # The flag is temporal-only. A spatial run reaches image corpora that
+        # have no trajectory at all, so forwarding it there would ask CEDAR for
+        # a timing channel and abort a perfectly valid run.
+        extra_channels=(None if args.branch != "temporal"
+                        or args.temporal_channels == "xyp"
+                        else args.temporal_channels))
 
     # Each branch keeps its own documented default; --augment/--no-augment override.
     if args.augment is None:
@@ -516,8 +545,15 @@ def main(argv=None):
     # reshuffles the partition and the two runs score different people, which
     # measures split variance and training variance together — useless for
     # deciding whether one arm actually beat another.
-    train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(writer_samples), *ratios, seed=args.split_seed)
+    if args.holdout_writers:
+        train_ids, val_ids, test_ids = pin_holdout(
+            sorted(writer_samples), args.holdout_writers, *ratios,
+            seed=args.split_seed)
+        print(f"  Holding out {len(test_ids)} pinned test writers so this run stays "
+              f"comparable to results scored on them")
+    else:
+        train_ids, val_ids, test_ids = writer_independent_split(
+            sorted(writer_samples), *ratios, seed=args.split_seed)
     print(f"  Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.branch == "spatial":
@@ -553,7 +589,7 @@ def main(argv=None):
                     has_pressure = False
 
         channel_count = (NUM_DERIVED_CHANNELS if args.temporal_features == "derived"
-                         else {"xyp": 3, "dt": 4, "tilt": 5}[args.temporal_channels])
+                         else TEMPORAL_CHANNEL_WIDTHS[args.temporal_channels])
         if args.temporal_features == "derived":
             print(f"  Temporal features: derived ({channel_count}ch) — kinematic time "
                   f"functions computed from the [L, 3] capture contract, not captured")

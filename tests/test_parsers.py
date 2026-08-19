@@ -23,7 +23,9 @@ from config.settings import (
     UTSIG_DIR,
 )
 from src.data.parsers import (
+    SIGCOMP_DECIMATION,
     deepsigndb_source,
+    load_sigcomp2011_file,
     load_svc2004_file,
     merge_datasets,
     parse_bhsig260,
@@ -758,3 +760,102 @@ class TestMergeDatasets:
         merge_datasets(merge_datasets(backward, b), a)
         assert len(forward["svc_1"]["genuine"]) == len(backward["svc_1"]["genuine"]) == 3
         assert len(forward["svc_1"]["forged"]) == len(backward["svc_1"]["forged"]) == 2
+
+
+class TestTemporalGapChannel:
+    """
+    The `dt` channel has to mean the same thing in every corpus that supplies it.
+
+    SVC2004 carries a real millisecond clock. SigComp2011 carries none, but it
+    samples on a fixed 200 Hz grid and records pen-up travel as force = 0, so the
+    time the pen spent in the air is exactly the length of the run the loader
+    drops. Recovering it that way is what makes the channel comparable across the
+    two corpora instead of a constant that merely identifies which one a sample
+    came from.
+    """
+
+    # Eight decimated rows: down, down, three in the air, down, down, down.
+    # Written at 200 Hz, so exactly every second raw row survives decimation.
+    DECIMATED_FORCE = [500, 500, 0, 0, 0, 500, 500, 500]
+
+    def _write_hwr(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            for i, force in enumerate(self.DECIMATED_FORCE):
+                for _ in range(SIGCOMP_DECIMATION):
+                    fh.write(f"{27000 + i} {24000 + 2 * i} {force}\n")
+
+    def _write_svc_task2(self, path, timestamps):
+        with open(path, "w") as fh:
+            fh.write(f"{len(timestamps)}\n")
+            for i, t in enumerate(timestamps):
+                fh.write(f"{3000 + i} {2000 + 2 * i} {t} 1 1800 450 512\n")
+
+    def test_dt_measures_the_dropped_pen_up_run(self, tmp_path):
+        """A three-sample lift is a four-row hop, so 40 ms at 10 ms per row."""
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+
+        out = load_sigcomp2011_file(path, extra_channels="dt")
+
+        assert out.shape == (5, 4)
+        np.testing.assert_allclose(out[:, 3], [0.0, 0.1, 0.4, 0.1, 0.1], atol=1e-6)
+
+    def test_both_corpora_scale_the_same_pause_identically(self, tmp_path):
+        """
+        The point of the channel is cross-corpus comparability. A 40 ms pause has
+        to arrive at the model as the same number whether it was measured by
+        SVC2004's clock or reconstructed from SigComp2011's dropped samples.
+        """
+        hwr = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(hwr)
+        svc = os.path.join(tmp_path, "U1S1.TXT")
+        self._write_svc_task2(svc, [0, 10, 50, 60, 70])
+
+        from_sigcomp = load_sigcomp2011_file(hwr, extra_channels="dt")[:, 3]
+        from_svc = load_svc2004_file(svc, extra_channels="dt")[:, 3]
+
+        np.testing.assert_allclose(from_sigcomp, from_svc, atol=1e-6)
+
+    def test_dt_varies_within_a_signature(self, tmp_path):
+        """
+        Guards the failure already on the do-not-retry list: padding a corpus
+        with a constant channel teaches the model which corpus a sample came
+        from, not who wrote it. A dt that never moves is exactly that pad.
+        """
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+
+        dt = load_sigcomp2011_file(path, extra_channels="dt")[:, 3]
+
+        assert dt.std() > 0.0
+
+    def test_sigcomp_refuses_tilt(self, tmp_path):
+        """
+        The archive ships three columns. Tilt cannot be invented from them, and
+        silently returning three channels would let a 5-channel run score a
+        4-channel corpus without ever failing.
+        """
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+
+        with pytest.raises(ValueError, match="tilt"):
+            load_sigcomp2011_file(path, extra_channels="tilt")
+
+    def test_default_stays_three_channels(self, tmp_path):
+        """Every existing checkpoint reads [L, 3]; the default must not move."""
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+
+        assert load_sigcomp2011_file(path).shape == (5, 3)
+
+    def test_parse_threads_the_channel_through(self, tmp_path):
+        """The width has to survive the walk, not just the single-file loader."""
+        root = os.path.join(tmp_path, "sigcomp2011")
+        self._write_hwr(os.path.join(root, "trainingSet", "OnlineSignatures",
+                                     "Dutch", "TrainingSet", "Online Genuine",
+                                     "001_01.HWR"))
+
+        writers = parse_sigcomp2011(root, extra_channels="dt")
+
+        assert writers["sigcomp_Dutch_001"]["genuine"][0].shape[1] == 4

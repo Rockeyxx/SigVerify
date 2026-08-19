@@ -9,6 +9,7 @@ import torch
 
 from config.settings import SPATIAL_INPUT_SIZE
 from src.data.dataset import (
+    pin_holdout,
     SpatialSignatureDataset,
     TemporalSignatureDataset,
     collate_temporal_pairs,
@@ -674,3 +675,65 @@ def _one_pair(tmp_path, identical=False):
         cv2.imwrite(path, img)
         paths.append(path)
     return [(paths[0], paths[1])], [1.0]
+
+
+class TestPinnedHoldout:
+    """
+    `pin_holdout` exists so a corpus can be *added* without moving the writers a
+    previous result was measured on.
+
+    `writer_independent_split` shuffles every ID it is given, so adding 498
+    DeepSignDB writers silently relocates the 31 SVC2004/SigComp writers the
+    current numbers were scored against — some of them into training. That is
+    both a broken comparison and writer leakage, and it is invisible: the run
+    completes and reports a plausible EER.
+    """
+
+    def test_pinned_writers_all_land_in_test(self):
+        ids = [f"w{i}" for i in range(100)]
+        pinned = ["w3", "w41", "w77"]
+
+        train, val, test = pin_holdout(ids, pinned, 0.5, 0.25, 0.25, seed=42)
+
+        assert set(pinned) <= set(test)
+        assert not set(pinned) & set(train)
+        assert not set(pinned) & set(val)
+
+    def test_partitions_stay_disjoint_and_complete(self):
+        ids = [f"w{i}" for i in range(100)]
+
+        train, val, test = pin_holdout(ids, ["w5", "w6"], 0.5, 0.25, 0.25, seed=42)
+
+        assert set(train) | set(val) | set(test) == set(ids)
+        assert len(train) + len(val) + len(test) == len(ids)
+        for a, b in ((train, val), (train, test), (val, test)):
+            assert not set(a) & set(b)
+
+    def test_unpinned_writers_split_reproducibly(self):
+        ids = [f"w{i}" for i in range(100)]
+
+        first = pin_holdout(ids, ["w5"], 0.5, 0.25, 0.25, seed=7)
+        again = pin_holdout(ids, ["w5"], 0.5, 0.25, 0.25, seed=7)
+
+        assert first == again
+
+    def test_adding_writers_does_not_move_the_pinned_ones(self):
+        """The whole point: a bigger corpus must not disturb the held-out set."""
+        small = [f"w{i}" for i in range(50)]
+        big = small + [f"deep{i}" for i in range(400)]
+        pinned = ["w3", "w41"]
+
+        _, _, test_small = pin_holdout(small, pinned, 0.5, 0.25, 0.25, seed=42)
+        train_big, val_big, test_big = pin_holdout(big, pinned, 0.5, 0.25, 0.25, seed=42)
+
+        assert set(pinned) <= set(test_small) & set(test_big)
+        assert not set(pinned) & (set(train_big) | set(val_big))
+
+    def test_unknown_pinned_writer_is_an_error(self):
+        """
+        A typo in a writer ID would otherwise hold out nothing at all and report
+        a number scored on the wrong writers.
+        """
+        with pytest.raises(ValueError, match="ghost"):
+            pin_holdout([f"w{i}" for i in range(10)], ["w1", "ghost"],
+                        0.5, 0.25, 0.25, seed=42)
