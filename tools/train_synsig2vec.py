@@ -120,6 +120,25 @@ def _with_pressure(synthetic, source):
     return np.hstack([synthetic[:, :2], source[:, 2:3]])
 
 
+def save_weights(model, args, channels, path, epoch):
+    """
+    Single writer for both the periodic checkpoint and the final save.
+
+    Written to a temporary file and renamed, because `torch.save` is not atomic
+    and every checkpoint overwrites the same path: a crash partway through the
+    write would leave a truncated file *and* destroy the last good checkpoint,
+    which is exactly the failure this is here to survive. `os.replace` is atomic
+    on POSIX.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    torch.save({"state_dict": model.state_dict(), "features": args.features,
+                "channels": channels, "seed": args.seed,
+                "split_seed": args.split_seed, "epochs": args.epochs,
+                "epoch": epoch}, tmp)
+    os.replace(tmp, path)
+
+
 def train(model, cache, writer_samples, feature_fn, channels, args, device):
     """
     Algorithm 1 of the paper: draw a genuine, synthesise G1 and G2, rank them.
@@ -138,6 +157,7 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
     rng = np.random.default_rng(args.seed)
 
     model.train()
+    starved = set()
     for epoch in range(1, args.epochs + 1):
         order = rng.permutation(len(writers))
         losses = []
@@ -163,7 +183,22 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
 
             template = _rebuild(params)
             g1 = [_rebuild(distort(params, 1, rng)) for _ in range(args.n_low)]
-            g2 = [_rebuild(distort(params, 2, rng)) for _ in range(args.n_median)]
+            if args.oracle_supervised:
+                forged = writer_samples[writer].get("forged", [])
+                if len(forged) < 2:
+                    # Each writer gets exactly one step per epoch, and the
+                    # forged count never changes, so this drops the writer from
+                    # the run entirely. Report it — the whole point of the
+                    # oracle is a like-for-like ceiling on a known population.
+                    starved.add(writer)
+                    continue
+                picks = rng.choice(len(forged),
+                                   size=min(args.n_median, len(forged)),
+                                   replace=False)
+                g2 = [forged[int(i)] for i in picks]
+            else:
+                g2 = [_rebuild(distort(params, 2, rng))
+                      for _ in range(args.n_median)]
 
             batch, lengths = _to_tensor([template] + g1 + g2, device,
                                         feature_fn, channels)
@@ -180,10 +215,22 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            losses.append(float(loss))
+            losses.append(loss.detach().item())
 
         if losses:
-            print(f"epoch {epoch:3d}/{args.epochs}  loss {np.mean(losses):.4f}")
+            print(f"epoch {epoch:3d}/{args.epochs}  loss {np.mean(losses):.4f}",
+                  flush=True)
+        # A 1000-epoch run is ~2.7 h. One that dies at epoch 90 with the weights
+        # only written after the final eval leaves nothing behind — that has
+        # already happened once.
+        if args.save and args.checkpoint_every \
+                and epoch % args.checkpoint_every == 0:
+            save_weights(model, args, channels, args.save + ".ckpt", epoch)
+
+    if starved:
+        print(f"  WARNING: {len(starved)}/{len(writers)} writers never trained "
+              f"(fewer than 2 forgeries): {', '.join(sorted(starved)[:5])}"
+              f"{' ...' if len(starved) > 5 else ''}")
     return model
 
 
@@ -242,6 +289,40 @@ def evaluate(model, writer_samples, writer_ids, args, device, feature_fn,
     return separation_report(scores, labels)
 
 
+def per_writer_eer(model, writer_samples, writer_ids, args, device, feature_fn,
+                   channels):
+    """
+    User-threshold EER: the EER *inside* each writer, then averaged.
+
+    This is the number the SVC2004 literature reports, and it is not the same
+    measurement as the pooled EER used everywhere else in this repository. Pooled
+    scoring puts every writer on one global threshold, so a writer whose
+    embeddings sit far from the origin drags the whole operating point; per-writer
+    scoring gives each signer their own threshold, which is what a deployed system
+    with per-user enrolment actually has. The competition's own 2.89% was measured
+    this way, so comparing our pooled figure against it compares two protocols and
+    concludes the model is bad.
+
+    Reported alongside pooled, never instead of it — pooled is the honest number
+    for a system that must ship one threshold.
+    """
+    embedded = embed_writers_sig2vec(model, writer_samples, writer_ids, device,
+                                     feature_fn, channels)
+    per = []
+    for writer in sorted(writer_ids):
+        draws = []
+        for trial in range(args.enroll_trials):
+            scores, labels = enrolled_trial_scores(
+                {writer: embedded[writer]}, args.enroll, seed=args.seed + trial)
+            if not len(scores) or labels.min() == labels.max():
+                continue
+            eer, _ = compute_eer(scores[labels == 1], scores[labels == 0])
+            draws.append(eer)
+        if draws:
+            per.append(float(np.mean(draws)))
+    return per
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="SynSig2Vec (clean-room) — tools-only experiment")
@@ -259,6 +340,18 @@ def parse_args(argv=None):
                    help="'velocity' is the AAAI paper's 3 channels (vx, vy, |v|); "
                         "'full' is the 12 time functions the same authors use in "
                         "their later work, pressure included")
+    p.add_argument("--deepsign", action="store_true",
+                   help="Merge DeepSignDB Development/stylus (498 writers). Weights "
+                        "trained with this are DONT_SHIP under licence clause 4.4")
+    p.add_argument("--save", type=str, default=None,
+                   help="Persist the trained weights, so a new metric never "
+                        "costs another training run")
+    p.add_argument("--oracle-supervised", action="store_true",
+                   help="DIAGNOSTIC ONLY. Train with real skilled forgeries as "
+                        "negatives to establish the backbone's ceiling. Breaks the "
+                        "forgery-free premise; never ship a model trained this way")
+    p.add_argument("--checkpoint-every", type=int, default=25,
+                   help="Write --save + '.ckpt' every N epochs. 0 disables it.")
     p.add_argument("--enroll", type=int, default=NUM_ENROLLMENT_REFERENCES)
     p.add_argument("--enroll-trials", type=int, default=ENROLLMENT_TRIALS)
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
@@ -277,8 +370,12 @@ def main(argv=None):
     writer_samples = {}
     for directory in args.data_dir:
         merge_datasets(writer_samples, parse_dataset(directory))
+    if args.deepsign:
+        from src.data.parsers import parse_deepsigndb
+        merge_datasets(writer_samples, parse_deepsigndb())
 
     split_seed = args.split_seed if args.split_seed is not None else args.seed
+    args.split_seed = split_seed
     train_ids, val_ids, test_ids = writer_independent_split(
         sorted(writer_samples), *TEMPORAL_SPLIT_RATIOS, seed=split_seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test")
@@ -301,12 +398,29 @@ def main(argv=None):
         for writer in test_ids:
             groups.setdefault(dataset_of(writer), []).append(writer)
         if len(groups) > 1:
+            print(f"  {'corpus':<18} {'wr':>3}   {'pooled':>8}  {'per-writer':>10}")
             for name, writers in sorted(groups.items()):
                 sub = evaluate(model, writer_samples, writers, args, device,
                                feature_fn, channels, quiet=True)
+                # Both protocols side by side: pooled is what this repo ships on,
+                # per-writer is what the SVC2004 literature quotes.
+                per = per_writer_eer(model, writer_samples, writers, args, device,
+                                     feature_fn, channels)
                 if sub:
-                    print(f"  {name:<18} {len(writers):>3} writers   "
-                          f"EER {sub['eer'] * 100:>6.2f}%")
+                    user = f"{np.mean(per) * 100:>9.2f}%" if per else "        -"
+                    print(f"  {name:<18} {len(writers):>3}   "
+                          f"{sub['eer'] * 100:>7.2f}%  {user}")
+
+    everyone = per_writer_eer(model, writer_samples, test_ids, args, device,
+                              feature_fn, channels)
+    if everyone:
+        print(f"  ALL per-writer (user threshold): {np.mean(everyone) * 100:.2f}%  "
+              f"median {np.median(everyone) * 100:.2f}%  "
+              f"over {len(everyone)} writers")
+
+    if args.save:
+        save_weights(model, args, channels, args.save, args.epochs)
+        print(f"  saved {args.save}")
     return report
 
 
