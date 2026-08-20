@@ -24,7 +24,7 @@ class VerificationPanel(QWidget):
         self.verifyButton.clicked.connect(self.run_verification)
 
         # نخفي مؤشر degraded-mode افتراضيًا (فاضي لين يصير فعلي)
-        self.degradedModeIndicator.setText("")
+        self.degradedModeIndicator.setText("⚠ Degraded Mode: Spatial Only (no dynamic input device connected)")
 
     def select_probe_image(self):
         """يفتح نافذة اختيار ملف حقيقية ويعرض اسم الملف المختار"""
