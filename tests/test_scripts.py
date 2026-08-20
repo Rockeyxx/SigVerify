@@ -128,7 +128,11 @@ class TestTrainMain:
         task1 = _make_svc_fixture(str(tmp_path / "svc2004_task1"), with_pressure=False)
         task2 = _make_svc_fixture(str(tmp_path / "svc2004_task2"), with_pressure=True)
 
+        # Pinned to xyp on both arms. Task1's four columns cannot supply `dt`, and
+        # the ablation is only meaningful if both halves see the same channels —
+        # so the shipped default is overridden here rather than compared across.
         common = ["--branch", "temporal", "--epochs", "1", "--batch-size", "4",
+                  "--temporal-channels", "xyp",
                   "--weights-dir", weights, "--num-workers", "0", "--seed", "42"]
         history_a = train_main(["--data-dir", task1] + common)
         history_b = train_main(["--data-dir", task2] + common)
@@ -138,6 +142,21 @@ class TestTrainMain:
 
         # Same seed ⇒ identical writer partition, so the two EERs are comparable.
         assert history_a["split"] == history_b["split"]
+
+    def test_spatial_run_ignores_the_temporal_channel_default(self, tmp_path):
+        """
+        `--temporal-channels` defaults to the shipped `dt`, but it is temporal-only.
+        A spatial run reaches image corpora that have no trajectory at all, so
+        forwarding it would ask CEDAR for a timing channel and abort a valid run.
+        """
+        cedar = _make_cedar_fixture(str(tmp_path / "cedar"))
+
+        history = train_main(["--branch", "spatial", "--data-dir", cedar,
+                              "--epochs", "1", "--batch-size", "4",
+                              "--num-workers", "0", "--seed", "42",
+                              "--weights-dir", str(tmp_path / "w")])
+
+        assert history["split"]
 
     def test_unknown_dataset_directory_raises(self, tmp_path):
         """An unrecognized dataset name must fail loudly, not train on nothing."""

@@ -9,15 +9,89 @@ import torch
 
 from config.settings import SPATIAL_INPUT_SIZE
 from src.data.dataset import (
+    pin_holdout,
     SpatialSignatureDataset,
     TemporalSignatureDataset,
     collate_temporal_pairs,
     generate_skilled_pairs,
     augment_trajectory,
+    augment_image,
     preprocess_image,
     quality_gate,
+    trajectory_gate,
     writer_independent_split,
 )
+
+
+class TestTrajectoryGate:
+    """
+    The temporal counterpart to the image quality gate.
+
+    These exist because the failure this catches is silent and confident: an
+    unnormalized trajectory scored 0.4888 (Forged) where the same signature
+    normalized scored 0.9370 (Genuine), with nothing flagged.
+    """
+
+    def _normalized(self, n=100, seed=0):
+        """A trajectory shaped the way `normalize_trajectory` leaves one."""
+        rng = np.random.default_rng(seed)
+        xy = rng.normal(0.0, 1.0, size=(n, 2))
+        xy = (xy - xy.mean(axis=0)) / xy.std(axis=0)
+        pressure = rng.uniform(0.1, 1.0, size=(n, 1))
+        return np.hstack([xy, pressure]).astype(np.float32)
+
+    def test_normalized_trajectory_passes(self):
+        passed, details = trajectory_gate(self._normalized())
+        assert passed, details
+
+    def test_raw_device_units_are_rejected(self):
+        """The exact failure measured against the deployed path."""
+        raw = self._normalized()
+        raw[:, 0] = raw[:, 0] * 1200 + 8000
+        raw[:, 1] = raw[:, 1] * 1200 + 6000
+        raw[:, 2] = raw[:, 2] * 1023
+
+        passed, details = trajectory_gate(raw)
+        assert not passed
+        assert "z-scored" in details["error"]
+
+    def test_offset_but_scaled_trajectory_is_rejected(self):
+        """A capture that centred nothing still fails — the mean gives it away."""
+        shifted = self._normalized()
+        shifted[:, :2] += 4.0
+        passed, _ = trajectory_gate(shifted)
+        assert not passed
+
+    def test_pressure_outside_unit_range_is_rejected(self):
+        """Scaling by the file's own max instead of the device max lands here."""
+        traj = self._normalized()
+        traj[:, 2] = traj[:, 2] * 1023
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "Pressure" in details["error"]
+
+    def test_flat_unit_pressure_passes(self):
+        """
+        P = 1.0 everywhere is the legitimate pressure-blind device, which
+        `verify` reports as degraded. It must not be mistaken for bad input.
+        """
+        traj = self._normalized()
+        traj[:, 2] = 1.0
+        assert trajectory_gate(traj)[0]
+
+    def test_wrong_shape_is_rejected(self):
+        assert not trajectory_gate(np.zeros((50, 2), dtype=np.float32))[0]
+        assert not trajectory_gate(np.zeros(50, dtype=np.float32))[0]
+
+    def test_too_short_is_rejected(self):
+        assert not trajectory_gate(self._normalized(n=4))[0]
+
+    def test_non_finite_is_rejected(self):
+        traj = self._normalized()
+        traj[10, 0] = np.nan
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "NaN" in details["error"]
 
 
 class TestPreprocessImage:
@@ -174,7 +248,8 @@ class TestGenerateSkilledPairs:
         """
         pairs, labels = generate_skilled_pairs(self._writers(),
                                                num_genuine_per_writer=5,
-                                               num_forged_per_writer=5)
+                                               num_forged_per_writer=5,
+                                               random_impostor_ratio=0.0)
         forgery_pairs = [p for p, y in zip(pairs, labels) if y == 0]
         assert len(forgery_pairs) > 0
 
@@ -186,7 +261,7 @@ class TestGenerateSkilledPairs:
 
     def test_genuine_pairs_are_same_writer_genuines(self):
         """Every label-1 pair must be two genuine samples from one writer."""
-        pairs, labels = generate_skilled_pairs(self._writers())
+        pairs, labels = generate_skilled_pairs(self._writers(), random_impostor_ratio=0.0)
         for (s1, s2), y in zip(pairs, labels):
             if y == 1:
                 assert s1.split("_")[0] == s2.split("_")[0]
@@ -204,8 +279,82 @@ class TestGenerateSkilledPairs:
         """A writer with no forgeries cannot form skilled pairs and must be dropped."""
         writers = self._writers(n=2)
         writers["w0"]["forged"] = []
-        pairs, labels = generate_skilled_pairs(writers)
+        pairs, labels = generate_skilled_pairs(writers, random_impostor_ratio=0.0)
         assert all("w0" not in s1 for s1, _ in pairs)
+
+    def test_random_impostor_ratio_introduces_cross_writer_negatives(self):
+        """
+        At a non-zero ratio some negatives must pair two *different* writers'
+        genuine signatures.
+
+        This is the one supervision signal the skilled-only pairing never gives:
+        measured on the shipped spatial model, a stranger's genuine CEDAR
+        signature sat at mean distance 0.048 against 0.038 for the same writer's,
+        so the encoder had learned a genuine/forged axis rather than an identity
+        one.
+        """
+        pairs, labels = generate_skilled_pairs(self._writers(),
+                                               num_genuine_per_writer=4,
+                                               num_forged_per_writer=4,
+                                               random_impostor_ratio=0.5)
+        negatives = [p for p, y in zip(pairs, labels) if y == 0]
+        cross = [(a, b) for a, b in negatives if a.split("_")[0] != b.split("_")[0]]
+
+        assert cross, "no cross-writer negatives generated at ratio 0.5"
+        for s1, s2 in cross:
+            assert s1.split("_")[1].startswith("g")
+            assert s2.split("_")[1].startswith("g"), (
+                f"random impostor must be another writer's genuine, got {s2}")
+
+    def test_random_impostors_come_out_of_the_negative_budget(self):
+        """
+        The ratio re-composes the negatives; it must not add to them.
+
+        Class balance is the confound this guards: if random impostors were
+        appended rather than substituted, an arm testing the ratio would also be
+        testing a 1:2 positive-negative imbalance, and the two effects could not
+        be separated.
+        """
+        kwargs = dict(num_genuine_per_writer=4, num_forged_per_writer=4)
+        _, baseline = generate_skilled_pairs(self._writers(), **kwargs, random_impostor_ratio=0.0)
+        _, mixed = generate_skilled_pairs(self._writers(),
+                                          random_impostor_ratio=0.5, **kwargs)
+
+        assert mixed.count(0) == baseline.count(0)
+        assert mixed.count(1) == baseline.count(1)
+        assert mixed.count(0) == mixed.count(1)
+
+    def test_random_impostor_never_pairs_a_writer_with_themselves(self):
+        """A 'random impostor' drawn from the same writer would be a positive mislabelled 0."""
+        pairs, labels = generate_skilled_pairs(self._writers(n=3),
+                                               num_genuine_per_writer=6,
+                                               num_forged_per_writer=6,
+                                               random_impostor_ratio=1.0)
+        for (s1, s2), y in zip(pairs, labels):
+            if y == 0:
+                assert s1.split("_")[0] != s2.split("_")[0]
+
+    def test_ratio_zero_reproduces_the_skilled_only_pairing(self):
+        """
+        Ratio 0 must give the pre-2026-08-04 pairing: every negative a same-writer
+        forgery, no cross-writer pair anywhere.
+
+        This used to compare against the *default*, which was 0.0. The default is
+        now 0.5 — the shipped value — so the assertion has to name the behaviour
+        it wants rather than inherit it.
+        """
+        pairs, labels = generate_skilled_pairs(self._writers(), seed=7,
+                                               random_impostor_ratio=0.0)
+        for (s1, s2), y in zip(pairs, labels):
+            if y == 0:
+                assert s1.split("_")[0] == s2.split("_")[0]
+                assert s2.split("_")[1].startswith("f")
+
+    def test_ratio_outside_zero_to_one_is_rejected(self):
+        """A ratio above 1 would silently produce a negative skilled budget."""
+        for bad in (-0.1, 1.5):
+            with pytest.raises(ValueError, match="random_impostor_ratio"):
+                generate_skilled_pairs(self._writers(), random_impostor_ratio=bad)
 
     def test_deterministic_under_seed(self):
         """Same seed must reproduce the same pair list (ISO/IEC 23053 reproducibility)."""
@@ -378,20 +527,23 @@ class TestSkilledPairBalance:
     def test_scarce_forgeries_cap_the_genuine_arm_too(self):
         pairs, labels = generate_skilled_pairs(
             self._dataset(27, 6), num_genuine_per_writer=276,
-            num_forged_per_writer=276, seed=42)
+            num_forged_per_writer=276, seed=42,
+                random_impostor_ratio=0.0)
         assert labels.count(1) == labels.count(0)
 
     def test_balanced_datasets_are_unaffected(self):
         """CEDAR's 24/24 supports 276 of each; this must not reduce it."""
         pairs, labels = generate_skilled_pairs(
             self._dataset(24, 24), num_genuine_per_writer=276,
-            num_forged_per_writer=276, seed=42)
+            num_forged_per_writer=276, seed=42,
+                random_impostor_ratio=0.0)
         assert labels.count(1) == labels.count(0) == 276
 
     def test_small_budget_still_honoured(self):
         pairs, labels = generate_skilled_pairs(
             self._dataset(27, 6), num_genuine_per_writer=40,
-            num_forged_per_writer=40, seed=42)
+            num_forged_per_writer=40, seed=42,
+                random_impostor_ratio=0.0)
         assert labels.count(1) == labels.count(0) == 40
 
 
@@ -444,3 +596,144 @@ class TestSpatialInputGeometry:
         monkeypatch.setattr(ds, "SPATIAL_SQUARE_PAD", False)
         out = ds.preprocess_image(self._wide_image(tmp_path), target_size=(220, 155))
         assert out.shape == (1, 155, 220)
+
+
+class TestSpatialAugmentation:
+    """
+    Augmentation exists to add variety the 301 training writers do not hold.
+    It is only safe if every warp is label-preserving and confined to training.
+    """
+
+    @staticmethod
+    def _image():
+        # Ink high on a black field, matching what preprocess_image emits.
+        img = np.zeros((1, 155, 220), dtype=np.float32)
+        img[0, 60:95, 30:190] = 1.0
+        return img
+
+    def test_output_keeps_shape_dtype_and_range(self):
+        out = augment_image(self._image(), np.random.default_rng(0))
+        assert out.shape == (1, 155, 220)
+        assert out.dtype == np.float32
+        # Warping must not push values outside the normalized range the model
+        # was trained to expect.
+        assert out.min() >= 0.0 and out.max() <= 1.0
+
+    def test_it_actually_changes_the_image(self):
+        source = self._image()
+        out = augment_image(source, np.random.default_rng(0))
+        assert not np.array_equal(out, source)
+
+    def test_the_source_image_is_never_modified_in_place(self):
+        source = self._image()
+        before = source.copy()
+        augment_image(source, np.random.default_rng(0))
+        assert np.array_equal(source, before)
+
+    def test_ink_survives_the_warp(self):
+        # A warp that rotated or scaled the signature off-canvas would produce a
+        # blank image whose "genuine" label is a lie.
+        for seed in range(25):
+            out = augment_image(self._image(), np.random.default_rng(seed))
+            assert out.sum() > 0.0, f"seed {seed} erased the signature"
+
+    def test_background_stays_black(self):
+        # borderValue must match the inverted polarity. A white fill would read
+        # as a large constant of ink to every convolution.
+        out = augment_image(self._image(), np.random.default_rng(3))
+        assert out[0, 0, 0] == 0.0 and out[0, -1, -1] == 0.0
+
+    def test_different_seeds_give_different_warps(self):
+        a = augment_image(self._image(), np.random.default_rng(1))
+        b = augment_image(self._image(), np.random.default_rng(2))
+        assert not np.array_equal(a, b)
+
+    def test_dataset_leaves_images_untouched_when_augment_is_off(self, tmp_path):
+        pairs, labels = _one_pair(tmp_path)
+        plain = SpatialSignatureDataset(pairs, labels, augment=False)
+        first, second = plain[0][0], plain[0][1]
+        again = SpatialSignatureDataset(pairs, labels, augment=False)[0]
+        # Deterministic without augmentation, so repeat reads must agree.
+        assert torch.equal(first, again[0]) and torch.equal(second, again[1])
+
+    def test_dataset_augments_both_sides_independently(self, tmp_path):
+        # Warping a pair identically would leave the distance between the two
+        # embeddings unchanged, which teaches the metric nothing.
+        pairs, labels = _one_pair(tmp_path, identical=True)
+        item = SpatialSignatureDataset(pairs, labels, augment=True)[0]
+        assert not torch.equal(item[0], item[1])
+
+
+def _one_pair(tmp_path, identical=False):
+    """Write one genuine pair to disk and return it in (pairs, labels) form."""
+    paths = []
+    for i in range(2):
+        img = np.full((155, 220), 255, dtype=np.uint8)
+        offset = 0 if identical else i * 4
+        cv2.rectangle(img, (30 + offset, 60), (190, 95), 0, -1)
+        path = str(tmp_path / f"sig_{i}.png")
+        cv2.imwrite(path, img)
+        paths.append(path)
+    return [(paths[0], paths[1])], [1.0]
+
+
+class TestPinnedHoldout:
+    """
+    `pin_holdout` exists so a corpus can be *added* without moving the writers a
+    previous result was measured on.
+
+    `writer_independent_split` shuffles every ID it is given, so adding 498
+    DeepSignDB writers silently relocates the 31 SVC2004/SigComp writers the
+    current numbers were scored against — some of them into training. That is
+    both a broken comparison and writer leakage, and it is invisible: the run
+    completes and reports a plausible EER.
+    """
+
+    def test_pinned_writers_all_land_in_test(self):
+        ids = [f"w{i}" for i in range(100)]
+        pinned = ["w3", "w41", "w77"]
+
+        train, val, test = pin_holdout(ids, pinned, 0.5, 0.25, 0.25, seed=42)
+
+        assert set(pinned) <= set(test)
+        assert not set(pinned) & set(train)
+        assert not set(pinned) & set(val)
+
+    def test_partitions_stay_disjoint_and_complete(self):
+        ids = [f"w{i}" for i in range(100)]
+
+        train, val, test = pin_holdout(ids, ["w5", "w6"], 0.5, 0.25, 0.25, seed=42)
+
+        assert set(train) | set(val) | set(test) == set(ids)
+        assert len(train) + len(val) + len(test) == len(ids)
+        for a, b in ((train, val), (train, test), (val, test)):
+            assert not set(a) & set(b)
+
+    def test_unpinned_writers_split_reproducibly(self):
+        ids = [f"w{i}" for i in range(100)]
+
+        first = pin_holdout(ids, ["w5"], 0.5, 0.25, 0.25, seed=7)
+        again = pin_holdout(ids, ["w5"], 0.5, 0.25, 0.25, seed=7)
+
+        assert first == again
+
+    def test_adding_writers_does_not_move_the_pinned_ones(self):
+        """The whole point: a bigger corpus must not disturb the held-out set."""
+        small = [f"w{i}" for i in range(50)]
+        big = small + [f"deep{i}" for i in range(400)]
+        pinned = ["w3", "w41"]
+
+        _, _, test_small = pin_holdout(small, pinned, 0.5, 0.25, 0.25, seed=42)
+        train_big, val_big, test_big = pin_holdout(big, pinned, 0.5, 0.25, 0.25, seed=42)
+
+        assert set(pinned) <= set(test_small) & set(test_big)
+        assert not set(pinned) & (set(train_big) | set(val_big))
+
+    def test_unknown_pinned_writer_is_an_error(self):
+        """
+        A typo in a writer ID would otherwise hold out nothing at all and report
+        a number scored on the wrong writers.
+        """
+        with pytest.raises(ValueError, match="ghost"):
+            pin_holdout([f"w{i}" for i in range(10)], ["w1", "ghost"],
+                        0.5, 0.25, 0.25, seed=42)

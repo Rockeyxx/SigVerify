@@ -146,9 +146,33 @@ class TestVerify:
 
     def _temporal_setup(self):
         model = TemporalSiamese(embedding_dim=128).eval()
-        trajectory = np.random.default_rng(1).standard_normal((50, 3)).astype(np.float32)
+        # Pressure must be in [0, 1] — it is scaled by a fixed device maximum,
+        # not z-scored like X/Y. The old fixture drew all three columns from a
+        # standard normal, so its pressure column held negatives and values above
+        # 1: input no capture layer could produce, and which `trajectory_gate`
+        # now correctly rejects.
+        rng = np.random.default_rng(1)
+        xy = rng.standard_normal((50, 2))
+        pressure = rng.uniform(0.0, 1.0, size=(50, 1))
+        trajectory = np.hstack([xy, pressure]).astype(np.float32)
         references = [embed(model, trajectory, "temporal")]
         return model, references, trajectory
+
+    def test_unnormalized_trajectory_raises_instead_of_scoring(self):
+        """
+        The defect this gate exists for: raw device units used to produce a
+        confident *wrong* verdict, not an error. Measured on real data — one
+        writer's own signature scored 0.9370 normalized and 0.4888 in tablet
+        units, so the system rejected a genuine user and said nothing was amiss.
+        """
+        model, references, trajectory = self._temporal_setup()
+        raw = trajectory.copy()
+        raw[:, 0] = raw[:, 0] * 1200 + 8000
+        raw[:, 1] = raw[:, 1] * 1200 + 6000
+        raw[:, 2] = raw[:, 2] * 1023
+
+        with pytest.raises(ValueError, match="z-scored"):
+            verify(temporal=(model, references, raw))
 
     def test_returns_the_gui_contract(self):
         model, references, path = self._spatial_setup()
@@ -180,12 +204,17 @@ class TestVerify:
         assert result["routing"] == "multimodal"
         os.unlink(spath)
 
-    def test_failed_quality_gate_marks_degraded(self):
+    def test_failed_quality_gate_drops_the_spatial_branch(self):
         """
-        The orphaned quality gate must actually run on the spatial path.
+        A probe that fails the quality gate must be excluded from fusion, not
+        merely flagged.
 
-        Uses the multimodal route deliberately: that path is otherwise
-        `degraded=False`, so a True here can only come from the quality gate.
+        This assertion was inverted deliberately: it previously required the
+        gate-failing image to keep contributing to a `multimodal` verdict, which
+        let a blurry or undersized capture carry the same weight as a clean one
+        and flip the decision. The README's Capture Contract says the gate
+        rejects such an image, so the route must collapse to the modality that
+        still has evidence.
         """
         smodel, srefs, good_path = self._spatial_setup()
         tmodel, trefs, traj = self._temporal_setup()
@@ -193,12 +222,26 @@ class TestVerify:
 
         clean = verify(spatial=(smodel, srefs, good_path), temporal=(tmodel, trefs, traj))
         assert clean["degraded"] is False
+        assert clean["routing"] == "multimodal"
 
         gated = verify(spatial=(smodel, srefs, bad_path), temporal=(tmodel, trefs, traj))
-        assert gated["routing"] == "multimodal"
+        assert gated["routing"] == "temporal_only"
         assert gated["degraded"] is True
 
         os.unlink(good_path)
+        os.unlink(bad_path)
+
+    def test_failed_quality_gate_with_no_other_modality_raises(self):
+        """
+        Spatial-only verification of a gate-failing image has no evidence left,
+        so it must raise rather than return a confident verdict built on nothing.
+        """
+        smodel, srefs, _ = self._spatial_setup()
+        bad_path = _blank_image()
+
+        with pytest.raises(ValueError, match="No usable evidence"):
+            verify(spatial=(smodel, srefs, bad_path))
+
         os.unlink(bad_path)
 
     def test_nearest_reference_matching(self):

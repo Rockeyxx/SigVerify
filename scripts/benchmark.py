@@ -1,29 +1,21 @@
 """
-EER Regression Harness — Signature Verification System
+Benchmark Suite — Signature Verification System
 
-Judges a model on threshold-independent separation quality (EER, Cohen's d)
-over held-out test writers, instead of FAR/FRR at a fixed decision threshold.
-Reading FAR/FRR at a fixed tau is what masked the P-001 accuracy failure
-(docs/PROBLEMS_FACED.md): a 98.58% FAR looked like a broken model, but the
-real defect was tau=0.5 sitting exactly on the contrastive margin — a
-calibration bug, not evidence about the embedding quality itself. EER and
-Cohen's d slide the threshold out of the picture entirely, so this harness is
-the regression gate for representation changes.
+Evaluates representation quality and threshold-independent separation (EER, Cohen's d, margin statistics)
+across held-out test writer partitions.
 
-All distance/pairing/EER math is imported from scripts.evaluate — this module
-only adds effect size and margin diagnostics on top of it.
-
-Usage:
-    python scripts/benchmark.py --branch spatial \\
-        --weights models/weights/spatial_cnn.pth \\
+CLI Examples:
+    python scripts/benchmark.py --branch spatial \
+        --weights models/weights/spatial_cnn.pth \
         --data-dir data/cedar data/bhsig260 data/utsig --seed 42
 
-    # Fast, reproducible run over a fixed-size sample of the test pairs:
-    python scripts/benchmark.py --branch spatial \\
-        --weights models/weights/spatial_cnn.pth \\
-        --data-dir data/cedar data/bhsig260 data/utsig \\
+    # Fast evaluation run over a designated pair sample count:
+    python scripts/benchmark.py --branch spatial \
+        --weights models/weights/spatial_cnn.pth \
+        --data-dir data/cedar data/bhsig260 data/utsig \
         --seed 42 --limit-pairs 800
 """
+
 
 import argparse
 import os
@@ -36,6 +28,7 @@ from torch.utils.data import Subset, DataLoader
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    TEMPORAL_CHANNELS,
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
@@ -45,9 +38,10 @@ from tqdm.auto import tqdm
 from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               enrolled_trial_scores, enrolled_writer_count,
                               load_branch_model, score_pairs,
-                              writer_dependent_scores)
+                              writer_dependent_scores, znorm_trial_scores)
 from src.data.dataset import writer_independent_split
 from src.data.parsers import merge_datasets, parse_dataset
+
 
 
 def cohens_d(impostor_distances, genuine_distances):
@@ -172,6 +166,16 @@ def parse_args(argv=None):
     parser.add_argument("--limit-pairs", type=int, default=None,
                         help="Subsample the test pairs to this many for a fast, reproducible "
                              "run instead of scoring the full held-out split")
+    parser.add_argument("--temporal-features", choices=["raw", "derived"], default="raw",
+                        help="Must match what the weights were trained with. The model "
+                             "recovers its channel count from the checkpoint but the "
+                             "parser cannot, so a mismatch is a loud shape error here "
+                             "rather than a plausible wrong number")
+    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"],
+                        default=TEMPORAL_CHANNELS,
+                        help="Must match the channels the weights were trained on. "
+                             "The model recovers its own width from the checkpoint, "
+                             "but the parser cannot, so a mismatch fails loudly here")
     parser.add_argument("--enroll", type=int, nargs="?", const=NUM_ENROLLMENT_REFERENCES,
                         default=None, metavar="K",
                         help="Score under the enrollment protocol the field uses and "
@@ -184,6 +188,14 @@ def parse_args(argv=None):
                         help="Independent reference draws to average, reported as "
                              "mean +/- std. Which K signatures a user happens to enroll "
                              "moves the result, so a single draw is not the protocol")
+    parser.add_argument("--znorm", action="store_true",
+                        help="Standardize each probe distance by that writer's own "
+                             "reference spread before thresholding. Requires --enroll. "
+                             "Scores become negated z-scores rather than S = 1/(1+d), "
+                             "so EER is comparable but thresholds do not carry across. "
+                             "The Cohen's d and mean-distance columns are MEANINGLESS "
+                             "under this flag: separation_report recovers d = 1/S - 1, "
+                             "which assumes the 1/(1+d) scoring. Read EER only.")
     parser.add_argument("--wd-classifier", action="store_true",
                         help="Fit a per-user linear SVM on the enrolled references, "
                              "with other writers' genuines as negatives, instead of "
@@ -191,6 +203,11 @@ def parse_args(argv=None):
                              "is the writer-dependent stage published systems use. "
                              "Requires --enroll. Scores are SVM margins, not "
                              "S = 1/(1+d), so thresholds do not carry across")
+    parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
+                        metavar=("TRAIN", "VAL", "TEST"),
+                        help="Must match the --split-ratios the weights were trained "
+                             "with. The split is derived from the ratios, so a "
+                             "mismatch scores the model on writers it trained on.")
     parser.add_argument("--writers", nargs="+", default=None,
                         help="Score only these writer IDs instead of the whole held-out "
                              "split. For comparing two models trained on different dataset "
@@ -203,6 +220,13 @@ def parse_args(argv=None):
         parser.error("--wd-classifier requires --enroll: the per-user classifier is "
                      "fitted on the enrolled reference set, which single-pair scoring "
                      "does not have")
+
+    if args.znorm and not args.enroll:
+        parser.error("--znorm requires --enroll: the normalizing statistics come from "
+                     "the enrolled reference set, which single-pair scoring does not have")
+
+    if args.znorm and args.wd_classifier:
+        parser.error("--znorm and --wd-classifier are two different scorers; pick one")
 
     return args
 
@@ -246,13 +270,23 @@ def main(argv=None):
     print(f"Benchmark branch: {args.branch}")
     print(f"Hardware device: {device}")
 
-    writer_samples = {}
-    for directory in args.data_dir:
-        merge_datasets(writer_samples, parse_dataset(directory))
+    # The same builder training uses, so a channel refused at train time is
+    # refused here too, rather than silently benchmarked at a different width.
+    from scripts.train import build_writer_samples
+    channels = getattr(args, "temporal_channels", "xyp")
+    writer_samples = build_writer_samples(
+        args.data_dir, None if channels == "xyp" else channels)
+
+    if args.branch == "temporal" and args.temporal_features == "derived":
+        # Same transform, applied the same way as training. Importing it from
+        # train.py rather than duplicating it means the two can never drift.
+        from scripts.train import apply_derived_features
+        print("Deriving kinematic time functions to match the checkpoint's channel count")
+        apply_derived_features(writer_samples)
 
     # Re-derives the exact partition training used — same writer list, same seed.
-    ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
-              else SPATIAL_SPLIT_RATIOS)
+    ratios = tuple(args.split_ratios) if args.split_ratios else (
+        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
     train_ids, val_ids, test_ids = writer_independent_split(
         sorted(writer_samples), *ratios, seed=args.seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
@@ -303,7 +337,12 @@ def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="bench
     print(f"Enrollment protocol: {args.enroll} references x {args.enroll_trials} draws, "
           f"{decision}, {scoreable} of {len(writer_ids)} writers scoreable")
 
-    scorer = writer_dependent_scores if args.wd_classifier else enrolled_trial_scores
+    if args.wd_classifier:
+        scorer = writer_dependent_scores
+    elif args.znorm:
+        scorer = znorm_trial_scores
+    else:
+        scorer = enrolled_trial_scores
 
     trials = []
     for trial in range(args.enroll_trials):
