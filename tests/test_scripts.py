@@ -255,3 +255,34 @@ class TestEvaluateMain:
         ])
         assert report["threshold_tuned_on"] == "validation"
         assert report["reported_on"] == "test"
+
+
+class TestFusedChannelDispatch:
+    """
+    `extra_channels` is a temporal-only concept, and a fused run lists image and
+    trajectory corpora in one `--data-dir`.
+
+    `build_writer_samples` used to offer the channel to every directory, so with
+    the shipped default (`--temporal-channels dt`) the first spatial corpus
+    aborted the run: `--branch fused` was unrunnable out of the box.
+    """
+
+    def test_spatial_corpora_are_not_asked_for_a_temporal_channel(self, tmp_path):
+        from scripts.train import build_writer_samples
+
+        cedar = tmp_path / "cedar"
+        _make_cedar_fixture(str(cedar), num_writers=3)
+        svc = tmp_path / "svc2004_task2"
+        _make_svc_fixture(str(svc), num_writers=3, with_pressure=True)
+
+        merged = build_writer_samples([str(cedar), str(svc)], extra_channels="dt")
+        assert len(merged) == 6
+
+    def test_a_temporal_corpus_that_cannot_supply_the_channel_still_raises(self, tmp_path):
+        """The width-consistency guard must survive the fix that unblocked fusion."""
+        from scripts.train import build_writer_samples
+
+        task1 = tmp_path / "svc2004_task1"
+        _make_svc_fixture(str(task1), num_writers=2)
+        with pytest.raises(ValueError, match="cannot supply"):
+            build_writer_samples([str(task1)], extra_channels="tilt")

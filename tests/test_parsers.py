@@ -210,6 +210,23 @@ class TestParseSVC2004:
         assert len(writers["svc_1"]["genuine"]) == 2
         assert len(writers["svc_1"]["forged"]) == 2
 
+    def test_the_genuine_forged_boundary_is_between_20_and_21(self, tmp_path):
+        """
+        The label rule is `sample <= 20`, so 20 and 21 are the only two indices
+        that can distinguish it from `sample < 20`. The fixture above uses
+        1, 2, 21, 22 and never touches the boundary, so an off-by-one there
+        would mislabel a genuine signature as a forgery and still pass.
+        """
+        root = str(tmp_path)
+        os.makedirs(root, exist_ok=True)
+        for sample in (20, 21):
+            with open(os.path.join(root, f"U1S{sample}.TXT"), "w") as fh:
+                fh.write("2\n100 200 1000 0\n110 210 1010 1\n")
+
+        writers = parse_svc2004(root)
+        assert len(writers["svc_1"]["genuine"]) == 1, "sample 20 must be genuine"
+        assert len(writers["svc_1"]["forged"]) == 1, "sample 21 must be forged"
+
     def test_returns_arrays_not_paths(self, tmp_path):
         """Temporal samples are loaded eagerly — sequences are small."""
         writers = parse_svc2004(self._fixture(str(tmp_path)))

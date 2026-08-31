@@ -24,7 +24,7 @@ Three properties are load-bearing here.
 import numpy as np
 import pytest
 
-from src.data.features import derive_time_functions
+from src.data.features import NUM_DERIVED_CHANNELS, derive_time_functions
 
 
 def _signature(length=120, seed=0):
@@ -51,7 +51,10 @@ class TestDeriveTimeFunctions:
 
     def test_widens_the_channel_set(self):
         out = derive_time_functions(_signature())
-        assert out.shape[1] > 6, "must add more than the existing (X,Y,P)+deltas"
+        # Pin the exact count, not just "more than the input". The module
+        # exports NUM_DERIVED_CHANNELS so callers can size a model without
+        # running it; emitting 7 or 30 would break that and still satisfy > 6.
+        assert out.shape[1] == NUM_DERIVED_CHANNELS, "must add more than the existing (X,Y,P)+deltas"
 
     def test_output_is_finite_for_a_normal_signature(self):
         assert np.all(np.isfinite(derive_time_functions(_signature())))

@@ -18,6 +18,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint_sequential
 
+# Class defaults are sourced from config so a bare `SpatialSiamese()` cannot
+# silently build something other than what ships. `grad_checkpoint` is
+# deliberately NOT defaulted from `SPATIAL_GRAD_CHECKPOINT`: it is a
+# training-time memory tactic, and `from_state_dict` must keep producing an
+# inference model with it off.
+from config.settings import (
+    SPATIAL_CONV_DROPOUT, SPATIAL_EMBEDDING_DIM, SPATIAL_FC_HIDDEN,
+    SPATIAL_HEAD_DROPOUT, SPATIAL_TRUNK,
+    TEMPORAL_EMBEDDING_DIM, TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
+    PRESSURE_DROPOUT_RATE,
+)
+
 
 # Convolutional trunks the spatial branch can be built with. Each stage is
 # (out_channels, kernel_size, pool_after, dropout_after) and expands to
@@ -77,9 +89,9 @@ class SpatialSiamese(nn.Module):
     ahead of the embedding projection.
     """
 
-    def __init__(self, embedding_dim=512, head_dropout=0.0,
-                 trunk="compact", conv_dropout=0.0, fc_hidden=0,
-                 grad_checkpoint=0):
+    def __init__(self, embedding_dim=SPATIAL_EMBEDDING_DIM, head_dropout=SPATIAL_HEAD_DROPOUT,
+                 trunk=SPATIAL_TRUNK, conv_dropout=SPATIAL_CONV_DROPOUT,
+                 fc_hidden=SPATIAL_FC_HIDDEN, grad_checkpoint=0):
         super().__init__()
         if trunk not in SPATIAL_TRUNKS:
             raise ValueError(f"Unknown trunk '{trunk}' — expected one of {sorted(SPATIAL_TRUNKS)}")
@@ -244,9 +256,9 @@ class TemporalSiamese(nn.Module):
     remains inside the model's learned feature distribution.
     """
 
-    def __init__(self, input_features=3, hidden_size=256,
-                 num_layers=2, embedding_dim=128, pressure_dropout=0.4,
-                 derive_deltas=True):
+    def __init__(self, input_features=3, hidden_size=TEMPORAL_HIDDEN_SIZE,
+                 num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
+                 pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.pressure_dropout = pressure_dropout
