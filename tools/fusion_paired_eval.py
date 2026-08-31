@@ -36,11 +36,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.evaluate import (alpha_grid_search, compute_eer, compute_far_frr,
                               embed_samples,
-                              load_branch_model, similarity_from_distance)
+                              load_branch_model, similarity_from_distance, enrollment_draw,)
+from config.settings import MODEL_WEIGHTS_DIR, SIGCOMP2011_DIR, SIGCOMP2011_OFFLINE_DIR
 from src.data.parsers import load_sigcomp2011_file
 
-_OFF = "data/sigcomp2011_offline/trainingSet/OfflineSignatures"
-_ON = "data/sigcomp2011/trainingSet/OnlineSignatures"
+_OFF = os.path.join(SIGCOMP2011_OFFLINE_DIR, "trainingSet", "OfflineSignatures")
+_ON = os.path.join(SIGCOMP2011_DIR, "trainingSet", "OnlineSignatures")
 
 
 def _decode(fname):
@@ -125,8 +126,7 @@ def paired_scores_per_writer(embedded, num_references=5, seed=42):
         forg_sp, forg_tp = embedded[wid]["forged"]
         if len(gen_sp) < num_references + 1 or len(forg_sp) == 0:
             continue
-        refs = rng.choice(len(gen_sp), size=num_references, replace=False)
-        probes = np.setdiff1d(np.arange(len(gen_sp)), refs)
+        refs, probes = enrollment_draw(rng, len(gen_sp), num_references)
 
         def nearest(probe_bank, ref_bank, idx):
             d = np.linalg.norm(probe_bank[idx][:, None, :] - ref_bank[refs][None, :, :],
@@ -197,8 +197,7 @@ def paired_scores(embedded, num_references=5, seed=42):
         if len(gen_sp) < num_references + 1 or len(forg_sp) == 0:
             continue
 
-        refs = rng.choice(len(gen_sp), size=num_references, replace=False)
-        probes = np.setdiff1d(np.arange(len(gen_sp)), refs)
+        refs, probes = enrollment_draw(rng, len(gen_sp), num_references)
 
         def nearest(probe_bank, ref_bank, idx):
             d = np.linalg.norm(probe_bank[idx][:, None, :] - ref_bank[refs][None, :, :],
@@ -243,9 +242,9 @@ def error_correlation(sp_gen, sp_imp, tp_gen, tp_imp):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--spatial-weights", default="models/weights/spatial_cnn.pth")
+    p.add_argument("--spatial-weights", default=os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
     p.add_argument("--temporal-weights",
-                   default="models/weights/temporal_lstm_mobisig_svc.pth")
+                   default=os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm_mobisig_svc.pth"))
     p.add_argument("--enroll", type=int, default=5)
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     p.add_argument("--repeats", type=int, default=25)

@@ -68,12 +68,19 @@ class TestSpatialTrunks:
         assert [c.out_channels for c in convs] == [96, 256, 384, 256]
         assert [c.kernel_size[0] for c in convs] == [11, 5, 3, 3]
 
-    def test_group_norm_divides_every_trunk_width(self):
-        """GroupNorm groups must divide the channel count, or construction throws."""
-        for trunk in SPATIAL_TRUNKS:
-            for module in SpatialSiamese(trunk=trunk).features:
-                if isinstance(module, torch.nn.GroupNorm):
-                    assert module.num_channels % module.num_groups == 0
+    def test_group_norm_uses_four_channels_per_group_capped_at_32(self):
+        """
+        Pin `_group_norm`'s actual rule, not divisibility.
+
+        The previous version asserted `num_channels % num_groups == 0`, which
+        `nn.GroupNorm.__init__` already raises on, so it could not fail: a
+        constructor that always returned `groups=1` would have satisfied it.
+        """
+        expected = {"compact": [8, 16, 32, 32, 32], "wide": [24, 32, 32, 32]}
+        for trunk, want in expected.items():
+            got = [m.num_groups for m in SpatialSiamese(trunk=trunk).features
+                   if isinstance(m, torch.nn.GroupNorm)]
+            assert got == want, f"{trunk}: {got} != {want}"
 
     def test_unknown_trunk_rejected(self):
         """A typo'd trunk name fails loudly instead of silently falling back."""
@@ -158,16 +165,40 @@ class TestTemporalSiamese:
         x[:, :, 2] = torch.rand(4, 30) * 5  # Non-trivial raw pressure readings
         emb = model.encode(x.clone())
         assert emb.shape == (4, 128)
+        # Shape alone cannot show the pressure channel was touched. At rate 1.0
+        # every sample must be flattened to the imputation value.
+        assert torch.allclose(model._apply_pressure_dropout(x.clone())[:, :, 2],
+                              torch.ones(4, 30))
 
     def test_pressure_dropout_eval(self):
-        """Ensure pressure dropout is strictly disabled during inference evaluation."""
+        """
+        Pressure dropout must not fire under `.eval()`.
+
+        The previous version encoded the same input twice and asserted the two
+        embeddings matched. At `pressure_dropout=1.0` the substitution is
+        deterministic, so both calls agreed whether or not the `self.training`
+        gate existed: verified by deleting `and self.training` from
+        `_apply_pressure_dropout`, after which that test still passed.
+
+        Compare against a model that cannot substitute instead. Eval mode must
+        reproduce the `pressure_dropout=0.0` result exactly, and must differ from
+        what the same weights produce in training mode.
+        """
         model = TemporalSiamese(pressure_dropout=1.0)
-        model.eval()
+        reference = TemporalSiamese(pressure_dropout=0.0)
+        reference.load_state_dict(model.state_dict())
+
         x = torch.randn(2, 30, 3)
-        x[:, :, 2] = 5.0  # Constant pressure value
-        emb1 = model.encode(x.clone())
-        emb2 = model.encode(x.clone())
-        assert torch.allclose(emb1, emb2)
+        x[:, :, 2] = 0.25          # NOT the imputation value, so substitution shows
+
+        model.eval(); reference.eval()
+        with torch.no_grad():
+            assert torch.allclose(model.encode(x.clone()), reference.encode(x.clone())), \
+                "eval-mode encode must match a model with dropout off"
+
+            model.train()
+            assert not torch.allclose(model.encode(x.clone()), reference.encode(x.clone())), \
+                "training-mode encode must differ, or the substitution never fired"
 
 
 class TestContrastiveLoss:

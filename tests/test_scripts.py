@@ -91,6 +91,20 @@ class TestTrainMain:
         assert all(np.isfinite(v) for v in history["train_loss"])
         assert os.path.exists(os.path.join(weights, "spatial_cnn.pth"))
 
+        # No writer may appear in more than one partition (ISO/IEC 23053). The
+        # split is assembled before the epoch loop, so this needs no extra run.
+        train_ids, val_ids, test_ids = (set(history["split"][k])
+                                        for k in ("train", "val", "test"))
+        assert not (train_ids & val_ids)
+        assert not (train_ids & test_ids)
+        assert not (val_ids & test_ids)
+
+        # `--temporal-channels` defaults to the shipped `dt`, but it is
+        # temporal-only: `build_writer_samples` forwards it solely to trajectory
+        # corpora. Asking CEDAR for a timing channel used to abort a valid
+        # spatial run, and this run reaching this point is that guard holding.
+        assert history["split"]
+
     def test_temporal_run_handles_variable_lengths(self, tmp_path):
         """The temporal path must survive ragged sequences via the collate/pack route."""
         data = _make_svc_fixture(str(tmp_path / "svc2004_task2"), with_pressure=True)
@@ -104,20 +118,6 @@ class TestTrainMain:
 
         assert all(np.isfinite(v) for v in history["train_loss"])
         assert os.path.exists(os.path.join(weights, "temporal_lstm.pth"))
-
-    def test_split_is_writer_independent(self, tmp_path):
-        """No writer may appear in more than one partition (ISO/IEC 23053)."""
-        data = _make_cedar_fixture(str(tmp_path / "cedar"))
-        history = train_main([
-            "--branch", "spatial", "--data-dir", data,
-            "--epochs", "1", "--batch-size", "8",
-            "--weights-dir", str(tmp_path / "w"), "--num-workers", "0",
-        ])
-        train_ids, val_ids, test_ids = (set(history["split"][k])
-                                        for k in ("train", "val", "test"))
-        assert not (train_ids & val_ids)
-        assert not (train_ids & test_ids)
-        assert not (val_ids & test_ids)
 
     def test_pressure_ablation_runs_write_separate_weights(self, tmp_path):
         """
@@ -142,21 +142,6 @@ class TestTrainMain:
 
         # Same seed ⇒ identical writer partition, so the two EERs are comparable.
         assert history_a["split"] == history_b["split"]
-
-    def test_spatial_run_ignores_the_temporal_channel_default(self, tmp_path):
-        """
-        `--temporal-channels` defaults to the shipped `dt`, but it is temporal-only.
-        A spatial run reaches image corpora that have no trajectory at all, so
-        forwarding it would ask CEDAR for a timing channel and abort a valid run.
-        """
-        cedar = _make_cedar_fixture(str(tmp_path / "cedar"))
-
-        history = train_main(["--branch", "spatial", "--data-dir", cedar,
-                              "--epochs", "1", "--batch-size", "4",
-                              "--num-workers", "0", "--seed", "42",
-                              "--weights-dir", str(tmp_path / "w")])
-
-        assert history["split"]
 
     def test_unknown_dataset_directory_raises(self, tmp_path):
         """An unrecognized dataset name must fail loudly, not train on nothing."""
@@ -238,20 +223,38 @@ class TestEvaluateMain:
         for plot in ("roc_spatial.png", "det_spatial.png", "confusion_spatial.png"):
             assert os.path.exists(os.path.join(output, plot)), f"missing {plot}"
 
-    def test_threshold_is_tuned_on_val_not_test(self, tmp_path):
-        """AGENTS.md: τ comes from validation. The report must say so explicitly."""
-        data = _make_cedar_fixture(str(tmp_path / "cedar"))
-        weights_dir = str(tmp_path / "weights")
-
-        train_main(["--branch", "spatial", "--data-dir", data,
-                    "--epochs", "1", "--batch-size", "8",
-                    "--weights-dir", weights_dir, "--num-workers", "0"])
-
-        report = evaluate_main([
-            "--branch", "spatial",
-            "--weights", os.path.join(weights_dir, "spatial_cnn.pth"),
-            "--data-dir", data, "--output-dir", str(tmp_path / "r"),
-            "--num-workers", "0",
-        ])
+        # AGENTS.md: tau comes from validation, metrics are reported on test.
+        # Same weights, same argv, so this needs no second train+evaluate cycle.
         assert report["threshold_tuned_on"] == "validation"
         assert report["reported_on"] == "test"
+
+
+class TestFusedChannelDispatch:
+    """
+    `extra_channels` is a temporal-only concept, and a fused run lists image and
+    trajectory corpora in one `--data-dir`.
+
+    `build_writer_samples` used to offer the channel to every directory, so with
+    the shipped default (`--temporal-channels dt`) the first spatial corpus
+    aborted the run: `--branch fused` was unrunnable out of the box.
+    """
+
+    def test_spatial_corpora_are_not_asked_for_a_temporal_channel(self, tmp_path):
+        from scripts.train import build_writer_samples
+
+        cedar = tmp_path / "cedar"
+        _make_cedar_fixture(str(cedar), num_writers=3)
+        svc = tmp_path / "svc2004_task2"
+        _make_svc_fixture(str(svc), num_writers=3, with_pressure=True)
+
+        merged = build_writer_samples([str(cedar), str(svc)], extra_channels="dt")
+        assert len(merged) == 6
+
+    def test_a_temporal_corpus_that_cannot_supply_the_channel_still_raises(self, tmp_path):
+        """The width-consistency guard must survive the fix that unblocked fusion."""
+        from scripts.train import build_writer_samples
+
+        task1 = tmp_path / "svc2004_task1"
+        _make_svc_fixture(str(task1), num_writers=2)
+        with pytest.raises(ValueError, match="cannot supply"):
+            build_writer_samples([str(task1)], extra_channels="tilt")

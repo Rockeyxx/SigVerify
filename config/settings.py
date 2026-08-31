@@ -34,6 +34,11 @@ MOBISIG_DIR = os.path.join(DATA_DIR, "MOBISIG")
 # SigComp2011 (ICDAR benchmark): 84 online signers (64 Dutch, 20 Chinese) recorded on a Wacom Intuos3 tablet at 200 Hz with 0–1023 force levels. Matches the pen digitizer domain of SVC2004. See README for download details.
 SIGCOMP2011_DIR = os.path.join(DATA_DIR, "sigcomp2011")
 
+# SigComp2011 offline (scanned images) — the spatial sibling of the online set.
+# Three files re-derived this as a raw "data/sigcomp2011_offline" string because
+# no constant existed, which only resolved when cwd happened to be the repo root.
+SIGCOMP2011_OFFLINE_DIR = os.path.join(DATA_DIR, "sigcomp2011_offline")
+
 # DeepSignDB (BiDA Lab, UAM): Aggregates MCYT, BiosecurID, BiosecureDS2, and e-BioSign. The stylus partition supplies 498 Development signers (compared to 124 in baseline sets).
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
@@ -126,6 +131,25 @@ ENROLLMENT_TRIALS = 10
 TEMPORAL_AUGMENT = False
 SPATIAL_AUGMENT = True
 
+# Augmentation strengths. These were function defaults inside `src/data/dataset.py`
+# and restated a second time at the call site, so retuning one left the other stale.
+# Ranges stay deliberately small: forgery detection keys on fine stroke geometry,
+# and warping past that teaches tolerance to the very differences it must detect.
+SPATIAL_AUG_MAX_ROTATION_DEG = 6.0
+SPATIAL_AUG_MAX_SHEAR = 0.08
+SPATIAL_AUG_MAX_SCALE = 0.08
+SPATIAL_AUG_MAX_TRANSLATE = 0.04
+SPATIAL_AUG_STROKE_PROB = 0.3
+TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
+TEMPORAL_AUG_JITTER = 0.02
+TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
+
+# Target sampling rate for online trajectories. Declared independently in four
+# places (features.py, two constants in parsers.py, sigma_lognormal.py), all
+# agreeing at 100 Hz / 10 ms — an unlifted system-wide tunable.
+TEMPORAL_SAMPLE_RATE_HZ = 100.0
+TEMPORAL_SAMPLE_PERIOD_MS = 1000.0 / TEMPORAL_SAMPLE_RATE_HZ
+
 # Early stopping configuration (monitors validation loss convergence).
 EARLY_STOPPING_PATIENCE = 5            # Epoch patience threshold before stopping training
 EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
@@ -142,6 +166,22 @@ ALPHA_GRID_STEP = 0.05
 SPATIAL_DECISION_THRESHOLD = 0.6299     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
 DECISION_THRESHOLD = 0.8196             # Calibrated threshold tau for late-fused model evaluation
+
+# ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
+# These were documented in AGENTS.md and docs/rules.md as hard constraints but
+# existed nowhere in code, so nothing could enforce or even report them. Declared
+# here so `tools/profile_latency.py` and the test suite can assert against the
+# same numbers the spec states.
+LATENCY_SLA_SECONDS = 3.0               # End-to-end verification decision budget
+INFERENCE_RAM_CEILING_GB = 4.0          # Peak RSS ceiling for a single verification
+
+# Thread ceiling applied at model load. Torch and OpenCV each default to one
+# worker per logical CPU with no coordination between them. Measured on an 8-core
+# box: an identical spatial forward pass took 41 ms idle and 172-322 ms while one
+# other CPU-bound process ran — a 4-7x swing on the same code. Capping does not
+# improve the idle case (1 thread measured 221 ms vs 48 ms at 8); it bounds the
+# contended case, which is the "consumer hardware" the 3 s budget is written for.
+INFERENCE_NUM_THREADS = 4
 
 # ─── Evaluation Targets ──────────────────────────────────────────────
 # Target error metrics specified in Term-1 design requirements (AGENTS.md Hard Constraints).

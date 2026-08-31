@@ -21,6 +21,7 @@ Typical verification workflow:
 
 import os
 
+import cv2
 import numpy as np
 import torch
 
@@ -30,9 +31,7 @@ from config.settings import (
     SPATIAL_DECISION_THRESHOLD,
     TEMPORAL_DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
-    TEMPORAL_EMBEDDING_DIM,
-    TEMPORAL_HIDDEN_SIZE,
-    TEMPORAL_NUM_LAYERS,
+    INFERENCE_NUM_THREADS,
 )
 from src.data.dataset import preprocess_image, quality_gate, trajectory_gate
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
@@ -51,6 +50,12 @@ def load_model(branch, weights_path, device="cpu"):
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights not found: {weights_path}")
+
+    # Bound the thread pools before any forward pass. Torch and OpenCV each size
+    # themselves to every logical CPU independently, which is fine on an idle box
+    # and costs 4-7x on a contended one. Set once at load, not per call.
+    torch.set_num_threads(INFERENCE_NUM_THREADS)
+    cv2.setNumThreads(INFERENCE_NUM_THREADS)
 
     state_dict = torch.load(weights_path, map_location="cpu")
 
@@ -109,16 +114,34 @@ def bytes_to_embedding(blob):
     return np.frombuffer(blob, dtype=EMBEDDING_DTYPE).copy()
 
 
+def similarity_from_distance(distance):
+    """
+    Convert an L2 embedding distance into a bounded similarity score.
+
+        S = 1 / (1 + d)
+
+    Maps d in [0, inf) onto S in (0, 1], so identical signatures approach 1 and
+    wildly different ones approach 0. Accepts a scalar or an array.
+
+    This lives in `src/` rather than in `scripts/evaluate.py` because both the
+    inference path and the threshold-calibration path must use the *same*
+    function, and `src/` cannot import from `scripts/`. They previously held
+    independent copies of the formula: had either been changed alone, every
+    calibrated threshold would have kept its old numeric value while silently
+    describing a different score distribution.
+    """
+    return 1.0 / (1.0 + distance)
+
+
 def _nearest_reference_score(references, probe_embedding):
     """
     Compute similarity match score between probe embedding and enrolled references.
 
     Evaluates minimum distance (nearest-reference matching) across registered templates.
-    Returns calculated similarity score S = 1 / (1 + d).
     """
     stacked = np.vstack([np.asarray(r, dtype=EMBEDDING_DTYPE) for r in references])
     distances = np.linalg.norm(stacked - probe_embedding[None, :], axis=1)
-    return float(1.0 / (1.0 + distances.min()))
+    return float(similarity_from_distance(distances.min()))
 
 
 def _pressure_is_imputed(trajectory):
@@ -141,16 +164,6 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
     """
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
-
-    # Select single-branch decision threshold or combined fusion threshold based on active inputs.
-    if engine is None:
-        if spatial is not None and temporal is not None:
-            threshold = DECISION_THRESHOLD
-        elif spatial is not None:
-            threshold = SPATIAL_DECISION_THRESHOLD
-        else:
-            threshold = TEMPORAL_DECISION_THRESHOLD
-        engine = FusionEngine(alpha=ALPHA_DEFAULT, threshold=threshold)
 
     spatial_score = None
     temporal_score = None
@@ -188,11 +201,36 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
             + "\n  ".join(gate_errors or ["no probe was supplied"])
             + "\nSee the README's Capture Contract.")
 
+    # Threshold follows the routing the gates actually produced, never the shape of
+    # the request. Selecting it up-front from which arguments were *passed* meant a
+    # probe that ended up scored `spatial_only` — because the trajectory failed its
+    # gate — was still compared against the fused DECISION_THRESHOLD. The fused bar
+    # is the highest of the three, so the error ran one way only: a genuine signer
+    # whose tablet timed out was rejected where the same image submitted alone was
+    # accepted, at identical reported confidence.
+    if engine is None:
+        if spatial_score is not None and temporal_score is not None:
+            threshold = DECISION_THRESHOLD
+        elif spatial_score is not None:
+            threshold = SPATIAL_DECISION_THRESHOLD
+        else:
+            threshold = TEMPORAL_DECISION_THRESHOLD
+        engine = FusionEngine(alpha=ALPHA_DEFAULT, threshold=threshold)
+
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
 
     if quality_failed:
         result["degraded"] = True
+
+    # `degraded: True` on its own cannot tell the GUI whether evidence was dropped
+    # for a blurry image, an undersized bounding box, an unnormalized trajectory or
+    # imputed pressure. The gate already produced that string; carry it out instead
+    # of discarding it on every path except total failure.
+    result["reasons"] = list(gate_errors)
+    if pressure_imputed:
+        result["reasons"].append("temporal: pressure imputed to "
+                                 f"{PRESSURE_IMPUTATION_VALUE} — device reported none")
 
     return result
 

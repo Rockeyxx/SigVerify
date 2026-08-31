@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import torch
 
+from config.settings import TEMPORAL_INPUT_FEATURES
 from scripts.evaluate import fit_writer_classifier, writer_dependent_scores
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 from src.verification import (
@@ -41,6 +42,27 @@ def _blank_image():
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     cv2.imwrite(tmp.name, img)
     return tmp.name
+
+
+def _valid_trajectory(length=50, seed=1):
+    """
+    A gate-passing trajectory of whatever width the shipped contract declares.
+
+    Built from `TEMPORAL_INPUT_FEATURES` rather than a literal so that flipping
+    `TEMPORAL_CHANNELS` in `config/settings.py` — the single knob selecting
+    3 (`xyp`), 4 (`dt`) or 5 (`tilt`) channels — moves the whole suite with it.
+    A checkpoint trained under any of those settings stays reproducible without
+    anyone editing a test.
+
+    X/Y are z-scored per signature; every trailing channel (P, dt, ...) is a
+    physical quantity the parsers have already scaled onto [0, 1].
+    """
+    rng = np.random.default_rng(seed)
+    columns = [rng.standard_normal((length, 2)),
+               rng.uniform(0.0, 1.0, size=(length, 1))]
+    for _ in range(TEMPORAL_INPUT_FEATURES - 3):
+        columns.append(np.full((length, 1), 0.1))
+    return np.hstack(columns).astype(np.float32)
 
 
 class TestLoadModel:
@@ -145,16 +167,13 @@ class TestVerify:
         return model, references, path
 
     def _temporal_setup(self):
-        model = TemporalSiamese(embedding_dim=128).eval()
-        # Pressure must be in [0, 1] — it is scaled by a fixed device maximum,
-        # not z-scored like X/Y. The old fixture drew all three columns from a
-        # standard normal, so its pressure column held negatives and values above
-        # 1: input no capture layer could produce, and which `trajectory_gate`
-        # now correctly rejects.
-        rng = np.random.default_rng(1)
-        xy = rng.standard_normal((50, 2))
-        pressure = rng.uniform(0.0, 1.0, size=(50, 1))
-        trajectory = np.hstack([xy, pressure]).astype(np.float32)
+        # Width follows `TEMPORAL_CHANNELS`, so this fixture keeps working across
+        # a 3 -> 4 -> 5 channel change without being rewritten. Pressure and the
+        # trailing channels are in [0, 1] — they are scaled by a fixed device
+        # maximum, not z-scored like X/Y.
+        model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
+                                embedding_dim=128).eval()
+        trajectory = _valid_trajectory()
         references = [embed(model, trajectory, "temporal")]
         return model, references, trajectory
 
@@ -177,7 +196,11 @@ class TestVerify:
     def test_returns_the_gui_contract(self):
         model, references, path = self._spatial_setup()
         result = verify(spatial=(model, references, path))
-        assert set(result) == {"decision", "confidence", "routing", "degraded"}
+        # `reasons` is additive: a list, empty on a clean multimodal verdict, and
+        # carrying the gate's own message for every piece of evidence that was
+        # dropped. `degraded: True` alone could not say *why*.
+        assert set(result) == {"decision", "confidence", "routing", "degraded", "reasons"}
+        assert isinstance(result["reasons"], list)
         os.unlink(path)
 
     def test_spatial_only_is_degraded(self):
@@ -372,3 +395,86 @@ class TestWriterDependentClassifier:
         b, _ = writer_dependent_scores(embedded, num_references=5, seed=7)
 
         assert np.allclose(a, b)
+
+
+class TestThresholdFollowsRouting:
+    """
+    A branch dropped by its own gate must not change the surviving branch's verdict.
+
+    `verify()` used to pick the decision threshold from *which arguments were
+    passed*, before either gate ran. So a probe that ended up scored
+    `spatial_only` was compared against the fused threshold (0.8196) whenever a
+    temporal probe had merely been offered and rejected, instead of against
+    SPATIAL_DECISION_THRESHOLD (0.6299). The fused bar is the highest of the
+    three, so the error only ever pushed toward `Forged`: a genuine signer whose
+    tablet timed out was rejected where the same image alone was accepted.
+    """
+
+    def _spatial_at_score(self, target_score):
+        """A spatial setup whose nearest-reference score is exactly `target_score`."""
+        model = SpatialSiamese(embedding_dim=512).eval()
+        path = _sharp_signature_image()
+        probe = embed(model, path, "spatial")
+        # S = 1 / (1 + d)  ->  d = 1/S - 1, placed on a single axis.
+        offset = np.zeros_like(probe)
+        offset[0] = (1.0 / target_score) - 1.0
+        return model, [probe + offset], path
+
+    def _rejected_trajectory(self):
+        """Raw tablet units — passes nothing, so the temporal branch is dropped."""
+        raw = _valid_trajectory()
+        raw[:, 0] = raw[:, 0] * 1200 + 8000     # back into raw tablet units
+        raw[:, 1] = raw[:, 1] * 1200 + 6000
+        return raw
+
+    def test_dropped_temporal_branch_does_not_move_the_spatial_verdict(self):
+        # 0.70 sits above SPATIAL_DECISION_THRESHOLD and below DECISION_THRESHOLD,
+        # which is the only band where the two disagree.
+        model, references, path = self._spatial_at_score(0.70)
+        temporal_model = TemporalSiamese(
+            input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
+        dead_probe = self._rejected_trajectory()
+
+        alone = verify(spatial=(model, references, path))
+        offered = verify(spatial=(model, references, path),
+                         temporal=(temporal_model, [np.zeros(128, np.float32)], dead_probe))
+
+        assert alone["routing"] == offered["routing"] == "spatial_only"
+        assert offered["decision"] == alone["decision"]
+        assert offered["confidence"] == pytest.approx(alone["confidence"])
+
+    def test_gate_failure_reason_reaches_the_caller(self):
+        """`degraded: True` alone cannot tell the GUI *why* evidence was dropped."""
+        model, references, path = self._spatial_at_score(0.70)
+        temporal_model = TemporalSiamese(
+            input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
+
+        result = verify(spatial=(model, references, path),
+                        temporal=(temporal_model, [np.zeros(128, np.float32)],
+                                  self._rejected_trajectory()))
+
+        assert result["degraded"] is True
+        assert result["reasons"], "a degraded verdict must say what was dropped"
+        assert any("temporal" in r for r in result["reasons"])
+
+
+class TestShippedChannelContract:
+    """
+    A probe of the configured width verifies end to end.
+
+    `TEMPORAL_CHANNELS` is the single knob: `xyp` -> 3, `dt` -> 4 (what ships
+    today, and what `models/weights/temporal_lstm.pth` was trained as), `tilt`
+    -> 5. This test asserts the shipped setting round-trips, whichever it is.
+    """
+
+    def _setup(self):
+        model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
+                                embedding_dim=128).eval()
+        trajectory = _valid_trajectory(length=60, seed=7)
+        return model, [embed(model, trajectory, "temporal")], trajectory
+
+    def test_probe_of_the_configured_width_verifies_end_to_end(self):
+        model, references, trajectory = self._setup()
+        result = verify(temporal=(model, references, trajectory))
+        assert result["decision"] in ("Genuine", "Forged")
+        assert result["routing"] == "temporal_only"

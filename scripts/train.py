@@ -12,6 +12,7 @@ CLI Examples:
 
 import argparse
 import os
+import random
 import sys
 
 import numpy as np
@@ -44,8 +45,8 @@ from src.data.dataset import (
 )
 from src.data.features import NUM_DERIVED_CHANNELS
 from src.data.parsers import (
-    EXTRA_CHANNEL_SUPPORT, is_known_dataset, merge_datasets, parse_dataset,
-    supports_extra_channel,
+    EXTRA_CHANNEL_SUPPORT, is_known_dataset, is_temporal_dataset, merge_datasets,
+    parse_dataset, supports_extra_channel,
     svc2004_has_pressure,
 )
 from src.models.siamese import (
@@ -257,7 +258,11 @@ def build_writer_samples(data_dirs, extra_channels=None):
         # same width, so a corpus that cannot supply the channel has to stop the
         # run rather than quietly contribute narrower samples to the same merge.
         kwargs = {}
-        if extra_channels:
+        # Only the temporal corpora are asked for the channel. A fused run lists
+        # image and trajectory corpora together, and demanding `dt` from CEDAR
+        # aborted the whole run — `--branch fused` was unrunnable under the
+        # shipped default the moment `dt` became it.
+        if extra_channels and is_temporal_dataset(directory):
             if is_known_dataset(directory) and not supports_extra_channel(
                     directory, extra_channels):
                 raise ValueError(
@@ -338,7 +343,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         # (best epoch 1 -> 6, 11.78% -> 11.19%). Config still supplies the default.
         dataset = TemporalSignatureDataset(pairs, labels,
                                            augment=shuffle and augment,
-                                           augment_scale=augment_scale)
+                                           augment_scale=augment_scale,
+                                           seed=seed)
         collate = collate_temporal_pairs
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
@@ -511,7 +517,23 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
 def main(argv=None):
     args = parse_args(argv)
 
+    # docs/rules.md section 12 mandates fixed global PRNG seeds. `torch.manual_seed`
+    # alone left numpy's and Python's global generators free-running, and left CUDA
+    # kernel selection nondeterministic. Most of this pipeline is already careful to
+    # thread locally-seeded generators through (`writer_independent_split`,
+    # `generate_skilled_pairs`, both Dataset classes), so this closes the remaining
+    # global surface rather than being the only defence.
+    #
+    # This does NOT make GPU training bit-reproducible: some cuDNN kernels stay
+    # nondeterministic even with these flags set. Training here is seed-
+    # *distributional*, not seed-*reproducible* — which is why the project compares
+    # arms over six paired seeds rather than trusting any single run.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # Dynamic hardware selection: utilize CUDA GPU acceleration when available, else fallback to CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -650,7 +672,16 @@ def main(argv=None):
     start_epoch = 0
     resume_best = None
 
-    if args.resume and os.path.exists(args.resume):
+    if args.resume:
+        # Every line that reports a resume used to live inside an `os.path.exists`
+        # guard, so a typo'd path made the whole block a no-op: the run started from
+        # epoch 0 with no message, discarded hours of progress, and could then
+        # overwrite the very checkpoint it was meant to continue.
+        if not os.path.exists(args.resume):
+            raise FileNotFoundError(
+                f"--resume {args.resume!r} does not exist. Refusing to silently "
+                f"start a fresh run: that discards the checkpoint you meant to "
+                f"continue, and the first save would overwrite it.")
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -660,7 +691,9 @@ def main(argv=None):
         # back to `loss`, which re-baselines against the final epoch rather than
         # the best one — so a resumed run can still overwrite better weights.
         # When that matters, copy the current best weights aside first.
-        resume_best = checkpoint.get("best_val_loss") or checkpoint.get("loss")
+        resume_best = checkpoint.get("best_val_loss")
+        if resume_best is None:
+            resume_best = checkpoint.get("loss")
         print(f"Resumed training from epoch {start_epoch}"
               + (f", best val loss {resume_best:.4f}" if resume_best is not None else ""))
 

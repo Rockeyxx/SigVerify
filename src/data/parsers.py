@@ -908,5 +908,20 @@ def supports_extra_channel(path, channel):
 
 
 SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig", "sigcomp2011_offline")
-TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011", "deepsigndb")
+TEMPORAL_DATASETS = ("svc2004", "svc2004_task1", "svc2004_task2",
+                     "mobisig", "sigcomp2011", "deepsigndb")
+
+
+def is_temporal_dataset(path):
+    """
+    Whether the corpus rooted at `path` yields trajectories rather than images.
+
+    `extra_channels` is a temporal-only concept. A fused run lists both families
+    in one `--data-dir`, so offering the channel to the image corpora aborts a
+    run that is otherwise entirely valid — they cannot supply `dt` and were
+    never going to be asked for a trajectory width in the first place. Keyed
+    exactly as `_PARSERS` is, so `sigcomp2011_offline` cannot be mistaken for
+    its online sibling.
+    """
+    return os.path.basename(os.path.normpath(path)).lower() in TEMPORAL_DATASETS
 
