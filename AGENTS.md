@@ -43,9 +43,12 @@ them, even if they appear in the literature review or older drafts:
   continuous embeddings with L2 or cosine distance
 - **No SQLCipher / whole-file DB encryption** — encryption is
   application-layer AES-256-GCM only
-- **No extra _captured_ channels** — the capture contract is `[1, L, 3]`,
-  `(X, Y, Pressure)`. The device must not be asked for azimuth, altitude or
-  tilt. Features **derived** from those three channels inside the model are
+- **No extra _captured_ channels beyond the four in the contract** — the capture
+  contract is `[1, L, 4]`, `(X, Y, Pressure, dt)`. The device must not be asked
+  for azimuth, altitude or tilt. `dt` was admitted on 2026-08-19 because a
+  timestamp is channel 3 of the standard 7 every digitizer already reports, so
+  the ban, which exists for channels the hardware cannot deliver, did not apply
+  to it. Features **derived** from those four channels inside the model are
   allowed and expected (see Temporal Branch below)
 - **No cloud APIs, no remote inference, no discrete GPU at inference**
 
@@ -119,7 +122,13 @@ them, even if they appear in the literature review or older drafts:
 
 ### Temporal Branch (Online)
 
-- Input tensor: **`[1, L, 3]`** — `(X, Y, Pressure)`, variable length `L`
+- Input tensor: **`[1, L, 4]`** — `(X, Y, Pressure, dt)`, variable length `L`.
+  The width is **not** a literal anywhere in the code: it is
+  `TEMPORAL_INPUT_FEATURES`, derived from `TEMPORAL_CHANNELS` in
+  `config/settings.py` (`xyp` → 3, `dt` → 4, `tilt` → 5). Flipping that one
+  setting moves the gate, the parsers and the test suite together, so a
+  checkpoint trained under any of the three stays reproducible. `dt` is what
+  ships and is what `models/weights/temporal_lstm.pth` was trained as
 - **Derived dynamics:** the model appends per-frame deltas `(dX, dY, dP)` to
   form a `[1, L, 6]` tensor _internally_, before the LSTM. Velocity is the most
   discriminative feature family in the online-verification literature: a forger
@@ -311,6 +320,7 @@ SigComp writer the same signature scored **0.9370 → Genuine** normalized and
 | X / Y centred | `abs(mean) <= 0.5` per axis | `MAX_NORMALIZED_XY_MEAN = 0.5` |
 | X / Y scaled | `std` within `[0.2, 5.0]` per axis | `NORMALIZED_XY_STD_RANGE` |
 | Pressure range | within `[0, 1]` | — |
+| `dt` range | within `[0, 1]`, when the contract is 4 channels or wider | — |
 | Finite | no NaN or infinity | — |
 
 The X/Y bounds detect the *class* of error rather than a device's particular
@@ -318,11 +328,19 @@ scale, so no per-device configuration is needed. A flat `P = 1.0` **passes**:
 that is the legitimate pressure-blind device, reported as `degraded`, not
 rejected.
 
+**The width check is the one that bit.** Between the `dt` contract landing on
+2026-08-19 and 2026-08-31 the gate still required exactly 3 columns while the
+shipped weights required 4, so the temporal branch could not be reached through
+`verify()` at all: the parser emitted `[L, 4]`, `embed()` accepted it, and the
+gate refused it. A temporal-only call raised; a multimodal call silently dropped
+to spatial-only. Deriving the width from config rather than a literal is what
+prevents that recurring the next time the contract moves.
+
 ### Trajectory format
 
 | requirement | value |
 | --- | --- |
-| Shape | `[L, 3]` float32 — X, Y, Pressure |
+| Shape | `[L, 4]` float32 — X, Y, Pressure, dt. Width follows `TEMPORAL_INPUT_FEATURES` |
 | Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
 | Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
 | Pen-up samples | dropped (`P = 0`) |
@@ -528,7 +546,7 @@ and align inside that dataset's loader, not in the model:
 This is not hypothetical bookkeeping. Merging SVC2004 Task1 into Task2 without
 reconciling the pressure channel collapsed the model to Cohen's d 0.279, and
 SigComp2011 differed on the first two rows above. Alignment belongs in the
-parser so the `[L, 3]` capture contract stays untouched.
+parser so the capture contract stays untouched.
 
 A fourth property, added after DeepSignDB: **the sample rate can vary per file
 inside one dataset.** BiosecurID's Development half is a near-even mix of 100 Hz
