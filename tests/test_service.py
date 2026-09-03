@@ -113,3 +113,20 @@ class TestSignatureService:
         assert enrollment["modality"] == "temporal"
         assert len(enrollment["embeddings"]) == 5
 
+    def test_temporal_ensemble_mode(self):
+        service = SignatureService(device="cpu", use_temporal_ensemble=True)
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        enrollment = service.enroll_from_tablet(trajs)
+        probe = self._sample_trajectory(95)
+
+        result = service.verify(
+            mode="temporal-multi",
+            probe_trajectory=probe,
+            reference_spatial=enrollment["spatial_embeddings"],
+            reference_temporal=enrollment["temporal_embeddings"],
+        )
+        assert result["routing"] == "multimodal"
+        assert result["decision"] in ("Genuine", "Forged")
+        assert not result["degraded"]
+
+
