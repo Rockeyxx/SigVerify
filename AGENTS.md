@@ -397,8 +397,20 @@ Frontend and database developers should use these helper methods during enrollme
 - **`service.enroll_unimodal(samples: list, modality: "spatial"|"temporal") -> dict`**
   - Output: `{"embeddings": [bytes...], "modality": str}`.
 
-All reference templates accept either raw Python `bytes` directly from the SQLite database
-or `np.ndarray` float32 embeddings.
+All reference templates accept either decrypted raw Python `bytes` (contiguous
+IEEE 754 float32 bytes directly from the database layer) or `np.ndarray` float32 embeddings.
+
+#### 3. Architectural Boundary: Model Branch vs. Database/Security Layer
+
+To preserve strict separation of concerns and engineering modularity:
+- **Model Branch (`src/`):** Performs biometric feature extraction and mathematical verification only.
+  Outputs plain, unencrypted embeddings (512-d and 128-d float32) and expects plain, decrypted
+  reference templates for comparison. The model branch never holds encryption keys and never performs
+  cryptographic operations.
+- **Backend / Database Layer:** Manages application-layer AES-256-GCM encryption and decryption (ISO/IEC 18033-1),
+  key management (OS keyring / environment), and SQLite persistence (ISO/IEC 9075-1). It receives plain
+  embeddings from `SignatureService.enroll_*()`, encrypts them for storage, and decrypts them before passing
+  to `SignatureService.verify()`.
 
 **Image arrays must be raw scans** — 2-D, paper bright, ink dark, any size, exactly what
 `cv2.imread(..., IMREAD_GRAYSCALE)` returns. They are resized and inverted on the way in,
