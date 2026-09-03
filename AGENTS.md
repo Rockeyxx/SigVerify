@@ -347,6 +347,68 @@ prevents that recurring the next time the contract moves.
 | X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
 | No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
 
+### High-Level Service Contract: `SignatureService` (for GUI & Backend Teams)
+
+To isolate frontend (PyQt5) and backend (SQLite/AES) developers from PyTorch internals,
+model weights management, and byte deserialization, `src/verification.py` exposes
+`SignatureService`. Developers should instantiate this class once at app startup:
+
+```python
+from src.verification import SignatureService
+
+service = SignatureService(device="cpu")
+```
+
+#### 1. Verification Modes (`service.verify(mode=...)`)
+
+The verification engine provides three explicit operational modes:
+
+| Mode | Input Arguments Required | Processing & Routing |
+| --- | --- | --- |
+| **`"unimodal"`** | `probe_trajectory` + `reference_temporal`<br>*OR*<br>`probe_image` + `reference_spatial` | Runs single-branch verification (`spatial_only` or `temporal_only`). Flagged as `degraded: True` because it relies on one modality. |
+| **`"temporal-multi"`** | `probe_trajectory` + `reference_temporal` + `reference_spatial` | **Single-action digitizer verification.** The user signs once on the tablet. The engine extracts the temporal embedding, auto-renders the spatial stroke image ($1.8\text{ ms}$), extracts the spatial embedding, and evaluates late fusion. Routing: `multimodal`. |
+| **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
+
+**Returns:**
+```python
+{
+    "decision": "Genuine" | "Forged",
+    "confidence": float,       # 0.0-100.0. The fused similarity scaled by 100,
+                               # NOT a calibrated probability. S = 1/(1+d) against
+                               # the nearest reference; do not present it as a
+                               # percentage likelihood of being genuine.
+    "routing": str,            # "multimodal", "spatial_only", or "temporal_only"
+    "degraded": bool,          # True if a modality was dropped or pressure was imputed
+    "reasons": list[str]       # Explanations if degraded or gate failure occurred
+}
+```
+
+#### 2. Enrollment Helpers (Returns DB-Ready Blobs)
+
+Frontend and database developers should use these helper methods during enrollment:
+
+- **`service.enroll_from_tablet(trajectories: list[np.ndarray]) -> dict`**
+  - Input: List of $K=5$ normalized $[L, 4]$ trajectories from the tablet.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`
+  - Automatically renders each trajectory to spatial images and computes both 512-d and 128-d embeddings.
+- **`service.enroll_multimodal(images: list, trajectories: list) -> dict`**
+  - Input: $K=5$ image paths/arrays and $K=5$ trajectories.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`.
+- **`service.enroll_unimodal(samples: list, modality: "spatial"|"temporal") -> dict`**
+  - Output: `{"embeddings": [bytes...], "modality": str}`.
+
+All reference templates accept either raw Python `bytes` directly from the SQLite database
+or `np.ndarray` float32 embeddings.
+
+**Image arrays must be raw scans** — 2-D, paper bright, ink dark, any size, exactly what
+`cv2.imread(..., IMREAD_GRAYSCALE)` returns. They are resized and inverted on the way in,
+identically to a path. An already-canonical `[1, 155, 220]` float array in `[0, 1]` (what
+the renderer emits) is passed through untouched. Anything else raises rather than being
+guessed at: `SpatialSiamese` pools adaptively, so a wrong-sized or un-inverted array would
+otherwise yield a plausible 512-d embedding with no error and be stored as a template.
+
+---
+
 ## Standards
 
 Cite **exactly** these five standards and no others:
