@@ -77,7 +77,15 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     Returns:
         float32 numpy array of shape (1, H, W).
     """
-    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if isinstance(image_path, np.ndarray):
+        # A raw scan handed over as an array rather than a path. Same contract as
+        # a file: paper bright, ink dark, any size. It still gets resized and
+        # inverted below, so an array and a path reach the model identically.
+        img = image_path[0] if image_path.ndim == 3 else image_path
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0, 255).astype(np.uint8)
+    else:
+        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Cannot load image: {image_path}")
 
@@ -112,7 +120,19 @@ def quality_gate(image_path):
 
     Returns: (passed: bool, details: dict)
     """
-    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if isinstance(image_path, np.ndarray):
+        arr = image_path[0] if image_path.ndim == 3 else image_path
+        if arr.dtype != np.uint8:
+            if arr.max() <= 1.0:
+                # Inverted float array (background 0, ink high):
+                # Convert to standard scan polarity (paper 255, ink 0) for Otsu THRESH_BINARY_INV
+                img = np.clip(255.0 - arr * 255.0, 0, 255).astype(np.uint8)
+            else:
+                img = np.clip(arr, 0, 255).astype(np.uint8)
+        else:
+            img = arr
+    else:
+        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return False, {"error": "Cannot load image"}
 
