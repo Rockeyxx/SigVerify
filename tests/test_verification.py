@@ -227,6 +227,19 @@ class TestVerify:
         assert result["routing"] == "multimodal"
         os.unlink(spath)
 
+    def test_paired_digitizer_input_auto_renders_spatial_for_multimodal_routing(self):
+        """When user provides temporal trajectory and spatial=(smodel, srefs, None),
+        verify() auto-renders the trajectory to an image and routes as multimodal."""
+        smodel, srefs, _ = self._spatial_setup()
+        tmodel, trefs, traj = self._temporal_setup()
+        result = verify(
+            spatial=(smodel, srefs, None),
+            temporal=(tmodel, trefs, traj),
+            auto_render_spatial=True,
+        )
+        assert result["routing"] == "multimodal"
+        assert result["decision"] in ("Genuine", "Forged")
+
     def test_failed_quality_gate_drops_the_spatial_branch(self):
         """
         A probe that fails the quality gate must be excluded from fusion, not
@@ -478,3 +491,71 @@ class TestShippedChannelContract:
         result = verify(temporal=(model, references, trajectory))
         assert result["decision"] in ("Genuine", "Forged")
         assert result["routing"] == "temporal_only"
+
+
+class TestSpatialArrayInputsAreCanonicalized:
+    """
+    An array reaching the spatial branch must be treated like the path it stands
+    in for.
+
+    `SpatialSiamese` pools adaptively, so a wrong-sized, un-inverted uint8 scan
+    produces a perfectly plausible 512-d embedding and raises nothing — and
+    enrolment writes that template to the database. Polarity inversion alone is
+    recorded as worth 4.86% -> 0.00% EER on CEDAR, so the failure is silent and
+    expensive. Shape and dtype are therefore gated here rather than trusted.
+    """
+
+    def _model(self):
+        from config.settings import MODEL_WEIGHTS_DIR
+        return load_model("spatial", os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+
+    def test_raw_scan_array_matches_the_same_scan_on_disk(self):
+        """
+        The array and the path are the same signature, so they must produce the
+        same embedding. Before this gate the array skipped both the resize and
+        the inversion, and the two disagreed completely.
+        """
+        path = _sharp_signature_image()
+        array = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+
+        model = self._model()
+        from_path = embed(model, path, "spatial")
+        from_array = embed(model, array, "spatial")
+
+        np.testing.assert_allclose(from_path, from_array, rtol=1e-5, atol=1e-6)
+
+    def test_rendered_trajectory_is_not_inverted_a_second_time(self):
+        """
+        The renderer already emits the canonical contract. Sending it through
+        `preprocess_image` would invert it again and hand the model a negative.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        from src.verification import _as_spatial_input
+
+        width, height = SPATIAL_INPUT_SIZE
+        rendered = np.zeros((1, height, width), dtype=np.float32)
+        rendered[0, 70:80, 40:180] = 1.0
+
+        out = _as_spatial_input(rendered)
+        np.testing.assert_array_equal(out, rendered)
+
+    def test_canonical_shape_with_scan_range_is_refused(self):
+        """
+        The shape says 'already canonical' while the values say 'raw scan'. That
+        combination is exactly what would sail through unscaled, so it must
+        raise rather than be guessed at.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        from src.verification import _as_spatial_input
+
+        width, height = SPATIAL_INPUT_SIZE
+        raw = np.full((1, height, width), 255.0, dtype=np.float32)
+
+        with pytest.raises(ValueError, match=r"\[0\.0, 1\.0\]"):
+            _as_spatial_input(raw)
+
+    def test_uninterpretable_shape_raises(self):
+        from src.verification import _as_spatial_input
+
+        with pytest.raises(ValueError, match="Cannot interpret"):
+            _as_spatial_input(np.zeros((3, 64, 64), dtype=np.float32))
