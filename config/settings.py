@@ -61,6 +61,27 @@ SPATIAL_SQUARE_PAD = False
 MIN_BBOX_PIXELS = 64                    # Minimum signature bounding box edge dimension
 MIN_LAPLACIAN_VARIANCE = 50.0           # Minimum Laplacian sharpness threshold
 
+# ─── Trajectory rasterizer (src/data/renderer.py) ────────────────────
+# Renders a pen trajectory into the spatial branch's input so one signing event
+# can feed both branches. Every constant lives here rather than as a literal in
+# the renderer: a duplicated `(220, 155)` would silently disagree with
+# SPATIAL_INPUT_SIZE the moment either moved, which is the same failure a
+# hardcoded channel count already caused on the temporal side.
+RENDER_MARGIN_RATIO = 0.12              # Fraction of each edge left blank, so strokes never clip
+RENDER_BASE_THICKNESS = 2.0             # Stroke width in pixels at full pressure
+RENDER_MIN_THICKNESS = 1                # Thinnest drawable stroke; cv2.line needs >= 1
+# A sample is pen-up when pressure vanishes OR the clock jumps. SigComp2011
+# records pen-up travel as force = 0, but SVC2004 and DeepSignDB mark a lift by
+# the time gap alone, so pressure on its own would draw a line across every lift
+# in those corpora.
+RENDER_PEN_UP_PRESSURE = 1e-4           # Pressure at or below this is not touching
+# The gap is judged against the signature's OWN median sampling period, not an
+# absolute number of seconds. Sampling rates differ per corpus -- SVC2004 ~100 Hz,
+# SigComp2011 200 Hz, DeepSignDB resampled to 10 ms -- so a fixed cutoff such as
+# 0.05 s calls every sample a pen lift on any corpus slower than 20 Hz, and
+# catches none on a fast one.
+RENDER_PEN_UP_DT_RATIO = 3.0            # A gap this many times the median period is a lift
+
 # ─── Temporal input gate ─────────────────────────────────────────────
 # Quality screening for trajectory streams. `normalize_trajectory` runs inside dataset parsers but not on direct inference paths, requiring boundary checks to prevent unnormalized raw tablet inputs from reaching models trained on normalized coordinates.
 # `normalize_trajectory` applies z-score normalization per axis (zero-mean, unit-variance).
