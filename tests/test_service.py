@@ -130,3 +130,32 @@ class TestSignatureService:
         assert not result["degraded"]
 
 
+
+    def test_missing_ensemble_member_raises_instead_of_downgrading(self, monkeypatch):
+        """
+        Asking for the ensemble and silently getting one model is the failure
+        mode that matters here.
+
+        The member checkpoints are gitignored and absent from the public release,
+        so on a machine holding only the release the fallback was the *normal*
+        path: the service would run at single-model accuracy while its own flag
+        said otherwise, and nothing would report it.
+        """
+        import src.verification as verification
+
+        service = SignatureService(device="cpu", use_temporal_ensemble=True)
+        monkeypatch.setattr(verification.os.path, "exists", lambda _p: False)
+
+        with pytest.raises(FileNotFoundError, match="member checkpoints"):
+            service._load_temporal_ensemble()
+
+    def test_ensemble_members_come_from_config_not_literals(self):
+        """
+        The seed list and filename pattern belong in config/settings.py, so the
+        shipped ensemble cannot drift from what the service loads.
+        """
+        from config.settings import (TEMPORAL_ENSEMBLE_SEEDS,
+                                     TEMPORAL_ENSEMBLE_TEMPLATE)
+
+        assert len(TEMPORAL_ENSEMBLE_SEEDS) == 6
+        assert TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=42) == "temporal_dt_s42.pth"

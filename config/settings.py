@@ -82,6 +82,17 @@ RENDER_PEN_UP_PRESSURE = 1e-4           # Pressure at or below this is not touch
 # catches none on a fast one.
 RENDER_PEN_UP_DT_RATIO = 3.0            # A gap this many times the median period is a lift
 
+# ─── Temporal ensemble (SignatureService use_temporal_ensemble=True) ──
+# Averaging these six checkpoints' embeddings measured 4.82% EER against 6.92%
+# for a single member, on 120 unseen DeepSignDB writers under one shared K=5
+# draw. Averaging their per-model SCORES instead reaches 4.53%, but that cannot
+# be expressed through the `.encode()` interface `embed()` calls, so the
+# embedding mean ships and gives up 0.29 points for a far smaller change.
+# These weights are gitignored and are NOT part of the v0.8.0 release, so a
+# machine that only has the release cannot form the ensemble.
+TEMPORAL_ENSEMBLE_SEEDS = (42, 43, 44, 45, 46, 47)
+TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
+
 # ─── Temporal input gate ─────────────────────────────────────────────
 # Quality screening for trajectory streams. `normalize_trajectory` runs inside dataset parsers but not on direct inference paths, requiring boundary checks to prevent unnormalized raw tablet inputs from reaching models trained on normalized coordinates.
 # `normalize_trajectory` applies z-score normalization per axis (zero-mean, unit-variance).

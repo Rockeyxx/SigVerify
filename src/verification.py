@@ -335,8 +335,14 @@ class SignatureService:
       3. 'multimodal': Evaluates both an independent paper scan/photo AND a digitizer
          trajectory under late fusion.
 
-    Can optionally enable `use_temporal_ensemble=True` to evaluate across a 6-seed
-    temporal ensemble, boosting accuracy to <8% error without altering embedding size.
+    `use_temporal_ensemble=True` scores the temporal branch across the six `dt`
+    seeds and returns their mean embedding, which leaves the 128-d width and every
+    stored template unchanged. Measured on 120 unseen DeepSignDB writers under one
+    shared K=5 draw: 4.82% EER against 6.92% for a single member. (Averaging the
+    per-model scores instead reaches 4.53%, but that cannot be expressed through
+    the `.encode()` interface `embed()` calls.) Those numbers are threshold-free
+    EER on one draw and are NOT comparable to the calibrated 25-split figures in
+    SUMMARY.md; they establish the ordering of the arms, not an operating point.
     """
 
     def __init__(
@@ -364,17 +370,42 @@ class SignatureService:
     def temporal_model(self):
         if self._temporal_model is None:
             if self.use_temporal_ensemble:
-                from config.settings import MODEL_WEIGHTS_DIR
-                seeds = (42, 43, 44, 45, 46, 47)
-                paths = [os.path.join(MODEL_WEIGHTS_DIR, f"temporal_dt_s{s}.pth") for s in seeds]
-                if all(os.path.exists(p) for p in paths):
-                    models = [load_model("temporal", p, self.device) for p in paths]
-                    self._temporal_model = TemporalEnsemble(models)
-                else:
-                    self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
+                self._temporal_model = self._load_temporal_ensemble()
             else:
                 self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
         return self._temporal_model
+
+    def _load_temporal_ensemble(self):
+        """
+        Load every ensemble member, or refuse.
+
+        Falling back to the single model when a member is missing was the
+        original behaviour, and it fails in the worst direction: the caller asked
+        for an ensemble, got one model, and nothing said so. The member weights
+        are gitignored and absent from the v0.8.0 release, so on any machine
+        holding only the release that fallback is the *normal* path, not an edge
+        case — the service would quietly run at single-model accuracy while its
+        own flag claimed otherwise. Part 9 §12 records four serving defects with
+        exactly this shape.
+        """
+        from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
+                                     TEMPORAL_ENSEMBLE_TEMPLATE)
+
+        paths = [os.path.join(MODEL_WEIGHTS_DIR,
+                              TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
+                 for seed in TEMPORAL_ENSEMBLE_SEEDS]
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(
+                f"use_temporal_ensemble=True needs all "
+                f"{len(TEMPORAL_ENSEMBLE_SEEDS)} member checkpoints; "
+                f"{len(missing)} are missing:\n  "
+                + "\n  ".join(missing)
+                + "\nThese are not in the public release. Either fetch them or "
+                  "construct the service with use_temporal_ensemble=False, which "
+                  "runs the single shipped model deliberately rather than by "
+                  "accident.")
+        return TemporalEnsemble([load_model("temporal", p, self.device) for p in paths])
 
     def _ensure_embeddings(self, refs: list[bytes | np.ndarray] | None) -> list[np.ndarray]:
         if not refs:
