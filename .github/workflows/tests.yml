@@ -44,3 +44,5 @@ jobs:
           name: pytest-results
           path: |
             .pytest_cache/
+- name: Skylos - Python SAST, Dead Code Detection & PR Gate
+  uses: duriantaco/skylos@v4.35.0
