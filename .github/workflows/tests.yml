@@ -44,5 +44,13 @@ jobs:
           name: pytest-results
           path: |
             .pytest_cache/
-- name: Skylos - Python SAST, Dead Code Detection & PR Gate
-  uses: duriantaco/skylos@v4.35.0
+
+  skylos:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Skylos - Python SAST, Dead Code Detection & PR Gate
+        uses: duriantaco/skylos@v4.35.0
