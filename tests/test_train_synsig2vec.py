@@ -24,7 +24,7 @@ def test_save_weights_round_trips(tmp_path):
     path = str(tmp_path / "w.pth")
     save_weights(model, _args(), 3, path, epoch=75)
 
-    saved = torch.load(path, weights_only=False)
+    saved = torch.load(path, weights_only=True)
     assert saved["epoch"] == 75
     assert saved["split_seed"] == 42
     assert saved["channels"] == 3
@@ -50,7 +50,7 @@ def test_save_weights_replaces_atomically(tmp_path):
     first = os.path.getsize(path)
 
     save_weights(nn.Linear(64, 64), _args(), 3, path, epoch=50)
-    assert torch.load(path, weights_only=False)["epoch"] == 50
+    assert torch.load(path, weights_only=True)["epoch"] == 50
     assert os.path.getsize(path) != first
     assert os.listdir(tmp_path) == ["w.pth"]
 

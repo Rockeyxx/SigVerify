@@ -23,7 +23,7 @@ from config.settings import (
 )
 from scripts.evaluate import compute_eer, compute_far_frr
 from src.data.dataset import writer_independent_split
-from src.data.parsers import merge_datasets, parse_dataset
+from src.data.parsers import merge_datasets
 from src.data.renderer import render_trajectory_to_image
 from src.models.siamese import SpatialSiamese, TemporalSiamese
 
@@ -162,8 +162,10 @@ def main():
 
     print(f"Dataset split: {len(train_ids)} train, {len(val_ids)} val, {len(test_ids)} test writers")
 
-    spatial_model = SpatialSiamese.from_state_dict(torch.load(args.spatial_weights, map_location="cpu"))
-    temporal_model = TemporalSiamese.from_state_dict(torch.load(args.temporal_weights, map_location="cpu"))
+    spatial_model = SpatialSiamese.from_state_dict(
+        torch.load(args.spatial_weights, map_location="cpu", weights_only=True))
+    temporal_model = TemporalSiamese.from_state_dict(
+        torch.load(args.temporal_weights, map_location="cpu", weights_only=True))
 
     print("Evaluating paired validation split...")
     s_val_gen, s_val_imp, t_val_gen, t_val_imp = evaluate_paired_corpus(

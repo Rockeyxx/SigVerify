@@ -68,3 +68,9 @@ logs/
 
 #graphy
 graphify-out/
+
+# Skylos
+# The CI action and a local `skylos .` both write the report into the repo root.
+# The config in .skylos/ IS tracked; the generated report is not.
+skylos-report.json
+.skylos/cache/

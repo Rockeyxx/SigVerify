@@ -276,7 +276,15 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 
     An unknown ID raises rather than being ignored: a typo would otherwise hold
     out nothing and quietly score the model on the wrong writers.
+
+    `test_ratio` does not size the test partition here — the pinned writers do —
+    but it is still checked against the other two. Callers pass the same
+    `*ratios` triple to this and to `writer_independent_split`, so accepting a
+    triple that does not sum to 1 would mean the two paths disagree about the
+    split while both look like they were configured identically.
     """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
+
     ids = list(writer_ids)
     unknown = sorted(set(pinned) - set(ids))
     if unknown:

@@ -67,7 +67,11 @@ def build_parameter_cache(writer_samples, writer_ids, workers, cache_path):
     """
     if cache_path and os.path.exists(cache_path):
         print(f"Loading SigmaLambda cache: {cache_path}")
-        return torch.load(cache_path, weights_only=False)
+        # `weights_only=False` is required and safe here: the cache holds pickled
+        # SignatureParameters dataclasses, not tensors, and this process wrote it
+        # itself under ~/.cache. It is not a distributed artifact.
+        return torch.load(  # skylos: ignore[SKY-D265] self-written local dataclass cache
+            cache_path, weights_only=False)
 
     flat, owner = [], []
     for writer in sorted(writer_ids):
@@ -130,7 +134,7 @@ def save_weights(model, args, channels, path, epoch):
     which is exactly the failure this is here to survive. `os.replace` is atomic
     on POSIX.
     """
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     tmp = path + ".tmp"
     torch.save({"state_dict": model.state_dict(), "features": args.features,
                 "channels": channels, "seed": args.seed,

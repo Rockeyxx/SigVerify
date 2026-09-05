@@ -59,7 +59,11 @@ def load_model(branch, weights_path, device="cpu"):
     torch.set_num_threads(INFERENCE_NUM_THREADS)
     cv2.setNumThreads(INFERENCE_NUM_THREADS)
 
-    state_dict = torch.load(weights_path, map_location="cpu")
+    # `weights_only=True` refuses to unpickle arbitrary objects. These checkpoints
+    # are downloaded from Releases by the install instructions, so a plain
+    # `torch.load` would execute whatever a substituted .pth carried. Every
+    # artifact this repo ships is a plain tensor state_dict and loads unchanged.
+    state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
 
     if branch == "spatial":
         # Model architecture is reconstructed directly from checkpoint metadata to match original parameters.

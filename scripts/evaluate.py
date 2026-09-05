@@ -37,7 +37,6 @@ from src.data.dataset import (
     collate_temporal_pairs, generate_skilled_pairs, preprocess_image,
     writer_independent_split,
 )
-from src.data.parsers import merge_datasets, parse_dataset
 from src.models.siamese import SpatialSiamese, TemporalSiamese
 from src.verification import similarity_from_distance
 
@@ -618,16 +617,6 @@ def enrolled_writer_count(embedded, num_references=NUM_ENROLLMENT_REFERENCES):
                and len(embedded[w]["forged"]))
 
 
-def score_loader(model, dataloader, device, desc="scoring"):
-    """
-    Run inference over a loader and split the similarity scores by true label.
-
-    Returns: (genuine_scores, impostor_scores) as numpy arrays.
-    """
-    scores, labels = score_pairs(model, dataloader, device, desc=desc)
-    return scores[labels == 1], scores[labels == 0]
-
-
 def load_branch_model(branch, weights_path, device):
     """
     Instantiate the requested backbone and load its trained weights.
@@ -639,7 +628,7 @@ def load_branch_model(branch, weights_path, device):
     raise a shape error or, worse, load a subset of the weights and report a
     number that means nothing.
     """
-    state_dict = torch.load(weights_path, map_location="cpu")
+    state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
     if branch == "spatial":
         model = SpatialSiamese.from_state_dict(state_dict)
     else:
@@ -850,7 +839,7 @@ def main(argv=None):
     matplotlib.use("Agg")
 
     args = parse_args(argv)
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --output-dir
 
     # Dynamic hardware selection for evaluation inference
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

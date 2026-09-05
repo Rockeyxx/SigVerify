@@ -30,7 +30,7 @@ def load_ensemble(device="cpu"):
         path = os.path.join(MODEL_WEIGHTS_DIR, wf)
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing ensemble weight: {path}")
-        sd = torch.load(path, map_location=device)
+        sd = torch.load(path, map_location=device, weights_only=True)
         model = TemporalSiamese.from_state_dict(sd).to(device).eval()
         models.append(model)
     return models

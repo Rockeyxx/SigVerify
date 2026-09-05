@@ -414,7 +414,7 @@ class TestWeightsSaveLoad:
         torch.save(model.state_dict(), path)
 
         model2 = SpatialSiamese(embedding_dim=512)
-        model2.load_state_dict(torch.load(path, map_location="cpu"))
+        model2.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         model2.eval()
         with torch.no_grad():
             emb_after = model2.encode(x)
@@ -434,7 +434,7 @@ class TestWeightsSaveLoad:
         torch.save(model.state_dict(), path)
 
         model2 = TemporalSiamese(embedding_dim=128)
-        model2.load_state_dict(torch.load(path, map_location="cpu"))
+        model2.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         model2.eval()
         with torch.no_grad():
             emb_after = model2.encode(x)
@@ -456,7 +456,7 @@ class TestWeightsSaveLoad:
             "loss": loss,
         }, path)
 
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         assert checkpoint["epoch"] == 42
         assert abs(checkpoint["loss"] - 0.123) < 1e-6
 

@@ -176,9 +176,20 @@ TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
 
-# Target sampling rate for online trajectories. Declared independently in four
-# places (features.py, two constants in parsers.py, sigma_lognormal.py), all
-# agreeing at 100 Hz / 10 ms — an unlifted system-wide tunable.
+# Target sampling rate for online trajectories, and the period that follows from
+# it. Everything inside src/ derives from these two: features.py's Nyquist term,
+# and parsers.py's SIGCOMP_SAMPLE_MS and DEEPSIGN_TARGET_PERIOD_MS, which are the
+# rates the two pen corpora are decimated *onto*. Change the rate here and the
+# resampling follows; a literal 10.0 left behind in a parser would silently
+# resample one corpus to a different clock than the model was trained on.
+#
+# parsers.MAX_GAP_MS is NOT part of this family. It is 100 *milliseconds* — the
+# cap on an inter-sample gap — and shares the number 100 with the rate in hertz
+# by coincidence. Wiring them together would couple the dt clip to the sample
+# rate and break the `dt` channel's [0, 1] contract.
+#
+# tools/sigma_lognormal.py restates the rate deliberately: it is a clean-room
+# implementation with no project imports. Keep the two in step by hand.
 TEMPORAL_SAMPLE_RATE_HZ = 100.0
 TEMPORAL_SAMPLE_PERIOD_MS = 1000.0 / TEMPORAL_SAMPLE_RATE_HZ
 

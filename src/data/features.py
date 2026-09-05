@@ -22,13 +22,15 @@ DsDTW low-passes x and y before computing anything; so does this.
 import numpy as np
 from scipy.signal import butter, filtfilt
 
+from config.settings import TEMPORAL_SAMPLE_RATE_HZ
+
 # Butterworth low-pass matching DsDTW's preprocessing. Signature sampling rates
 # in this corpus sit around 100 Hz, and 15 Hz is well above the bandwidth of
 # human handwriting (a fast stroke reversal is a few Hz) while cutting the
 # sensor chatter that differentiation would otherwise square.
 _FILTER_ORDER = 3
 _CUTOFF_HZ = 15.0
-_SAMPLE_RATE_HZ = 100.0
+_SAMPLE_RATE_HZ = TEMPORAL_SAMPLE_RATE_HZ
 
 # Guard for the ratios below. Velocity reaches exactly zero whenever the pen is
 # held still, which real captures are full of — dots, pauses, and duplicated

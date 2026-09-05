@@ -33,6 +33,7 @@ from config.settings import (
     PRESSURE_IMPUTATION_VALUE,
     SIGCOMP2011_DIR,
     SVC2004_DIR,
+    TEMPORAL_SAMPLE_PERIOD_MS,
     UTSIG_DIR,
 )
 
@@ -51,7 +52,8 @@ SIGCOMP_PRESSURE_MAX = 1023.0
 SIGCOMP_DECIMATION = 2
 # Milliseconds per row *after* decimation — 200 Hz halved. This is what makes
 # a dropped pen-up run measurable as elapsed time rather than just a hole.
-SIGCOMP_SAMPLE_MS = 10.0
+# Equals the corpus-wide target period: decimation exists to land on it.
+SIGCOMP_SAMPLE_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
 # ─── DeepSignDB ───────────────────────────────────────────────────────
 # Mapping definition matching source database distributions across Development and Evaluation partitions.
@@ -71,8 +73,9 @@ DEEPSIGN_PRESSURE_COLUMN = {"MCYT": 5, "BiosecurID": 6, "BiosecureDS2": 6,
 DEEPSIGN_PEN_SOURCES = ("MCYT", "BiosecurID", "BiosecureDS2")
 DEEPSIGN_PRESSURE_MAX = 1023.0
 
-# Target temporal period in milliseconds (10 ms period = 100 Hz frequency).
-DEEPSIGN_TARGET_PERIOD_MS = 10.0
+# Target temporal period in milliseconds, derived from the corpus-wide
+# sampling rate rather than restated as a literal.
+DEEPSIGN_TARGET_PERIOD_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _CEDAR_FORGED = re.compile(r"^forgeries_(\d+)_(\d+)\.png$", re.IGNORECASE)
@@ -304,7 +307,7 @@ def load_svc2004_file(path, extra_channels=None):
     The first line is a point count, which is skipped — the actual rows are
     trusted over the declared number.
     """
-    with open(path, "r") as fh:
+    with open(path, "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = [line.split() for line in fh.read().splitlines() if line.strip()]
 
     rows = np.array([[float(v) for v in row] for row in lines[1:]], dtype=np.float32)
@@ -355,7 +358,7 @@ def svc2004_has_pressure(root=SVC2004_DIR):
     for filename in sorted(os.listdir(root)):
         if not _SVC_FILE.match(filename):
             continue
-        with open(os.path.join(root, filename), "r") as fh:
+        with open(os.path.join(root, filename), "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] filename matched _SVC_FILE
             fh.readline()  # point-count header
             first = fh.readline().split()
         return len(first) >= 7
@@ -396,7 +399,7 @@ def load_mobisig_file(path):
     channels, and the model derives its own dynamics from them.
     """
     xs, ys, ps = [], [], []
-    with open(path, newline="") as handle:
+    with open(path, newline="") as handle:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         for row in csv.DictReader(handle):
             xs.append(float(row["x"]))
             ys.append(float(row["y"]))
