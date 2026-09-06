@@ -219,6 +219,12 @@ Increasing enrolled references smoothly improves verification accuracy without r
 Compiled PyTorch weight checkpoints (`.pth` files) are tracked outside Git via `.gitignore` to keep the repository compact:
 
 - **Pre-trained Weights Distribution:** Official release weights (`spatial_cnn.pth` and `temporal_lstm.pth`) are hosted on **[GitHub Releases](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases)**.
+- **Optional accuracy tier:** six `temporal_dt_s4{2..7}.pth` checkpoints. Enabling
+  them via `SignatureService(use_temporal_ensemble=True)` averages their
+  embeddings and lowers temporal EER from **8.83% to 6.94%** on DeepSignDB
+  Evaluation (372 held-out writers, 25 draws, winning 25/25). Costs 6x inference
+  — about 32 ms against the 3.0 s budget. The service **raises** if any member is
+  missing rather than quietly running one model.
 - **Local Placement:** Download the compiled weights from the release page and place them into `models/weights/`:
   ```
   models/weights/
@@ -303,6 +309,8 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 - **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 30.77% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
+- **Fusion is not unconditionally better.** Late fusion helps when the two branches are of comparable strength, and *hurts* when one pulls ahead. Measured on writers neither branch trained on: fusion improves the single temporal model (3.96% → 3.62%) and degrades the six-seed ensemble (2.61% → 4.63%, losing 22 of 25 draws). For the pen-tablet tier the ensemble is served **unimodally**; fusion is used where the spatial branch is competitive. See `SUMMARY.md` Part 9 §15.
+- **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number.
 
 ---
 
