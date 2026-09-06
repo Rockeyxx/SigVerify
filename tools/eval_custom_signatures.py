@@ -7,7 +7,6 @@ on custom signature photo samples from ~/Downloads (H: English, M: Arabic, Omar:
 import os
 import tempfile
 import sys
-import glob
 import cv2
 import numpy as np
 import torch

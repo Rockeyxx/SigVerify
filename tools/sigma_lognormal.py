@@ -81,6 +81,9 @@ _LEVELS = {
         "annulus": (0.40, 0.65), "theta": 0.20},
 }
 
+# `_SAMPLE_RATE_HZ` restates config.settings.TEMPORAL_SAMPLE_RATE_HZ rather
+# than importing it: this module is clean-room and carries no project
+# imports. If the corpus-wide rate changes, change it here too.
 _CUTOFF_HZ, _FILTER_ORDER, _SAMPLE_RATE_HZ = 10.0, 2, 100.0
 _EPS = 1e-9
 

@@ -33,7 +33,8 @@ from config.settings import (
     PRESSURE_IMPUTATION_VALUE,
     INFERENCE_NUM_THREADS,
 )
-from src.data.dataset import preprocess_image, quality_gate, trajectory_gate
+from src.data.dataset import as_spatial_input, quality_gate, trajectory_gate
+from src.data.renderer import render_trajectory_to_image
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 
 # Vector representations are serialized as raw little-endian float32 arrays. 512-d spatial → 2048 B,
@@ -57,7 +58,11 @@ def load_model(branch, weights_path, device="cpu"):
     torch.set_num_threads(INFERENCE_NUM_THREADS)
     cv2.setNumThreads(INFERENCE_NUM_THREADS)
 
-    state_dict = torch.load(weights_path, map_location="cpu")
+    # `weights_only=True` refuses to unpickle arbitrary objects. These checkpoints
+    # are downloaded from Releases by the install instructions, so a plain
+    # `torch.load` would execute whatever a substituted .pth carried. Every
+    # artifact this repo ships is a plain tensor state_dict and loads unchanged.
+    state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
 
     if branch == "spatial":
         # Model architecture is reconstructed directly from checkpoint metadata to match original parameters.
@@ -84,7 +89,7 @@ def embed(model, sample, branch, device="cpu"):
         float32 numpy array — 512-d for spatial, 128-d for temporal.
     """
     if branch == "spatial":
-        tensor = torch.from_numpy(preprocess_image(sample)).unsqueeze(0)
+        tensor = torch.from_numpy(_as_spatial_input(sample)).unsqueeze(0)
     elif branch == "temporal":
         tensor = torch.as_tensor(np.asarray(sample, dtype=np.float32)).unsqueeze(0)
     else:
@@ -92,6 +97,40 @@ def embed(model, sample, branch, device="cpu"):
 
     with torch.no_grad():
         return model.encode(tensor.to(device)).squeeze(0).cpu().numpy().astype(EMBEDDING_DTYPE)
+
+
+def _as_spatial_input(sample):
+    """
+    Bring a spatial sample to the model's [1, H, W] contract, or refuse it.
+
+    Thin serving-side wrapper over `src.data.dataset.as_spatial_input`, which
+    holds the rule and the reasoning. It is shared with the training loader on
+    purpose: two copies of "which kind of array is this" would drift, and a
+    train/serve disagreement about what an array means is invisible in every
+    number either side reports.
+
+    Three inputs are legitimate here and only one of them is already canonical:
+
+    * a path — read, resized and inverted by `preprocess_image`;
+    * a **raw scan array** (paper bright, ink dark, any size) — same treatment;
+    * a **rendered trajectory**, which `render_trajectory_to_image` already
+      emits at SPATIAL_INPUT_SIZE with inverted polarity, so it passes straight
+      through. Sending it through `preprocess_image` would invert it a second
+      time and hand the model a photographic negative.
+
+    A **raw** `[L, C]` trajectory is refused rather than rasterized on the
+    caller's behalf (`allow_trajectory=False`). `verify()` and the enrolment
+    helpers render explicitly, and AGENTS.md pins the image argument to a scan,
+    so accepting one silently here would widen the serving contract.
+
+    Anything else raises. Accepting it quietly is the defect this function
+    exists to close: `SpatialSiamese` pools adaptively, so a wrong-sized,
+    un-inverted uint8 scan yields a perfectly plausible 512-d embedding with no
+    exception — and enrolment then writes that template to the database. The
+    inversion alone is worth 4.86% to 0.00% EER on CEDAR, so a silent miss here
+    is not cosmetic.
+    """
+    return as_spatial_input(sample, allow_trajectory=False)
 
 
 def embedding_to_bytes(embedding):
@@ -118,15 +157,24 @@ def similarity_from_distance(distance):
     """
     Convert an L2 embedding distance into a bounded similarity score.
 
-        S = 1 / (1 + d)
+    Uses reciprocal scaling S = 1 / (1 + d), mapping [0, inf) to (0, 1]. This
+    formula is part of the project contract and cannot be swapped for an exponential
+    or cosine form without recalibrating every enrolled reference in the database:
+    a stored template enrolled under one curve cannot match probes under another.
 
-    Maps d in [0, inf) onto S in (0, 1], so identical signatures approach 1 and
-    wildly different ones approach 0. Accepts a scalar or an array.
+    Fixed on 2026-08-18 (P-006): evaluate.py previously defined its own private
+    function whose reciprocal denominator held an extra factor of 2. The training
+    loss and the verification facade agreed with each other and disagree with
+    evaluate.py, so a model benchmarked at one reported threshold could never be
+    deployed with it. Single authority now lives here in src/verification.py.
 
-    This lives in `src/` rather than in `scripts/evaluate.py` because both the
-    inference path and the threshold-calibration path must use the *same*
-    function, and `src/` cannot import from `scripts/`. They previously held
-    independent copies of the formula: had either been changed alone, every
+    Never subtract: 1.0 - distance / margin clips at margin and creates a hard floor
+    where all impostors beyond margin receive score 0.0, which destroys the ranking
+    information evaluate.py needs to sweep thresholds across the tail. Reciprocal
+    preserves ordering at every distance.
+
+    Never tune: `similarity_from_distance` is not a hyperparameter. Moving it moves
+    the scale every score is reported on, so a test score that 'improved' under a
     calibrated threshold would have kept its old numeric value while silently
     describing a different score distribution.
     """
@@ -150,18 +198,30 @@ def _pressure_is_imputed(trajectory):
     return bool(np.allclose(trajectory[:, 2], PRESSURE_IMPUTATION_VALUE))
 
 
-def verify(spatial=None, temporal=None, engine=None, device="cpu"):
+def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True):
     """
     Perform signature verification evaluating probe inputs against enrolled references.
 
     Args:
-        spatial: Optional tuple of (model, reference_embeddings, probe_image_path).
+        spatial: Optional tuple of (model, reference_embeddings, probe_image_path/array).
         temporal: Optional tuple of (model, reference_embeddings, probe_trajectory).
         engine: FusionEngine instance for combining branch scores.
+        device: Execution device ('cpu').
+        auto_render_spatial: If True and spatial probe is absent while temporal trajectory
+            is present, auto-render the spatial stroke image from the trajectory.
 
     Returns dictionary containing verification verdict:
         {"decision": str, "confidence": float, "routing": str, "degraded": bool}
     """
+    if auto_render_spatial and spatial is not None and temporal is not None:
+        s_model, s_references, *s_probe_parts = spatial
+        s_probe = s_probe_parts[0] if s_probe_parts else None
+        if s_probe is None:
+            _, _, t_probe = temporal
+            if t_probe is not None:
+                s_probe = render_trajectory_to_image(t_probe)
+                spatial = (s_model, s_references, s_probe)
+
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
 
@@ -233,4 +293,340 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu"):
                                  f"{PRESSURE_IMPUTATION_VALUE} — device reported none")
 
     return result
+
+
+class TemporalEnsemble:
+    """
+    Model wrapper ensembling multiple TemporalSiamese checkpoints.
+
+    Evaluates a trajectory across N models and returns their mean embedding.
+    Conforms to the `.encode(tensor)` interface expected by embed().
+    """
+
+    def __init__(self, models: list):
+        self.models = models
+
+    def encode(self, tensor: torch.Tensor) -> torch.Tensor:
+        embs = [m.encode(tensor) for m in self.models]
+        return torch.stack(embs, dim=0).mean(dim=0)
+
+
+    def __len__(self) -> int:
+        return len(self.models)
+
+    def __iter__(self):
+        return iter(self.models)
+
+    def __getitem__(self, index):
+        return self.models[index]
+
+
+def load_temporal_ensemble(
+    temporal_lstm_path: str | None = None,
+    ensemble_seeds: list[int] | tuple[int, ...] | None = None,
+    device: str = "cpu",
+) -> TemporalEnsemble | None:
+    """
+    Load temporal ensemble from multiple seed checkpoints if available.
+
+    If ensemble checkpoints are missing, return None and fall back to single model.
+    This makes the ensemble optional for CI testing and environments holding only
+    the public release weights.
+
+    Args:
+        temporal_lstm_path: Path to the shipped temporal_lstm.pth or weights directory.
+        ensemble_seeds: List or tuple of seed numbers for ensemble members
+            (defaults to TEMPORAL_ENSEMBLE_SEEDS from config.settings).
+        device: Target device ('cpu').
+
+    Returns:
+        TemporalEnsemble wrapper (usable both as a model wrapper and as a sequence of models)
+        if all ensemble checkpoints exist, None otherwise.
+    """
+    from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
+                                 TEMPORAL_ENSEMBLE_TEMPLATE)
+
+    seeds = ensemble_seeds if ensemble_seeds is not None else TEMPORAL_ENSEMBLE_SEEDS
+    if temporal_lstm_path:
+        weights_dir = (
+            os.path.dirname(temporal_lstm_path)
+            if not os.path.isdir(temporal_lstm_path)
+            else temporal_lstm_path
+        )
+    else:
+        weights_dir = MODEL_WEIGHTS_DIR
+
+    paths = [
+        os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
+        for seed in seeds
+    ]
+    if not all(os.path.exists(p) for p in paths):
+        # Ensemble member missing — fall back to single shipped model
+        return None
+
+    models = [load_model("temporal", p, device=device) for p in paths]
+    return TemporalEnsemble(models)
+
+
+class SignatureService:
+    """
+    High-level operational service for Signature Verification and Enrollment.
+
+    Designed for frontend (GUI) and backend (API/Database) developers to perform
+    enrollment and verification without handling raw PyTorch tensors, model loading,
+    or embedding byte serialization.
+
+    Supports three verification modes:
+      1. 'unimodal': Evaluates either an image probe OR a trajectory probe alone.
+      2. 'temporal-multi': Evaluates a digitizer trajectory by extracting dynamics
+         and auto-rendering the spatial stroke image, running full late fusion.
+      3. 'multimodal': Evaluates both an independent paper scan/photo AND a digitizer
+         trajectory under late fusion.
+
+    `use_temporal_ensemble=True` scores the temporal branch across the six `dt`
+    seeds and returns their mean embedding, which leaves the 128-d width and every
+    stored template unchanged. Measured on 120 unseen DeepSignDB writers under one
+    shared K=5 draw: 4.82% EER against 6.92% for a single member. (Averaging the
+    per-model scores instead reaches 4.53%, but that cannot be expressed through
+    the `.encode()` interface `embed()` calls.) Those numbers are threshold-free
+    EER on one draw and are NOT comparable to the calibrated 25-split figures in
+    SUMMARY.md; they establish the ordering of the arms, not an operating point.
+    """
+
+    def __init__(
+        self,
+        spatial_weights: str | None = None,
+        temporal_weights: str | None = None,
+        device: str = "cpu",
+        use_temporal_ensemble: bool = False,
+    ):
+        from config.settings import MODEL_WEIGHTS_DIR
+        self.device = device
+        self.spatial_weights = spatial_weights or os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
+        self.temporal_weights = temporal_weights or os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
+        self.use_temporal_ensemble = use_temporal_ensemble
+        self._spatial_model = None
+        self._temporal_model = None
+
+    @property
+    def spatial_model(self):
+        if self._spatial_model is None:
+            self._spatial_model = load_model("spatial", self.spatial_weights, self.device)
+        return self._spatial_model
+
+    @property
+    def temporal_model(self):
+        if self._temporal_model is None:
+            if self.use_temporal_ensemble:
+                self._temporal_model = self._load_temporal_ensemble()
+            else:
+                self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
+        return self._temporal_model
+
+    def _load_temporal_ensemble(self):
+        """
+        Load every ensemble member, or refuse.
+
+        Falling back to the single model when a member is missing was the
+        original behaviour, and it fails in the worst direction: the caller asked
+        for an ensemble, got one model, and nothing said so. The member weights
+        are gitignored and absent from the v0.8.0 release, so on any machine
+        holding only the release that fallback is the *normal* path, not an edge
+        case — the service would quietly run at single-model accuracy while its
+        own flag claimed otherwise. Part 9 §12 records four serving defects with
+        exactly this shape.
+        """
+        from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
+                                     TEMPORAL_ENSEMBLE_TEMPLATE)
+
+        ensemble = load_temporal_ensemble(
+            self.temporal_weights,
+            ensemble_seeds=TEMPORAL_ENSEMBLE_SEEDS,
+            device=self.device,
+        )
+        if ensemble is None:
+            weights_dir = (
+                os.path.dirname(self.temporal_weights)
+                if not os.path.isdir(self.temporal_weights)
+                else self.temporal_weights
+            ) or MODEL_WEIGHTS_DIR
+            paths = [
+                os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
+                for seed in TEMPORAL_ENSEMBLE_SEEDS
+            ]
+            missing = [p for p in paths if not os.path.exists(p)]
+            raise FileNotFoundError(
+                f"use_temporal_ensemble=True needs all "
+                f"{len(TEMPORAL_ENSEMBLE_SEEDS)} member checkpoints; "
+                f"{len(missing)} are missing:\n  "
+                + "\n  ".join(missing)
+                + "\nThese are not in the public release. Either fetch them or "
+                  "construct the service with use_temporal_ensemble=False, which "
+                  "runs the single shipped model deliberately rather than by "
+                  "accident.")
+        return ensemble
+
+
+    def _ensure_embeddings(self, refs: list[bytes | np.ndarray] | None) -> list[np.ndarray]:
+        if not refs:
+            return []
+        out = []
+        for r in refs:
+            if isinstance(r, (bytes, bytearray)):
+                out.append(bytes_to_embedding(r))
+            else:
+                out.append(np.asarray(r, dtype=EMBEDDING_DTYPE))
+        return out
+
+    def enroll_from_tablet(self, trajectories: list[np.ndarray]) -> dict[str, list[bytes]]:
+        """
+        Enroll a user who signs K times on a digitizer tablet (e.g. XPPen Deco 640).
+
+        Extracts 128-d temporal embeddings from trajectories, automatically renders
+        each stroke to a canonical 155x220 spatial image, and extracts 512-d spatial
+        embeddings.
+
+        Returns:
+            {"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}
+            ready for SQLite BLOB storage.
+        """
+        if not trajectories:
+            raise ValueError("No trajectories provided for enrollment.")
+
+        spatial_bytes = []
+        temporal_bytes = []
+
+        for traj in trajectories:
+            t_emb = embed(self.temporal_model, traj, "temporal", self.device)
+            temporal_bytes.append(embedding_to_bytes(t_emb))
+
+            rendered_img = render_trajectory_to_image(traj)
+            s_emb = embed(self.spatial_model, rendered_img, "spatial", self.device)
+            spatial_bytes.append(embedding_to_bytes(s_emb))
+
+        return {
+            "spatial_embeddings": spatial_bytes,
+            "temporal_embeddings": temporal_bytes,
+        }
+
+    def enroll_multimodal(
+        self,
+        images: list[str | np.ndarray],
+        trajectories: list[np.ndarray],
+    ) -> dict[str, list[bytes]]:
+        """
+        Enroll a user with separate paper scans/photos and digitizer trajectories.
+
+        Returns:
+            {"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}
+        """
+        if len(images) != len(trajectories):
+            raise ValueError(
+                f"Mismatch in enrollment sample count: {len(images)} images vs {len(trajectories)} trajectories."
+            )
+
+        spatial_bytes = [
+            embedding_to_bytes(embed(self.spatial_model, img, "spatial", self.device))
+            for img in images
+        ]
+        temporal_bytes = [
+            embedding_to_bytes(embed(self.temporal_model, traj, "temporal", self.device))
+            for traj in trajectories
+        ]
+
+        return {
+            "spatial_embeddings": spatial_bytes,
+            "temporal_embeddings": temporal_bytes,
+        }
+
+    def enroll_unimodal(
+        self,
+        samples: list[str | np.ndarray],
+        modality: str,
+    ) -> dict[str, list[bytes] | str]:
+        """
+        Enroll a user in a single modality ('spatial' or 'temporal').
+
+        Returns:
+            {"embeddings": [bytes...], "modality": modality}
+        """
+        if modality not in ("spatial", "temporal"):
+            raise ValueError(f"Unknown modality '{modality}'. Expected 'spatial' or 'temporal'.")
+
+        model = self.spatial_model if modality == "spatial" else self.temporal_model
+        blobs = [
+            embedding_to_bytes(embed(model, s, modality, self.device))
+            for s in samples
+        ]
+        return {"embeddings": blobs, "modality": modality}
+
+    def verify(
+        self,
+        mode: str,
+        probe_trajectory: np.ndarray | None = None,
+        probe_image: str | np.ndarray | None = None,
+        reference_spatial: list[bytes | np.ndarray] | None = None,
+        reference_temporal: list[bytes | np.ndarray] | None = None,
+    ) -> dict:
+        """
+        Verify a signature probe against enrolled reference templates under the specified mode.
+
+        Args:
+            mode: 'unimodal', 'temporal-multi', or 'multimodal'.
+            probe_trajectory: Optional [L, 4] trajectory array (X, Y, P, dt).
+            probe_image: Optional image file path or numpy array.
+            reference_spatial: List of enrolled spatial reference templates (bytes or numpy).
+            reference_temporal: List of enrolled temporal reference templates (bytes or numpy).
+
+        Returns:
+            {"decision": "Genuine"|"Forged", "confidence": float, "routing": str, "degraded": bool, "reasons": list[str]}
+        """
+        ref_s = self._ensure_embeddings(reference_spatial)
+        ref_t = self._ensure_embeddings(reference_temporal)
+
+        if mode == "temporal-multi":
+            if probe_trajectory is None:
+                raise ValueError("Mode 'temporal-multi' requires probe_trajectory.")
+            if not ref_t or not ref_s:
+                raise ValueError("Mode 'temporal-multi' requires both reference_temporal and reference_spatial.")
+
+            return verify(
+                spatial=(self.spatial_model, ref_s, None),
+                temporal=(self.temporal_model, ref_t, probe_trajectory),
+                device=self.device,
+                auto_render_spatial=True,
+            )
+
+        elif mode == "multimodal":
+            if probe_trajectory is None or probe_image is None:
+                raise ValueError("Mode 'multimodal' requires both probe_image and probe_trajectory.")
+            if not ref_s or not ref_t:
+                raise ValueError("Mode 'multimodal' requires both reference_spatial and reference_temporal.")
+
+            return verify(
+                spatial=(self.spatial_model, ref_s, probe_image),
+                temporal=(self.temporal_model, ref_t, probe_trajectory),
+                device=self.device,
+                auto_render_spatial=False,
+            )
+
+        elif mode == "unimodal":
+            if probe_trajectory is not None and ref_t:
+                return verify(
+                    temporal=(self.temporal_model, ref_t, probe_trajectory),
+                    device=self.device,
+                )
+            elif probe_image is not None and ref_s:
+                return verify(
+                    spatial=(self.spatial_model, ref_s, probe_image),
+                    device=self.device,
+                )
+            else:
+                raise ValueError(
+                    "Mode 'unimodal' requires either (probe_image + reference_spatial) "
+                    "or (probe_trajectory + reference_temporal)."
+                )
+
+        else:
+            raise ValueError(f"Unknown mode '{mode}'. Expected 'unimodal', 'temporal-multi', or 'multimodal'.")
 

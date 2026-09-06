@@ -437,7 +437,7 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None):
     an epoch worse than the true best still reads as an improvement and
     overwrites the good weights.
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     torch.save({
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
@@ -450,7 +450,7 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None):
 
 def save_weights(model, path):
     """Save model weights (state_dict only) for distribution and deployment."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     torch.save(model.state_dict(), path)
     tqdm.write(f"  Best model weights saved: {path}")
 
@@ -682,7 +682,7 @@ def main(argv=None):
                 f"--resume {args.resume!r} does not exist. Refusing to silently "
                 f"start a fresh run: that discards the checkpoint you meant to "
                 f"continue, and the first save would overwrite it.")
-        checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -702,7 +702,8 @@ def main(argv=None):
         # optimizer state and epoch counter belong to the pre-training dataset,
         # and carrying them over would start this run mid-schedule against data
         # the optimizer has never seen.
-        model.load_state_dict(torch.load(args.init_weights, map_location=device))
+        model.load_state_dict(
+            torch.load(args.init_weights, map_location=device, weights_only=True))
         print(f"Initialized from pre-trained weights: {args.init_weights}")
 
     weights_path = os.path.join(args.weights_dir, weights_filename)

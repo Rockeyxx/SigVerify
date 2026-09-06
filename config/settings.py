@@ -61,6 +61,38 @@ SPATIAL_SQUARE_PAD = False
 MIN_BBOX_PIXELS = 64                    # Minimum signature bounding box edge dimension
 MIN_LAPLACIAN_VARIANCE = 50.0           # Minimum Laplacian sharpness threshold
 
+# ─── Trajectory rasterizer (src/data/renderer.py) ────────────────────
+# Renders a pen trajectory into the spatial branch's input so one signing event
+# can feed both branches. Every constant lives here rather than as a literal in
+# the renderer: a duplicated `(220, 155)` would silently disagree with
+# SPATIAL_INPUT_SIZE the moment either moved, which is the same failure a
+# hardcoded channel count already caused on the temporal side.
+RENDER_MARGIN_RATIO = 0.12              # Fraction of each edge left blank, so strokes never clip
+RENDER_BASE_THICKNESS = 2.0             # Stroke width in pixels at full pressure
+RENDER_MIN_THICKNESS = 1                # Thinnest drawable stroke; cv2.line needs >= 1
+# A sample is pen-up when pressure vanishes OR the clock jumps. SigComp2011
+# records pen-up travel as force = 0, but SVC2004 and DeepSignDB mark a lift by
+# the time gap alone, so pressure on its own would draw a line across every lift
+# in those corpora.
+RENDER_PEN_UP_PRESSURE = 1e-4           # Pressure at or below this is not touching
+# The gap is judged against the signature's OWN median sampling period, not an
+# absolute number of seconds. Sampling rates differ per corpus -- SVC2004 ~100 Hz,
+# SigComp2011 200 Hz, DeepSignDB resampled to 10 ms -- so a fixed cutoff such as
+# 0.05 s calls every sample a pen lift on any corpus slower than 20 Hz, and
+# catches none on a fast one.
+RENDER_PEN_UP_DT_RATIO = 3.0            # A gap this many times the median period is a lift
+
+# ─── Temporal ensemble (SignatureService use_temporal_ensemble=True) ──
+# Averaging these six checkpoints' embeddings measured 4.82% EER against 6.92%
+# for a single member, on 120 unseen DeepSignDB writers under one shared K=5
+# draw. Averaging their per-model SCORES instead reaches 4.53%, but that cannot
+# be expressed through the `.encode()` interface `embed()` calls, so the
+# embedding mean ships and gives up 0.29 points for a far smaller change.
+# These weights are gitignored and are NOT part of the v0.8.0 release, so a
+# machine that only has the release cannot form the ensemble.
+TEMPORAL_ENSEMBLE_SEEDS = (42, 43, 44, 45, 46, 47)
+TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
+
 # ─── Temporal input gate ─────────────────────────────────────────────
 # Quality screening for trajectory streams. `normalize_trajectory` runs inside dataset parsers but not on direct inference paths, requiring boundary checks to prevent unnormalized raw tablet inputs from reaching models trained on normalized coordinates.
 # `normalize_trajectory` applies z-score normalization per axis (zero-mean, unit-variance).
@@ -144,9 +176,20 @@ TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
 
-# Target sampling rate for online trajectories. Declared independently in four
-# places (features.py, two constants in parsers.py, sigma_lognormal.py), all
-# agreeing at 100 Hz / 10 ms — an unlifted system-wide tunable.
+# Target sampling rate for online trajectories, and the period that follows from
+# it. Everything inside src/ derives from these two: features.py's Nyquist term,
+# and parsers.py's SIGCOMP_SAMPLE_MS and DEEPSIGN_TARGET_PERIOD_MS, which are the
+# rates the two pen corpora are decimated *onto*. Change the rate here and the
+# resampling follows; a literal 10.0 left behind in a parser would silently
+# resample one corpus to a different clock than the model was trained on.
+#
+# parsers.MAX_GAP_MS is NOT part of this family. It is 100 *milliseconds* — the
+# cap on an inter-sample gap — and shares the number 100 with the rate in hertz
+# by coincidence. Wiring them together would couple the dt clip to the sample
+# rate and break the `dt` channel's [0, 1] contract.
+#
+# tools/sigma_lognormal.py restates the rate deliberately: it is a clean-room
+# implementation with no project imports. Keep the two in step by hand.
 TEMPORAL_SAMPLE_RATE_HZ = 100.0
 TEMPORAL_SAMPLE_PERIOD_MS = 1000.0 / TEMPORAL_SAMPLE_RATE_HZ
 
@@ -163,7 +206,7 @@ ALPHA_GRID_STEP = 0.05
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 # See AGENTS.md and SUMMARY.md.
-SPATIAL_DECISION_THRESHOLD = 0.6299     # Calibrated spatial branch threshold (EER on validation)
+SPATIAL_DECISION_THRESHOLD = 0.7711     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
 DECISION_THRESHOLD = 0.8196             # Calibrated threshold tau for late-fused model evaluation
 

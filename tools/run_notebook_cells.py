@@ -14,7 +14,8 @@ for idx, cell in enumerate(nb["cells"]):
     src = cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
     print(f"\n===== CELL {idx} ({cell['id']}) =====", flush=True)
     try:
-        exec(compile(src, f"<cell {idx}>", "exec"), ns)
+        exec(  # skylos: ignore[SKY-D202] running the notebook is this tool's purpose
+            compile(src, f"<cell {idx}>", "exec"), ns)
     except Exception:
         import traceback; traceback.print_exc()
         sys.exit(f"CELL {idx} FAILED")

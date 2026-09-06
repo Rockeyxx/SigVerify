@@ -40,7 +40,6 @@ from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               load_branch_model, score_pairs,
                               writer_dependent_scores, znorm_trial_scores)
 from src.data.dataset import writer_independent_split
-from src.data.parsers import merge_datasets, parse_dataset
 
 
 
@@ -298,14 +297,15 @@ def main(argv=None):
     model = load_branch_model(args.branch, args.weights, device)
 
     if args.enroll:
-        scores, labels, spread = enrolled_scores(args, writer_samples, test_ids, model, device)
+        # enrolled_scores prints the per-trial EER spread itself; main only
+        # forwards the representative draw.
+        scores, labels, _ = enrolled_scores(args, writer_samples, test_ids, model, device)
     else:
         loader = build_eval_loader(writer_samples, test_ids, args.branch, args.batch_size,
                                    args.num_workers, args.seed)
         loader = _limit_pairs(loader, args.limit_pairs, args.seed)
         print(f"Scoring {len(loader.dataset)} pairs from {len(test_ids)} held-out test writers")
         scores, labels = score_pairs(model, loader, device, desc=f"{args.branch} · benchmark")
-        spread = None
     report = separation_report(scores, labels, margin=args.margin)
     print_separation_report(args.branch, report)
 
