@@ -27,14 +27,13 @@ import torch
 
 from config.settings import (
     ALPHA_DEFAULT,
-    SPATIAL_INPUT_SIZE,
     DECISION_THRESHOLD,
     SPATIAL_DECISION_THRESHOLD,
     TEMPORAL_DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
     INFERENCE_NUM_THREADS,
 )
-from src.data.dataset import preprocess_image, quality_gate, trajectory_gate
+from src.data.dataset import as_spatial_input, quality_gate, trajectory_gate
 from src.data.renderer import render_trajectory_to_image
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 
@@ -104,7 +103,13 @@ def _as_spatial_input(sample):
     """
     Bring a spatial sample to the model's [1, H, W] contract, or refuse it.
 
-    Three inputs are legitimate and only one of them is already canonical:
+    Thin serving-side wrapper over `src.data.dataset.as_spatial_input`, which
+    holds the rule and the reasoning. It is shared with the training loader on
+    purpose: two copies of "which kind of array is this" would drift, and a
+    train/serve disagreement about what an array means is invisible in every
+    number either side reports.
+
+    Three inputs are legitimate here and only one of them is already canonical:
 
     * a path — read, resized and inverted by `preprocess_image`;
     * a **raw scan array** (paper bright, ink dark, any size) — same treatment;
@@ -113,6 +118,11 @@ def _as_spatial_input(sample):
       through. Sending it through `preprocess_image` would invert it a second
       time and hand the model a photographic negative.
 
+    A **raw** `[L, C]` trajectory is refused rather than rasterized on the
+    caller's behalf (`allow_trajectory=False`). `verify()` and the enrolment
+    helpers render explicitly, and AGENTS.md pins the image argument to a scan,
+    so accepting one silently here would widen the serving contract.
+
     Anything else raises. Accepting it quietly is the defect this function
     exists to close: `SpatialSiamese` pools adaptively, so a wrong-sized,
     un-inverted uint8 scan yields a perfectly plausible 512-d embedding with no
@@ -120,30 +130,7 @@ def _as_spatial_input(sample):
     inversion alone is worth 4.86% to 0.00% EER on CEDAR, so a silent miss here
     is not cosmetic.
     """
-    if not isinstance(sample, np.ndarray):
-        return preprocess_image(sample)
-
-    width, height = SPATIAL_INPUT_SIZE
-    canonical = (sample.ndim == 3 and sample.shape == (1, height, width)
-                 and np.issubdtype(sample.dtype, np.floating))
-    if canonical:
-        low, high = float(sample.min()), float(sample.max())
-        if low < -1e-6 or high > 1.0 + 1e-6:
-            raise ValueError(
-                f"Spatial array has the canonical shape {sample.shape} but values "
-                f"in [{low:.3f}, {high:.3f}] — the contract is [0.0, 1.0] with "
-                f"background 0. A raw scan belongs in a 2-D array so it gets "
-                f"resized and inverted; this one would reach the model unscaled.")
-        return np.ascontiguousarray(sample, dtype=np.float32)
-
-    if sample.ndim == 2 or (sample.ndim == 3 and sample.shape[0] == 1):
-        # A raw scan: preprocess_image resizes and inverts it.
-        return preprocess_image(sample)
-
-    raise ValueError(
-        f"Cannot interpret a spatial sample of shape {sample.shape}. Expected a "
-        f"path, a 2-D scan array, or a rendered [1, {height}, {width}] float "
-        f"array in [0, 1].")
+    return as_spatial_input(sample, allow_trajectory=False)
 
 
 def embedding_to_bytes(embedding):

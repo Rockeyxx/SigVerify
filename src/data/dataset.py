@@ -46,12 +46,14 @@ from config.settings import (
     PAIRS_GENUINE_PER_WRITER,
     PAIRS_IMPOSTOR_PER_WRITER,
     RANDOM_IMPOSTOR_RATIO,
+    TEMPORAL_CHANNEL_WIDTHS,
     TEMPORAL_INPUT_FEATURES,
     SPATIAL_AUG_MAX_ROTATION_DEG, SPATIAL_AUG_MAX_SHEAR, SPATIAL_AUG_MAX_SCALE,
     SPATIAL_AUG_MAX_TRANSLATE, SPATIAL_AUG_STROKE_PROB,
     TEMPORAL_AUG_MAX_ROTATION_DEG, TEMPORAL_AUG_JITTER, TEMPORAL_AUG_MAX_SPEED_CHANGE,
     SPATIAL_SPLIT_RATIOS,
 )
+from src.data.renderer import render_trajectory_to_image
 
 # Channel names for gate errors, keyed off the shipped capture contract so the
 # message names the columns the gate is actually enforcing rather than a literal
@@ -108,6 +110,128 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
     normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
+
+
+# ─── Spatial sample kinds ─────────────────────────────────────────────
+# `as_spatial_input` below decides what an incoming array *is*. The two ranges
+# it separates are deliberately far apart and are both read from config:
+#
+#   * a trajectory is [L, C] with C drawn from TEMPORAL_CHANNEL_WIDTHS — 3 (xyp),
+#     4 (dt, shipped) or 5 (tilt). Widening the captured contract past that table
+#     is banned outright under AGENTS.md Drift Prevention, so 5 is a hard ceiling
+#     rather than today's value. Sourcing it here keeps `TEMPORAL_CHANNELS` the
+#     single knob: a literal 4 in a gate is what once made the shipped 4-channel
+#     model unreachable through `verify()`.
+#   * a scan is at least MIN_BBOX_PIXELS across. The ink bounding box cannot
+#     exceed the canvas, so an image narrower or shorter than that floor already
+#     fails `quality_gate` and is not a signature this project accepts.
+_TRAJECTORY_MIN_COLUMNS = min(TEMPORAL_CHANNEL_WIDTHS.values())
+_TRAJECTORY_MAX_COLUMNS = max(TEMPORAL_CHANNEL_WIDTHS.values())
+
+
+def as_spatial_input(sample, allow_trajectory=False):
+    """
+    Bring one spatial sample to the model's [1, H, W] contract, or refuse it.
+
+    This is the single resolver for "which kind of thing is this" — `verify()`
+    reaches it through `src.verification._as_spatial_input` and the training
+    loader through `SpatialSignatureDataset`. Two copies of this rule would drift
+    against each other, and a training/serving disagreement about what an array
+    means is invisible in every number either side reports.
+
+    Four kinds are legitimate:
+
+    * a **path** — read, resized and inverted by `preprocess_image`;
+    * a **raw scan array** (paper bright, ink dark, any size) — same treatment,
+      so an array and the file it came from reach the model identically;
+    * a **canonical [1, H, W] float array in [0, 1]**, which the renderer already
+      emits — passed straight through. Sending it through `preprocess_image`
+      would invert it a second time and hand the model a photographic negative;
+    * a **pen trajectory [L, C]**, rasterized by `render_trajectory_to_image`,
+      which lets one dataset hold scans and tablet captures at once. Training
+      only (`allow_trajectory=True`): `verify()` renders explicitly before it
+      reaches this point, and silently accepting a raw trajectory as an image
+      probe there would widen the serving contract AGENTS.md pins.
+
+    **The hard case is that a trajectory and a scan are both 2-D float arrays.**
+    Nothing in the type says which. The fork keys on the **column count**,
+    because it is the one property whose two admissible ranges cannot overlap:
+    a trajectory has at most `_TRAJECTORY_MAX_COLUMNS` (5) of them and a scan at
+    least `MIN_BBOX_PIXELS` (64), and the gap between is refused rather than
+    guessed at. A row floor closes the transposed `[C, L]` case, whose column
+    count would otherwise read as a scan.
+
+    Value range and dtype were **rejected** as the discriminator and must not be
+    reintroduced: a float array in [0, 1] is the legitimate canonical kind, a
+    trajectory's pressure and `dt` columns are also in [0, 1], and a trajectory
+    still in raw device units is indistinguishable from a scan by magnitude.
+    Only the shape carries the answer.
+
+    Anything else raises. Accepting it quietly is the defect this function
+    exists to close: `SpatialSiamese` pools adaptively, so a wrong-sized or
+    un-inverted array yields a perfectly plausible 512-d embedding with no
+    exception — enrolment then writes that template to the database, and
+    training would fit it. The inversion alone is worth 4.86% to 0.00% EER on
+    CEDAR, so a silent miss here is not cosmetic (SUMMARY.md Part 9 §12).
+    """
+    if not isinstance(sample, np.ndarray):
+        return preprocess_image(sample)
+
+    width, height = SPATIAL_INPUT_SIZE
+    canonical = (sample.ndim == 3 and sample.shape == (1, height, width)
+                 and np.issubdtype(sample.dtype, np.floating))
+    if canonical:
+        low, high = float(sample.min()), float(sample.max())
+        if low < -1e-6 or high > 1.0 + 1e-6:
+            raise ValueError(
+                f"Spatial array has the canonical shape {sample.shape} but values "
+                f"in [{low:.3f}, {high:.3f}] — the contract is [0.0, 1.0] with "
+                f"background 0. A raw scan belongs in a 2-D array so it gets "
+                f"resized and inverted; this one would reach the model unscaled.")
+        return np.ascontiguousarray(sample, dtype=np.float32)
+
+    if sample.ndim == 3 and sample.shape[0] == 1:
+        # A raw scan carrying an explicit channel axis: preprocess_image resizes
+        # and inverts it exactly as it would the same scan on disk.
+        return preprocess_image(sample)
+
+    if sample.ndim == 2:
+        rows, columns = sample.shape
+
+        if columns <= _TRAJECTORY_MAX_COLUMNS:
+            if columns < _TRAJECTORY_MIN_COLUMNS or not allow_trajectory:
+                raise ValueError(
+                    f"Cannot interpret a spatial sample of shape {sample.shape}. "
+                    f"It is too narrow to be a scan, and "
+                    + (f"a trajectory needs at least {_TRAJECTORY_MIN_COLUMNS} "
+                       f"columns (X, Y, P)."
+                       if columns < _TRAJECTORY_MIN_COLUMNS else
+                       "trajectories are not accepted here — render it with "
+                       "render_trajectory_to_image() first."))
+            if rows < MIN_TRAJECTORY_POINTS:
+                # The renderer returns a near-blank canvas for a stub rather than
+                # raising, and a blank "signature" is a valid-looking training
+                # sample carrying no identity at all.
+                raise ValueError(
+                    f"Trajectory has {rows} points, need {MIN_TRAJECTORY_POINTS} "
+                    f"to render a signature.")
+            return render_trajectory_to_image(sample)
+
+        if min(rows, columns) >= MIN_BBOX_PIXELS:
+            return preprocess_image(sample)
+
+        raise ValueError(
+            f"Cannot interpret a spatial sample of shape {sample.shape}. Its "
+            f"column count is too wide for a capture contract (at most "
+            f"{_TRAJECTORY_MAX_COLUMNS} channels) and one of its axes is under "
+            f"the {MIN_BBOX_PIXELS}px floor a scan must clear. A transposed "
+            f"[C, L] trajectory lands here; so does a thumbnail no quality gate "
+            f"would pass. Neither is guessed at.")
+
+    raise ValueError(
+        f"Cannot interpret a spatial sample of shape {sample.shape}. Expected a "
+        f"path, a 2-D scan array, a rendered [1, {height}, {width}] float array "
+        f"in [0, 1], or an [L, C] trajectory.")
 
 
 def quality_gate(image_path):
@@ -507,11 +631,16 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
 
 class SpatialSignatureDataset(Dataset):
     """
-    PyTorch Dataset loading spatial (image) signature pairs for Siamese training.
-    
+    PyTorch Dataset loading spatial signature pairs for Siamese training.
+
+    A pair element is a file path, a raw scan array, an already-rendered
+    canonical image, or an `[L, C]` pen trajectory — freely mixed, so one dataset
+    can draw on the image corpora and the pen corpora at once. `as_spatial_input`
+    resolves each side and is the only place that decides which kind a sample is.
+
     Each item returns:
-        - img1_tensor: preprocessed image 1 tensor [1, 256, 256]
-        - img2_tensor: preprocessed image 2 tensor [1, 256, 256]
+        - img1_tensor: [1, H, W] float32, H/W from SPATIAL_INPUT_SIZE
+        - img2_tensor: [1, H, W] float32
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
@@ -533,9 +662,13 @@ class SpatialSignatureDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, index):
-        path1, path2 = self.pairs[index]
-        img1 = preprocess_image(path1)
-        img2 = preprocess_image(path2)
+        sample1, sample2 = self.pairs[index]
+        # Each side is resolved independently, so one pair may hold a scanned
+        # reference against a rasterized tablet capture. `as_spatial_input`
+        # decides which kind each is; the fork is documented there because the
+        # two look identical from here.
+        img1 = as_spatial_input(sample1, allow_trajectory=True)
+        img2 = as_spatial_input(sample2, allow_trajectory=True)
 
         if self.augment:
             # Each side is warped independently. Warping a pair identically would

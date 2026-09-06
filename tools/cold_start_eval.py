@@ -68,8 +68,14 @@ from src.verification import (bytes_to_embedding, embed, embedding_to_bytes,
 # recorded: a wrong entry turns this into an in-domain benchmark that reports
 # suspiciously good numbers and reads as a success.
 UNSEEN_CORPUS = {
-    # spatial_cnn.pth trained on CEDAR + BHSig260 + UTSig (SUMMARY.md Part 9 §7).
-    "spatial": "SigComp2011 offline (Dutch + Chinese scans)",
+    # WARNING (2026-09-06): the shipped spatial_cnn.pth NOW TRAINS ON
+    # sigcomp2011_offline (SUMMARY.md Part 9 §13), so this default is training
+    # data for it and scoring it here measures memorisation, not transfer. It
+    # remains valid only for a pre-2026-09-06 checkpoint such as
+    # `exp_ctrl.pth` or `archive_spatial_cnn_m20_8.59eer.pth`, passed via
+    # --weights. For the shipped weight use `--corpus nfi2009`, which is
+    # screened against every image corpus on disk.
+    "spatial": "SigComp2011 offline (Dutch + Chinese scans) — TRAINING DATA for the shipped weight",
     # temporal_lstm.pth trained on SVC2004 Task 2 + SigComp2011 online, 62
     # writers. DeepSignDB was measured and NOT adopted (Part 9 §11), so its
     # Evaluation split -- the authors' own held-out benchmark -- is untouched.
@@ -156,6 +162,17 @@ def load_corpus(branch, corpus="default"):
     only half the confusion matrix and biases whichever half it reaches, doing so
     invisibly because the probe totals still look large.
     """
+    if corpus == "default" and branch == "spatial":
+        # A comment cannot stop this; the default corpus is training data for the
+        # shipped weight and would report memorisation as a cold-start score.
+        raise ValueError(
+            "sigcomp2011_offline is training data for the spatial weight shipped "
+            "on 2026-09-06 (SUMMARY.md Part 9 §13), so the default corpus would "
+            "measure memorisation.\n"
+            "  Use --corpus nfi2009 (screened against every corpus on disk), or\n"
+            "  pass a pre-2026-09-06 checkpoint via --weights, e.g.\n"
+            "    --weights models/weights/archive_spatial_cnn_m20_8.59eer.pth")
+
     if corpus == "nfi2009":
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(base, "data", "sigcomp2009_clean",

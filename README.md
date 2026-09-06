@@ -208,7 +208,7 @@ Verification evaluates a probe against an enrolled gallery using nearest-referen
 | References per user ($K$) | **5**                                                                | `NUM_ENROLLMENT_REFERENCES = 5`                             |
 | Matching Rule             | Nearest Reference: $d_{min} = \min_{i} \|e_{probe} - e_{ref, i}\|_2$ | `_nearest_reference_score`                                  |
 | Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
-| Decision Threshold        | Spatial $\tau = 0.6299$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
+| Decision Threshold        | Spatial $\tau = 0.7711$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
 
 Increasing enrolled references smoothly improves verification accuracy without retraining: at $K = 10$, BHSig260 Hindi reaches 4.05% EER and SigComp2011 Dutch achieves 4.93% EER.
 
@@ -283,12 +283,12 @@ The table below benchmarks this project against published state-of-the-art resul
 | ----------------------- | :-----------------: | -------------------------------------------------------- | :----: | :--------------------------: |
 | **CEDAR**               |    **0.00%** EER    | Writer-Independent Siamese CNN (50 train / 5 test)       |  [1]   |    **0.00% $\pm$ 0.00%**     |
 | **CEDAR**               |      4.63% EER      | Writer-Dependent SVM on CNN features ($K=12$)            |  [2]   |    **0.00% $\pm$ 0.00%**     |
-| **BHSig260 Bengali**    |   **13.89%** EER    | Writer-Independent Siamese CNN (50 train / 50 test)      |  [1]   |    **8.64% $\pm$ 1.35%**     |
-| **BHSig260 Hindi**      |     15.36% EER      | Writer-Independent Siamese CNN (100 train / 60 test)     |  [1]   |    **3.64% $\pm$ 0.70%**     |
-| **UTSig (Persian)**     |    **9.80%** EER    | Writer-Dependent SVM, Persian transfer learning ($K=10$) |  [3]   |      30.26% $\pm$ 1.43%      |
-| **UTSig (Persian)**     |     11.16% EER      | Writer-Dependent SVM, Persian transfer learning ($K=5$)  |  [3]   |      30.26% $\pm$ 1.43%      |
-| **UTSig (Persian)**     |     17.45% EER      | Writer-Dependent DMML on HOG features ($K=12$)           |  [4]   |      30.26% $\pm$ 1.43%      |
-| **UTSig (Persian)**     |     29.71% EER      | Writer-Dependent SVM on geometric features ($K=12$)      |  [5]   |      30.26% $\pm$ 1.43%      |
+| **BHSig260 Bengali**    |   **13.89%** EER    | Writer-Independent Siamese CNN (50 train / 50 test)      |  [1]   |    **1.48% $\pm$ 0.36%**     |
+| **BHSig260 Hindi**      |     15.36% EER      | Writer-Independent Siamese CNN (100 train / 60 test)     |  [1]   |    **1.92% $\pm$ 0.29%**     |
+| **UTSig (Persian)**     |    **9.80%** EER    | Writer-Dependent SVM, Persian transfer learning ($K=10$) |  [3]   |      30.77% $\pm$ 1.65%      |
+| **UTSig (Persian)**     |     11.16% EER      | Writer-Dependent SVM, Persian transfer learning ($K=5$)  |  [3]   |      30.77% $\pm$ 1.65%      |
+| **UTSig (Persian)**     |     17.45% EER      | Writer-Dependent DMML on HOG features ($K=12$)           |  [4]   |      30.77% $\pm$ 1.65%      |
+| **UTSig (Persian)**     |     29.71% EER      | Writer-Dependent SVM on geometric features ($K=12$)      |  [5]   |      30.77% $\pm$ 1.65%      |
 | **SVC2004 Task 2**      |    **2.89%** EER    | Competition winner, user-specific thresholds ($K=5$)     |  [6]   |      13.58% $\pm$ 2.21%      |
 | **SVC2004 Task 2**      |     77.00% Acc      | Writer-Independent Siamese CNN (35 train / 5 test)       |  [7]   |      13.58% $\pm$ 2.21%      |
 | **SigComp2011 Dutch**   |    _Competition_    | Multi-system reference benchmark                         |  [8]   |    **4.11% $\pm$ 1.03%**     |
@@ -300,7 +300,7 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 
 #### Analysis of Protocol Differences & Accuracy Gaps
 
-- **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 30.26% EER.
+- **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 30.77% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
 
@@ -326,7 +326,7 @@ Device support is architected in tiers based on hardware capability:
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
 | **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 Dutch     | Online Pen Trajectory   | $\le 5.0\%$  | **4.11% $\pm$ 1.03%** |
-| **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **8.59% $\pm$ 0.58%** |
+| **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **5.44% $\pm$ 0.34%** |
 | **Tertiary**  | Mobile / Touchscreen     | MOBISIG               | Capacitive Finger Touch | $\le 20.0\%$ |        21.26%         |
 
 ---
@@ -337,11 +337,11 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 
 | Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d |
 | ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: |
-| **Spatial**  | **All Combined**    | **65**  | **8.59% $\pm$ 0.58%** | **8.48%**  | **1.866** |
+| **Spatial**  | **All Combined**    | **65**  | **5.44% $\pm$ 0.34%** | **5.52%**  | **2.316** |
 | Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   7.805   |
-| Spatial      | BHSig260 Hindi      |   23    |   3.64% $\pm$ 0.70%   |   3.87%    |   2.516   |
-| Spatial      | BHSig260 Bengali    |   16    |   8.64% $\pm$ 1.35%   |   8.55%    |   2.293   |
-| Spatial      | UTSig               |   18    |  30.26% $\pm$ 1.43%   |   30.68%   |   1.093   |
+| Spatial      | BHSig260 Hindi      |   23    |   1.92% $\pm$ 0.29%   |   1.93%    |   3.064   |
+| Spatial      | BHSig260 Bengali    |   16    |   1.48% $\pm$ 0.36%   |   1.55%    |   3.333   |
+| Spatial      | UTSig               |   18    |  30.77% $\pm$ 1.65%   |   30.43%   |   1.084   |
 | **Temporal** | **All Combined**    | **31**  | **7.77% $\pm$ 0.67%** | **7.67%**  | **1.710** |
 | Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   |
 | Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   |
@@ -351,7 +351,7 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 
 ### Operating Point & Confusion Matrices
 
-Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_THRESHOLD = 0.6299`, `TEMPORAL_DECISION_THRESHOLD = 0.7900`):
+Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_THRESHOLD = 0.7711`, `TEMPORAL_DECISION_THRESHOLD = 0.7900`):
 
 |                           Spatial Branch                           |                           Temporal Branch                            |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
@@ -359,7 +359,7 @@ Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_T
 
 | Modality     | True Reject | False Accept | True Accept | False Reject |    FAR     |    FRR     |
 | ------------ | ----------: | -----------: | ----------: | -----------: | :--------: | :--------: |
-| **Spatial**  |       1,376 |           94 |       1,155 |          134 | **6.39%**  | **10.40%** |
+| **Spatial**  |       1,397 |           73 |       1,209 |           80 | **4.97%**  | **6.21%**  |
 | **Temporal** |         564 |           63 |         540 |           32 | **10.05%** | **5.59%**  |
 
 _Error Complementarity:_ Spatial and temporal modalities exhibit complementary error distributions ($\phi < 0$). Spatial models tend toward false rejections (rejecting genuine variations), while temporal models tend toward false acceptances. Multimodal late fusion effectively balances both operating regimes.

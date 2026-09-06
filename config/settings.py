@@ -206,7 +206,7 @@ ALPHA_GRID_STEP = 0.05
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 # See AGENTS.md and SUMMARY.md.
-SPATIAL_DECISION_THRESHOLD = 0.6299     # Calibrated spatial branch threshold (EER on validation)
+SPATIAL_DECISION_THRESHOLD = 0.7711     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
 DECISION_THRESHOLD = 0.8196             # Calibrated threshold tau for late-fused model evaluation
 
