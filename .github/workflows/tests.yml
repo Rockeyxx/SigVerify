@@ -48,9 +48,19 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
+      - name: Download release weights (mandatory)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/weights
+          # Download only spatial_cnn.pth and temporal_lstm.pth from GitHub releases.
+          # Ensemble weights (6 seeds) are optional and not distributed in releases.
+          gh release download --dir models/weights -p "spatial_cnn.pth" -p "temporal_lstm.pth" --clobber
+
       - name: Run pytest
         run: |
           pytest tests/ -v --tb=short --junitxml=pytest-results.xml
+
 
       - name: Upload test results
         if: always()

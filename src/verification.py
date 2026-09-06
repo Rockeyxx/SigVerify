@@ -311,6 +311,63 @@ class TemporalEnsemble:
         return torch.stack(embs, dim=0).mean(dim=0)
 
 
+    def __len__(self) -> int:
+        return len(self.models)
+
+    def __iter__(self):
+        return iter(self.models)
+
+    def __getitem__(self, index):
+        return self.models[index]
+
+
+def load_temporal_ensemble(
+    temporal_lstm_path: str | None = None,
+    ensemble_seeds: list[int] | tuple[int, ...] | None = None,
+    device: str = "cpu",
+) -> TemporalEnsemble | None:
+    """
+    Load temporal ensemble from multiple seed checkpoints if available.
+
+    If ensemble checkpoints are missing, return None and fall back to single model.
+    This makes the ensemble optional for CI testing and environments holding only
+    the public release weights.
+
+    Args:
+        temporal_lstm_path: Path to the shipped temporal_lstm.pth or weights directory.
+        ensemble_seeds: List or tuple of seed numbers for ensemble members
+            (defaults to TEMPORAL_ENSEMBLE_SEEDS from config.settings).
+        device: Target device ('cpu').
+
+    Returns:
+        TemporalEnsemble wrapper (usable both as a model wrapper and as a sequence of models)
+        if all ensemble checkpoints exist, None otherwise.
+    """
+    from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
+                                 TEMPORAL_ENSEMBLE_TEMPLATE)
+
+    seeds = ensemble_seeds if ensemble_seeds is not None else TEMPORAL_ENSEMBLE_SEEDS
+    if temporal_lstm_path:
+        weights_dir = (
+            os.path.dirname(temporal_lstm_path)
+            if not os.path.isdir(temporal_lstm_path)
+            else temporal_lstm_path
+        )
+    else:
+        weights_dir = MODEL_WEIGHTS_DIR
+
+    paths = [
+        os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
+        for seed in seeds
+    ]
+    if not all(os.path.exists(p) for p in paths):
+        # Ensemble member missing — fall back to single shipped model
+        return None
+
+    models = [load_model("temporal", p, device=device) for p in paths]
+    return TemporalEnsemble(models)
+
+
 class SignatureService:
     """
     High-level operational service for Signature Verification and Enrollment.
@@ -382,11 +439,22 @@ class SignatureService:
         from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
                                      TEMPORAL_ENSEMBLE_TEMPLATE)
 
-        paths = [os.path.join(MODEL_WEIGHTS_DIR,
-                              TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
-                 for seed in TEMPORAL_ENSEMBLE_SEEDS]
-        missing = [p for p in paths if not os.path.exists(p)]
-        if missing:
+        ensemble = load_temporal_ensemble(
+            self.temporal_weights,
+            ensemble_seeds=TEMPORAL_ENSEMBLE_SEEDS,
+            device=self.device,
+        )
+        if ensemble is None:
+            weights_dir = (
+                os.path.dirname(self.temporal_weights)
+                if not os.path.isdir(self.temporal_weights)
+                else self.temporal_weights
+            ) or MODEL_WEIGHTS_DIR
+            paths = [
+                os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
+                for seed in TEMPORAL_ENSEMBLE_SEEDS
+            ]
+            missing = [p for p in paths if not os.path.exists(p)]
             raise FileNotFoundError(
                 f"use_temporal_ensemble=True needs all "
                 f"{len(TEMPORAL_ENSEMBLE_SEEDS)} member checkpoints; "
@@ -396,7 +464,8 @@ class SignatureService:
                   "construct the service with use_temporal_ensemble=False, which "
                   "runs the single shipped model deliberately rather than by "
                   "accident.")
-        return TemporalEnsemble([load_model("temporal", p, self.device) for p in paths])
+        return ensemble
+
 
     def _ensure_embeddings(self, refs: list[bytes | np.ndarray] | None) -> list[np.ndarray]:
         if not refs:
