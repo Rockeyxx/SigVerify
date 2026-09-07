@@ -93,11 +93,13 @@ This document covers installation, quickstart, project structure, evaluation ben
 - **Ultra-Low Latency Inference** Fast CPU execution (0.07 s warm, 0.94 s cold) and light memory footprint (~0.45 GB RAM), well within embedded budgets (< 3.0 s, ≤ 4 GB).
 - **Cross-Platform Compatibility** Runs natively on Windows and Linux (x86_64 and ARM64) without native build toolchains.
 
-**Application Layer Architecture:**
+**Application Layer — Planned, Not Yet Implemented:**
 
-- **PyQt5 Desktop Interface** (`src/gui/`) Interactive enrollment and verification workflows.
-- **Digitizer Tablet Abstraction** (`src/capture/`) Hardware abstraction layer for USB digitizer pads (e.g., XPPen Deco 640) via Wintab (Windows) and evdev / OpenTabletDriver (Linux).
-- **Encrypted Biometric Store** (`src/database/`) SQLite template store enforcing AES 256 GCM application-layer encryption and ISO/IEC 24745 compliance (only derived embeddings persisted).
+`src/gui/`, `src/capture/`, and `src/database/` are interface stubs — docstrings and `# TODO` markers, no executable logic. They are not evidence of delivered functionality or standards compliance; see [Standards & Compliance](#standards--compliance).
+
+- **PyQt5 Desktop Interface** (`src/gui/`) Planned interactive enrollment and verification workflows.
+- **Digitizer Tablet Abstraction** (`src/capture/`) Planned hardware abstraction layer for USB digitizer pads (e.g., XPPen Deco 640) via Wintab (Windows) and evdev / OpenTabletDriver (Linux).
+- **Encrypted Biometric Store** (`src/database/`) Planned SQLite template store enforcing AES 256 GCM application-layer encryption and ISO/IEC 24745 compliance (only derived embeddings persisted).
 
 ---
 
@@ -110,7 +112,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 ├── LICENSE                      # MIT License
 ├── README.md                    # Project documentation, quickstart & benchmark summary
 ├── requirements.txt             # Python dependencies
-├── Signature_Verification_Pipeline.ipynb   # Interactive pipeline demo notebook
+├── Signature_Verification_Pipeline.ipynb   # Interactive pipeline demo notebook (outputs stripped)
 ├── config/
 │   └── settings.py              # Central hyperparameters, paths, and decision thresholds
 ├── src/
@@ -121,12 +123,12 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   │   ├── dataset.py           # Preprocessing, quality gate, pair generation, splits
 │   │   ├── parsers.py           # Loaders for CEDAR, BHSig260, UTSig, SVC2004, SigComp2011
 │   │   └── features.py          # Kinematic feature extraction (deltas, accelerations)
-│   ├── database/                # SQLite storage & AES-256-GCM template encryption
+│   ├── database/                # STUB — interface docstrings + TODOs only
 │   │   ├── db_manager.py
 │   │   └── encryption.py
-│   ├── capture/                 # Tablet hardware abstraction (Wintab / evdev)
+│   ├── capture/                 # STUB — interface docstrings + TODOs only
 │   │   └── tablet.py
-│   └── gui/                     # PyQt5 desktop application
+│   └── gui/                     # STUB — interface docstrings + TODOs only
 │       ├── app.py
 │       ├── enrollment.py
 │       └── verification.py
@@ -210,7 +212,7 @@ Verification evaluates a probe against an enrolled gallery using nearest-referen
 | Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
 | Decision Threshold        | Spatial $\tau = 0.7711$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
 
-Increasing enrolled references smoothly improves verification accuracy without retraining: at $K = 10$, BHSig260 Hindi reaches 4.05% EER and SigComp2011 Dutch achieves 4.93% EER.
+Increasing enrolled references improves verification accuracy without retraining. The $K = 10$ figures cited in an earlier pass (BHSig260 Hindi 4.05% EER, SigComp2011 Dutch 4.93% EER) predate the current $K = 5$ headline above (Hindi 1.92%, Dutch 4.11%) and are now worse than it; they are stale and a re-measurement via `benchmark.py --enroll 10` is owed before citing a $K = 10$ number again.
 
 ---
 
@@ -361,6 +363,11 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 
 Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_THRESHOLD = 0.7711`, `TEMPORAL_DECISION_THRESHOLD = 0.7900`):
 
+> The notebook is committed **without stored cell outputs**. They were 88% of a
+> 843 KB file and made every re-run an unreadable diff. The figures it produces
+> are the ones shown below, tracked under `results/`; regenerate them with
+> `python tools/run_notebook_cells.py`.
+
 |                           Spatial Branch                           |                           Temporal Branch                            |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
 | ![Confusion matrix, spatial branch](results/confusion_spatial.png) | ![Confusion matrix, temporal branch](results/confusion_temporal.png) |
@@ -388,10 +395,12 @@ _Error Complementarity:_ Spatial and temporal modalities exhibit complementary e
 | Standard                 | Application in System Architecture                                       |     Status      |
 | ------------------------ | ------------------------------------------------------------------------ | :-------------: |
 | **ISO/IEC 23053:2022**   | Writer-independent data splits, reproducible training configuration      |     **Met**     |
-| **IEEE 730-2014**        | Configuration management, deviation tracking, verification audit logging |     **Met**     |
+| **IEEE 730-2014**        | Configuration management, deviation tracking, verification audit logging |   **Partial**   |
 | **ISO/IEC 24745:2022**   | Biometric template protection (only derived embeddings persisted)        | **Architected** |
 | **ISO/IEC 9075-1:2023**  | Structured relational SQLite database schema                             | **Architected** |
 | **ISO/IEC 18033-1:2021** | Application-layer AES-256-GCM encryption of stored templates             | **Architected** |
+
+Configuration control and the deviation log are in place; IEEE 730-2014's verification audit log depends on `src/database/`, which is a stub, so that standard is Partial rather than Met. The three "Architected" rows are design targets for the application layer (`src/database/`, currently a stub) — not properties the current codebase has, since nothing is persisted yet. Only ISO/IEC 23053:2022 is demonstrable from the code as it stands.
 
 ---
 
@@ -442,12 +451,14 @@ The spatial Siamese CNN was benchmarked directly against the reference architect
 
 #### Datasets & Required Licensure Citations
 
+⚖ marks the four references DeepSignDB's licence clause 4.5 requires citing in any published work that uses that dataset (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
+
 10. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and identification using distance statistics._ IJPRAI 18(7):1339–1360, 2004. (CEDAR)
 11. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line signature verification method based on texture features on a large indic-script signature dataset._ DAS 2016, pp. 72–77, 2016. (BHSig260)
-12. R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign: Deep On-Line Signature Verification._ IEEE Transactions on Biometrics, Behavior, and Identity Science, 3(2):229–239, 2021. (DeepSignDB)
-13. J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235–246, 2010.
-14. J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097–1111, 2010.
-15. J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395–401, 2003.
+12. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign: Deep On-Line Signature Verification._ IEEE Transactions on Biometrics, Behavior, and Identity Science, 3(2):229–239, 2021. (DeepSignDB)
+13. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235–246, 2010.
+14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097–1111, 2010.
+15. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395–401, 2003.
 
 #### Standards
 
