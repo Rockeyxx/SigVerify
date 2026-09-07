@@ -3,10 +3,12 @@ Tests for SignatureService (Option C High-Level Operational Facade).
 """
 
 import os
+import cv2
 import numpy as np
 import pytest
 
 from config.settings import (
+    MIN_BBOX_PIXELS,
     MODEL_WEIGHTS_DIR,
     TEMPORAL_ENSEMBLE_SEEDS,
     TEMPORAL_ENSEMBLE_TEMPLATE,
@@ -191,3 +193,57 @@ class TestSignatureService:
         assert len(TEMPORAL_ENSEMBLE_SEEDS) == 6
         assert TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=42) == "temporal_dt_s42.pth"
 
+
+    def _degenerate_trajectory(self):
+        """Raw tablet units — `trajectory_gate` refuses it, exactly as `verify()` does."""
+        traj = self._sample_trajectory(80)
+        traj[:, 0] = traj[:, 0] * 1200 + 8000
+        traj[:, 1] = traj[:, 1] * 1200 + 6000
+        return traj
+
+    def _low_quality_image(self):
+        """
+        Correctly shaped and worthless.
+
+        It clears the MIN_BBOX_PIXELS floor `as_spatial_input` enforces on both
+        axes, so the shape check passes it and only `quality_gate` can catch it.
+        That is the whole gap: enrolment already rejected grossly wrong *shapes*
+        and accepted any *content*.
+        """
+        img = np.full((MIN_BBOX_PIXELS * 2, MIN_BBOX_PIXELS * 2), 255, dtype=np.uint8)
+        cv2.circle(img, (MIN_BBOX_PIXELS, MIN_BBOX_PIXELS), 3, 0, 1)
+        return img
+
+    def test_enroll_from_tablet_refuses_a_gate_failing_trajectory(self, service):
+        """
+        Enrolment used to embed whatever it was handed.
+
+        `verify()` gates every probe it scores; the three `enroll_*` methods
+        called `embed()` directly and gated nothing, so a trajectory still in
+        raw device units became a stored template. Every later verification
+        against that template was meaningless, and the diagnostic — if any —
+        pointed at the probe rather than at the reference it was compared to.
+        """
+        trajs = [self._sample_trajectory(80), self._degenerate_trajectory()]
+
+        with pytest.raises(ValueError) as excinfo:
+            service.enroll_from_tablet(trajs)
+
+        message = str(excinfo.value)
+        assert "sample 1" in message, "the error must name which sample failed"
+        assert "z-scored" in message, "and carry the gate's own reason, not a generic one"
+
+    def test_enroll_multimodal_refuses_a_low_quality_scan(self, service):
+        """The spatial half of the same hole: shape was checked, content was not."""
+        with pytest.raises(ValueError, match="spatial input gate"):
+            service.enroll_multimodal(images=[self._low_quality_image()],
+                                      trajectories=[self._sample_trajectory(80)])
+
+    def test_enroll_unimodal_refuses_a_gate_failing_sample_in_either_modality(self, service):
+        with pytest.raises(ValueError, match="temporal input gate"):
+            service.enroll_unimodal(samples=[self._degenerate_trajectory()],
+                                    modality="temporal")
+
+        with pytest.raises(ValueError, match="spatial input gate"):
+            service.enroll_unimodal(samples=[self._low_quality_image()],
+                                    modality="spatial")

@@ -4,6 +4,7 @@ import pytest
 import torch
 import torch.optim as optim
 
+from config.settings import SPATIAL_INPUT_SIZE
 from src.models.siamese import (
     SPATIAL_TRUNKS,
     ContrastiveLoss,
@@ -58,7 +59,7 @@ class TestSpatialTrunks:
     def test_every_trunk_encodes_at_the_real_input_size(self, trunk):
         """Each trunk maps a 155x220 signature onto the configured embedding width."""
         model = SpatialSiamese(embedding_dim=512, trunk=trunk).eval()
-        out = model.encode(torch.randn(2, 1, 155, 220))
+        out = model.encode(torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0]))
         assert out.shape == (2, 512)
 
     def test_wide_trunk_matches_the_reference_channel_widths(self):
@@ -113,7 +114,7 @@ class TestSpatialTrunks:
         assert restored.fc_hidden == fc_hidden
         assert restored.embedding_dim == embedding_dim
 
-        x = torch.randn(2, 1, 155, 220)
+        x = torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0])
         assert torch.allclose(original.encode(x), restored.encode(x))
 
     def test_from_state_dict_rejects_an_unknown_architecture(self):
@@ -144,14 +145,14 @@ class TestTemporalSiamese:
 
     def test_encode_output_shape(self):
         """Verify trajectory encoder maps sequence tensor [B, L, 3] → embedding vector [B, 128]."""
-        model = TemporalSiamese(embedding_dim=128)
+        model = TemporalSiamese(input_features=3, embedding_dim=128)
         x = torch.randn(2, 50, 3)  # 2 signature samples, 50 trajectory points, 3 features (X, Y, P)
         out = model.encode(x)
         assert out.shape == (2, 128)
 
     def test_variable_sequence_length(self):
         """Ensure model cleanly handles variable sequence lengths (different stroke counts)."""
-        model = TemporalSiamese(embedding_dim=128)
+        model = TemporalSiamese(input_features=3, embedding_dim=128)
         short = torch.randn(1, 20, 3)
         long = torch.randn(1, 200, 3)
         assert model.encode(short).shape == (1, 128)
@@ -159,7 +160,7 @@ class TestTemporalSiamese:
 
     def test_pressure_dropout_training(self):
         """Verify pressure channel substitution (P=1.0) executes during training phase."""
-        model = TemporalSiamese(pressure_dropout=1.0)  # Force 100% pressure dropout
+        model = TemporalSiamese(input_features=3, pressure_dropout=1.0)  # Force 100% pressure dropout
         model.train()
         x = torch.randn(4, 30, 3)
         x[:, :, 2] = torch.rand(4, 30) * 5  # Non-trivial raw pressure readings
@@ -184,8 +185,8 @@ class TestTemporalSiamese:
         reproduce the `pressure_dropout=0.0` result exactly, and must differ from
         what the same weights produce in training mode.
         """
-        model = TemporalSiamese(pressure_dropout=1.0)
-        reference = TemporalSiamese(pressure_dropout=0.0)
+        model = TemporalSiamese(input_features=3, pressure_dropout=1.0)
+        reference = TemporalSiamese(input_features=3, pressure_dropout=0.0)
         reference.load_state_dict(model.state_dict())
 
         x = torch.randn(2, 30, 3)
@@ -242,8 +243,8 @@ class TestContrastiveLoss:
         labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
         loss = loss_fn(emb1, emb2, labels)
         loss.backward()
-        assert emb1.grad is not None
-        assert emb2.grad is not None
+        assert emb1.grad is not None and emb1.grad.abs().sum() > 0
+        assert emb2.grad is not None and emb2.grad.abs().sum() > 0
 
 
 class TestFusionEngine:
@@ -374,7 +375,7 @@ class TestTemporalPackedBatching:
         batch must equal encoding it alone. Without packing, the LSTM keeps
         consuming pad rows and the two diverge.
         """
-        model = TemporalSiamese(embedding_dim=128, pressure_dropout=0.0)
+        model = TemporalSiamese(input_features=3, embedding_dim=128, pressure_dropout=0.0)
         model.eval()
 
         long_seq = torch.randn(300, 3)
@@ -393,7 +394,7 @@ class TestTemporalPackedBatching:
 
     def test_encode_without_lengths_still_works(self):
         """Omitting lengths keeps the original un-packed path for equal-length batches."""
-        model = TemporalSiamese(embedding_dim=128, pressure_dropout=0.0)
+        model = TemporalSiamese(input_features=3, embedding_dim=128, pressure_dropout=0.0)
         model.eval()
         assert model.encode(torch.randn(2, 50, 3)).shape == (2, 128)
 
@@ -423,7 +424,7 @@ class TestWeightsSaveLoad:
 
     def test_temporal_save_load_roundtrip(self, tmp_path):
         """Verify TemporalSiamese model weights save/load without embedding deviation."""
-        model = TemporalSiamese(embedding_dim=128)
+        model = TemporalSiamese(input_features=3, embedding_dim=128)
         x = torch.randn(1, 50, 3)
 
         model.eval()
@@ -433,7 +434,7 @@ class TestWeightsSaveLoad:
         path = tmp_path / "temporal.pth"
         torch.save(model.state_dict(), path)
 
-        model2 = TemporalSiamese(embedding_dim=128)
+        model2 = TemporalSiamese(input_features=3, embedding_dim=128)
         model2.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         model2.eval()
         with torch.no_grad():
@@ -479,7 +480,7 @@ class TestSpatialGradientCheckpointing:
         checkpointed = SpatialSiamese(embedding_dim=64, trunk="wide", grad_checkpoint=4)
         checkpointed.load_state_dict(plain.state_dict())
 
-        x = torch.randn(2, 1, 155, 220)
+        x = torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0])
         for model in (plain, checkpointed):
             model.train()
             model.encode(x).sum().backward()
@@ -498,7 +499,7 @@ class TestSpatialGradientCheckpointing:
         """Inference has no backward pass to save memory for, so it pays nothing."""
         model = SpatialSiamese(embedding_dim=64, trunk="wide", grad_checkpoint=4).eval()
         with torch.no_grad():
-            out = model.encode(torch.randn(2, 1, 155, 220))
+            out = model.encode(torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0]))
         assert out.shape == (2, 64)
 
 

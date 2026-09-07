@@ -177,6 +177,24 @@ def as_spatial_input(sample, allow_trajectory=False):
     if not isinstance(sample, np.ndarray):
         return preprocess_image(sample)
 
+    # Non-finiteness is checked here, before the fork, because neither branch
+    # below can catch it. The canonical branch's range test is blind to NaN —
+    # every comparison against NaN is False, so `low < -1e-6 or high > 1.0`
+    # passed a poisoned array through untouched and `embed()` returned a 512-d
+    # embedding of NaN, which enrolment stores as a template whose distance to
+    # every probe is NaN. The scan branch destroys the evidence instead of
+    # propagating it: `preprocess_image` casts through
+    # `np.clip(...).astype(np.uint8)`, which turns NaN into an arbitrary byte and
+    # infinity into 255, so the poisoned pixel disappears into a perfectly
+    # ordinary-looking embedding. `trajectory_gate` has always refused a
+    # non-finite trajectory explicitly; this is the spatial counterpart.
+    # Integer arrays cannot represent either value, so only floats are scanned.
+    if np.issubdtype(sample.dtype, np.floating) and not np.all(np.isfinite(sample)):
+        raise ValueError(
+            f"Spatial array of shape {sample.shape} contains NaN or infinity. A "
+            f"signature pixel is a measurement, and there is no value to guess "
+            f"for one that is not — fix it at the capture or render step.")
+
     width, height = SPATIAL_INPUT_SIZE
     canonical = (sample.ndim == 3 and sample.shape == (1, height, width)
                  and np.issubdtype(sample.dtype, np.floating))

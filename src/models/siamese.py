@@ -26,8 +26,9 @@ from torch.utils.checkpoint import checkpoint_sequential
 from config.settings import (
     SPATIAL_CONV_DROPOUT, SPATIAL_EMBEDDING_DIM, SPATIAL_FC_HIDDEN,
     SPATIAL_HEAD_DROPOUT, SPATIAL_TRUNK,
-    TEMPORAL_EMBEDDING_DIM, TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
-    PRESSURE_DROPOUT_RATE,
+    TEMPORAL_EMBEDDING_DIM, TEMPORAL_HIDDEN_SIZE, TEMPORAL_INPUT_FEATURES,
+    TEMPORAL_NUM_LAYERS, PRESSURE_DROPOUT_RATE,
+    ALPHA_DEFAULT, DECISION_THRESHOLD,
 )
 
 
@@ -212,7 +213,9 @@ class SpatialSiamese(nn.Module):
         model = cls(embedding_dim=int(embedding_dim), trunk=trunk,
                     fc_hidden=int(fc_hidden), **overrides)
         model.load_state_dict(state_dict)
-        return model
+        # Archived checkpoints carry real dropout; a caller that forgets .eval()
+        # gets nondeterministic embeddings scored against the wrong benchmark.
+        return model.eval()
 
     def encode(self, x):
         """
@@ -256,7 +259,7 @@ class TemporalSiamese(nn.Module):
     remains inside the model's learned feature distribution.
     """
 
-    def __init__(self, input_features=3, hidden_size=TEMPORAL_HIDDEN_SIZE,
+    def __init__(self, input_features=TEMPORAL_INPUT_FEATURES, hidden_size=TEMPORAL_HIDDEN_SIZE,
                  num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
                  pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True):
         super().__init__()
@@ -359,7 +362,9 @@ class TemporalSiamese(nn.Module):
             state_dict = {**state_dict,
                           "derive_deltas_flag": torch.tensor(float(derive_deltas))}
         model.load_state_dict(state_dict)
-        return model
+        # A 2-layer checkpoint has real inter-layer dropout; a caller that
+        # forgets .eval() gets nondeterministic embeddings.
+        return model.eval()
 
     @staticmethod
     def _add_dynamics(x):
@@ -492,7 +497,7 @@ class FusionEngine:
     to the available branch (setting α = 1.0 or α = 0.0).
     """
 
-    def __init__(self, alpha=0.5, threshold=0.5,
+    def __init__(self, alpha=ALPHA_DEFAULT, threshold=DECISION_THRESHOLD,
                  spatial_norm=None, temporal_norm=None):
         self.alpha = alpha
         self.threshold = threshold

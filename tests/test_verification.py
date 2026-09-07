@@ -92,7 +92,10 @@ class TestLoadModel:
         path = tmp_path / "temporal_lstm.pth"
         torch.save(original.state_dict(), path)
 
-        x = torch.randn(1, 40, 3)
+        # Not a literal 3. `TemporalSiamese` now takes its default width from
+        # TEMPORAL_INPUT_FEATURES, so a fixed 3 here fed a 6-wide LSTM into a
+        # model built 8 wide the moment the shipped contract moved to `dt`.
+        x = torch.randn(1, 40, TEMPORAL_INPUT_FEATURES)
         with torch.no_grad():
             expected = original.encode(x)
             actual = load_model("temporal", str(path)).encode(x)
@@ -152,7 +155,10 @@ class TestEmbed:
         os.unlink(path)
 
     def test_temporal_embed_from_array(self):
-        trajectory = np.random.default_rng(0).standard_normal((60, 3)).astype(np.float32)
+        # Not a literal 3 — same reason as test_temporal_round_trip above: the
+        # constructor's default width now follows TEMPORAL_INPUT_FEATURES.
+        trajectory = np.random.default_rng(0).standard_normal(
+            (60, TEMPORAL_INPUT_FEATURES)).astype(np.float32)
         embedding = embed(TemporalSiamese(embedding_dim=128).eval(), trajectory, "temporal")
         assert embedding.shape == (128,)
 
@@ -303,6 +309,22 @@ class TestVerify:
         result = verify(spatial=(model, [bytes_to_embedding(b) for b in stored], path),
                         engine=FusionEngine(threshold=0.5))
         assert result["decision"] == "Genuine"
+        os.unlink(path)
+
+    def test_empty_reference_list_names_the_real_problem(self):
+        """
+        An identity with no enrolled templates used to surface as numpy's
+        "need at least one array to concatenate", raised from inside
+        `np.vstack` — a message about numpy's argument, not about the caller's
+        empty enrolment. `SignatureService.verify()` truthy-checks its reference
+        lists, so only the free function is exposed, and a GUI holding an empty
+        row is exactly the caller that reaches it.
+        """
+        model, _, path = self._spatial_setup()
+
+        with pytest.raises(ValueError, match="empty reference list"):
+            verify(spatial=(model, [], path))
+
         os.unlink(path)
 
 
@@ -559,3 +581,43 @@ class TestSpatialArrayInputsAreCanonicalized:
 
         with pytest.raises(ValueError, match="Cannot interpret"):
             _as_spatial_input(np.zeros((3, 64, 64), dtype=np.float32))
+
+    def test_canonical_array_carrying_nan_is_refused(self):
+        """
+        The range check cannot see a NaN: every comparison against NaN is False,
+        so `low < -1e-6 or high > 1.0 + 1e-6` was False for a poisoned array and
+        it passed straight through. `embed()` then returned a 512-d embedding of
+        NaN, which enrolment stores and which every later distance against it
+        reports as NaN — a template that can never match anything, silently.
+        `trajectory_gate` has always checked this explicitly; the spatial path
+        did not.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        from src.verification import _as_spatial_input
+
+        width, height = SPATIAL_INPUT_SIZE
+        poisoned = np.zeros((1, height, width), dtype=np.float32)
+        poisoned[0, height // 2, width // 2] = np.nan
+
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            _as_spatial_input(poisoned)
+
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            embed(SpatialSiamese(embedding_dim=512).eval(), poisoned, "spatial")
+
+    def test_scan_array_carrying_a_non_finite_pixel_is_refused(self):
+        """
+        The scan branch is reachable with a float array too, and it loses the
+        poison rather than propagating it: `preprocess_image` casts through
+        `np.clip(...).astype(np.uint8)`, which turns NaN into an arbitrary byte
+        and infinity into 255. Either way the embedding looks perfectly ordinary
+        and nothing says the pixel was never a measurement.
+        """
+        from config.settings import MIN_BBOX_PIXELS
+        from src.verification import _as_spatial_input
+
+        scan = np.full((MIN_BBOX_PIXELS * 2, MIN_BBOX_PIXELS * 2), 255.0, dtype=np.float32)
+        scan[0, 0] = np.inf
+
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            _as_spatial_input(scan)
