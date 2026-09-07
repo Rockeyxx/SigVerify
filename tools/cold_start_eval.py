@@ -53,6 +53,7 @@ from config.settings import (
     MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
     SPATIAL_DECISION_THRESHOLD,
+    TARGET_FAR,
     TEMPORAL_CHANNELS,
     TEMPORAL_DECISION_THRESHOLD,
 )
@@ -370,7 +371,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--corpus", choices=("default", "sign_data", "nfi2009"),
                         default="default")
-    parser.add_argument("--far-target", type=float, default=0.05,
+    parser.add_argument("--far-target", type=float, default=TARGET_FAR,
                         help="FAR the constrained operating point holds to")
     args = parser.parse_args(argv)
 

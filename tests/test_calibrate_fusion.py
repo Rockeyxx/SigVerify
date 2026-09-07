@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from scripts.calibrate_fusion import grid_search_fusion_params
 
 

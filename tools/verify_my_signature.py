@@ -23,7 +23,8 @@ from PIL import Image, ImageOps
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.settings import MODEL_WEIGHTS_DIR, SPATIAL_DECISION_THRESHOLD
+from config.settings import (MODEL_WEIGHTS_DIR, NUM_ENROLLMENT_REFERENCES,
+                             SPATIAL_DECISION_THRESHOLD)
 from src.verification import embed, load_model, similarity_from_distance, verify
 
 
@@ -147,8 +148,9 @@ def main():
                             for path in args.references]
     print(f"Enrolled {len(reference_embeddings)} reference(s) from "
           f"{', '.join(os.path.basename(p) for p in args.references)}")
-    if len(reference_embeddings) < 5:
-        print("  NOTE: the reported accuracy assumes 5 references. With fewer, "
+    if len(reference_embeddings) < NUM_ENROLLMENT_REFERENCES:
+        print(f"  NOTE: the reported accuracy assumes "
+              f"{NUM_ENROLLMENT_REFERENCES} references. With fewer, "
               "expect worse — this is the harder pair-scoring regime.")
     # This script is spatial-only, so verify() decides against the spatial
     # threshold. Printing the fused one showed a negative margin beside a

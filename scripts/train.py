@@ -24,7 +24,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
-    TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS,
+    TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS, TEMPORAL_INPUT_FEATURES,
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     CONTRASTIVE_MARGIN, LEARNING_RATE, BATCH_SIZE,
     NUM_EPOCHS, WEIGHT_DECAY, MODEL_WEIGHTS_DIR,
@@ -202,14 +202,16 @@ def parse_args(argv=None):
                              "curve is non-monotone, so decaying on a plateau fits it "
                              "better than a fixed step schedule")
     parser.add_argument("--temporal-features", choices=["raw", "derived"], default="raw",
-                        help="raw: the [L, 3] capture contract, deltas appended inside "
-                             "the model. derived: 16 z-scored kinematic time functions "
-                             "from src/data/features.py, all computed from those same 3 "
-                             "channels, so the capture contract is unchanged")
-    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"],
+                        help="raw: the capture contract at --temporal-channels width, "
+                             "deltas appended inside the model. derived: 16 z-scored "
+                             "kinematic time functions from src/data/features.py, always "
+                             "computed from the base (X, Y, P) triplet regardless of "
+                             "--temporal-channels")
+    parser.add_argument("--temporal-channels", choices=sorted(TEMPORAL_CHANNEL_WIDTHS),
                         default=TEMPORAL_CHANNELS,
-                        help="Extra channels to feed the temporal branch. 'xyp' is "
-                             "the shipped 3-channel contract; 'tilt' adds "
+                        help=f"Extra channels to feed the temporal branch. "
+                             f"'{TEMPORAL_CHANNELS}' ({TEMPORAL_INPUT_FEATURES}ch) ships; "
+                             f"'xyp' is the legacy 3-channel contract; 'tilt' adds "
                              "azimuth+altitude (SVC2004 only, and the XPPen reports "
                              "neither); 'dt' adds inter-sample time, measured from "
                              "SVC2004's clock and reconstructed on SigComp2011 from "
@@ -615,9 +617,10 @@ def main(argv=None):
         if args.temporal_features == "derived":
             print(f"  Temporal features: derived ({channel_count}ch) — kinematic time "
                   f"functions computed from the [L, 3] capture contract, not captured")
-        elif channel_count != 3:
+        elif args.temporal_channels != TEMPORAL_CHANNELS:
             print(f"  Temporal channels: {args.temporal_channels} "
-                  f"({channel_count}ch) — NOT the shipped [L, 3] capture contract")
+                  f"({channel_count}ch) — NOT the shipped '{TEMPORAL_CHANNELS}' "
+                  f"contract ([L, {TEMPORAL_INPUT_FEATURES}])")
         model = TemporalSiamese(
             input_features=channel_count,
             hidden_size=args.hidden_size,
@@ -636,10 +639,11 @@ def main(argv=None):
                             else "temporal_lstm_task1.pth")
 
         # Same reasoning, extended to the channel set. A derived-feature run
-        # produces a 16-channel model that the shipped 3-channel verifier cannot
-        # load, so writing it to the shipped name replaces working weights with
-        # ones no deployed path can use. This is not hypothetical: it happened
-        # on 2026-08-09 and the file had to be recovered from release v0.6.0.
+        # produces a 16-channel model that the shipped TEMPORAL_CHANNELS-width
+        # verifier cannot load, so writing it to the shipped name replaces
+        # working weights with ones no deployed path can use. This is not
+        # hypothetical: it happened on 2026-08-09 and the file had to be
+        # recovered from release v0.6.0.
         if args.temporal_features == "derived":
             weights_filename = weights_filename.replace(".pth", "_derived.pth")
 

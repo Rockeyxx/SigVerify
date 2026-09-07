@@ -466,7 +466,8 @@ def load_sigcomp2011_file(path, extra_channels=None):
        at all (measured: 0 of 100,494). Mixing the two unfiltered would make the
        pressure channel and its derivative mean different things per writer_samples,
        which is precisely what collapsed the earlier SVC2004 Task1 + Task2 merge
-       (see `docs/SOLUTIONS.md`).
+       (43.75% EER; the per-writer pair cap means merging adds no pairs, only
+       mixes pressure-blind samples into the pressure channel).
 
     The cost is stated plainly: in-air trajectory is discriminative in the
     online-verification literature, and this discards it. It is discarded
