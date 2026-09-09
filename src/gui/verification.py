@@ -1,65 +1,188 @@
 """
 Verification Panel — Signature Verification System
-
-PyQt5 verification loop UI. Accepts a probe (image, dynamic, or both),
-compares against stored reference embeddings, and displays the result
-as [Genuine/Forged, Confidence %].
 """
 
-import random
-from PyQt5.QtWidgets import QWidget, QFileDialog
-from PyQt5 import uic
+from PyQt5.QtWidgets import (
+    QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
+    QVBoxLayout, QFileDialog
+)
+
+import storage
+import interfaces
+
+
+class SignatureService:
+    """
+    نقطة مركزية وحدة تجمع منطق التسجيل والتحقق. تعتمد على interfaces.py
+    (للموديل، لما يجهز) و storage.py (للتخزين) — هما نقطتا الاستبدال
+    الوحيدتان لما يجهز الفريق شغلهم الحقيقي.
+    """
+
+    @staticmethod
+    def enroll(client_id: str, image_paths: list) -> tuple:
+        if not client_id:
+            return False, "Please enter a client ID"
+        if not image_paths:
+            return False, "Please add at least one reference image"
+
+        for image_path in image_paths:
+            image_tensor = interfaces.preprocess_image(image_path)
+            embedding = interfaces.get_spatial_embedding(image_tensor)
+            interfaces.store_embedding(client_id, embedding, modality="spatial")
+
+        return True, "References processed"
+
+    @staticmethod
+    def verify(client_id: str, probe_image_path: str) -> tuple:
+        """Returns: (success, message, decision, confidence)"""
+        if not client_id:
+            return False, "Please enter a client ID", "", 0.0
+
+        if not storage.client_exists(client_id):
+            return False, f"No enrolled record found for '{client_id}'. Please enroll them first.", "", 0.0
+
+        if not probe_image_path:
+            return False, "Please select a probe image", "", 0.0
+
+        image_tensor = interfaces.preprocess_image(probe_image_path)
+        probe_embedding = interfaces.get_spatial_embedding(image_tensor)
+
+        references = interfaces.get_references(client_id, modality="spatial")
+        if not references:
+            return False, f"No reference embeddings found for '{client_id}'", "", 0.0
+
+        distances = [interfaces.compute_distance(probe_embedding, ref) for ref in references]
+        s_spatial = min(distances)
+        interfaces.fuse_scores(s_spatial, s_temporal=0.0, alpha=1.0)
+
+        decision, confidence = interfaces.mock_verify_decision()
+        return True, "", decision, confidence
 
 
 class VerificationPanel(QWidget):
     def __init__(self):
         super().__init__()
-        uic.loadUi("ui/verification_screen.ui", self)
-
-        # نخزن مسار الصورة المختارة هنا مؤقتًا
         self.selected_image_path = None
+        self.current_employee_username = None
 
-        # نربط الأزرار بالدوال
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 24, 30, 24)
+        layout.setSpacing(10)
+
+        title = QLabel("Verification")
+        title.setProperty("role", "title")
+        layout.addWidget(title)
+
+        section1 = QLabel("CLIENT")
+        section1.setProperty("role", "section")
+        layout.addWidget(section1)
+
+        self.clientIdInput = QLineEdit()
+        self.clientIdInput.setPlaceholderText("Enter the client's name / ID")
+        layout.addWidget(self.clientIdInput)
+
+        section2 = QLabel("MODALITY")
+        section2.setProperty("role", "section")
+        layout.addWidget(section2)
+
+        self.modalitySelector = QComboBox()
+        self.modalitySelector.addItem("Image only")
+        self.modalitySelector.addItem("Dynamic only (device not connected)")
+        self.modalitySelector.addItem("Both (device not connected)")
+        self.modalitySelector.model().item(1).setEnabled(False)
+        self.modalitySelector.model().item(2).setEnabled(False)
+        layout.addWidget(self.modalitySelector)
+
+        section3 = QLabel("PROBE SIGNATURE")
+        section3.setProperty("role", "section")
+        layout.addWidget(section3)
+
+        self.selectProbeButton = QPushButton("Select Probe Image")
         self.selectProbeButton.clicked.connect(self.select_probe_image)
-        self.verifyButton.clicked.connect(self.run_verification)
+        layout.addWidget(self.selectProbeButton)
 
-        # نخفي مؤشر degraded-mode افتراضيًا (فاضي لين يصير فعلي)
-        self.degradedModeIndicator.setText("⚠ Degraded Mode: Spatial Only (no dynamic input device connected)")
+        self.probeFileLabel = QLabel("No file selected")
+        self.probeFileLabel.setProperty("role", "muted")
+        layout.addWidget(self.probeFileLabel)
+
+        self.verifyButton = QPushButton("Verify")
+        self.verifyButton.setProperty("role", "primary")
+        self.verifyButton.clicked.connect(self.run_verification)
+        layout.addWidget(self.verifyButton)
+
+        section4 = QLabel("RESULT")
+        section4.setProperty("role", "section")
+        layout.addWidget(section4)
+
+        self.resultDisplay = QLabel("Awaiting verification...")
+        self.resultDisplay.setProperty("role", "result-idle")
+        layout.addWidget(self.resultDisplay)
+
+        self.modalityStateLabel = QLabel("")
+        self.modalityStateLabel.setProperty("role", "muted")
+        layout.addWidget(self.modalityStateLabel)
+
+        self.degradedModeIndicator = QLabel("")
+        self.degradedModeIndicator.setProperty("role", "warning")
+        layout.addWidget(self.degradedModeIndicator)
+
+        layout.addStretch()
+        self.setLayout(layout)
+
+        self.update_modality_state()
+
+    def set_current_employee(self, username: str):
+        self.current_employee_username = username
+
+    def prefill_client(self, client_id: str):
+        self.clientIdInput.setText(client_id)
+
+    def update_modality_state(self):
+        self.modalityStateLabel.setText("Modality State: Spatial Only (Fallback)")
+        self.degradedModeIndicator.setText(
+            "⚠ Degraded Mode: no dynamic input device connected"
+        )
 
     def select_probe_image(self):
-        """يفتح نافذة اختيار ملف حقيقية ويعرض اسم الملف المختار"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Signature Image",
-            "",
+            self, "Select Signature Image", "",
             "Images (*.jpg *.jpeg *.png)"
         )
         if file_path:
             self.selected_image_path = file_path
-            # نعرض بس اسم الملف، مو المسار الكامل (أوضح للمستخدم)
-            file_name = file_path.split("/")[-1]
-            self.probeFileLabel.setText(file_name)
+            self.probeFileLabel.setText(file_path.split("/")[-1])
         else:
             self.probeFileLabel.setText("No file selected")
 
     def run_verification(self):
-        """
-        TODO (لاحقًا): استدعاء الموديل الحقيقي من فريق الـ ML
-        حاليًا: نتيجة وهمية للتجربة فقط
-        """
-        user_id = self.userIdInput.text()
+        client_id = self.clientIdInput.text().strip()
 
-        if not user_id:
-            self.resultDisplay.setText("Please enter a User ID")
+        success, message, decision, confidence = SignatureService.verify(
+            client_id, self.selected_image_path
+        )
+
+        if not success:
+            self._show_idle_message(message)
             return
-
-        if not self.selected_image_path:
-            self.resultDisplay.setText("Please select a probe image")
-            return
-
-        # ------ نتيجة تجريبية وهمية (Mock) ------
-        # لاحقًا هذا الجزء بيستبدل بالاستدعاء الحقيقي لموديل الـ ML
-        decision = random.choice(["Genuine", "Forged"])
-        confidence = round(random.uniform(60, 99), 1)
 
         self.resultDisplay.setText(f"[{decision}, {confidence}%]")
+        role = "result-genuine" if decision == "Genuine" else "result-forged"
+        self.resultDisplay.setProperty("role", role)
+        self._refresh_result_style()
+
+        storage.append_verification_log(
+            client_id=client_id,
+            decision=decision,
+            confidence=confidence,
+            modality_state="Spatial Only (Fallback)",
+            employee_username=self.current_employee_username or "unknown"
+        )
+
+    def _show_idle_message(self, text):
+        self.resultDisplay.setText(text)
+        self.resultDisplay.setProperty("role", "result-idle")
+        self._refresh_result_style()
+
+    def _refresh_result_style(self):
+        self.resultDisplay.style().unpolish(self.resultDisplay)
+        self.resultDisplay.style().polish(self.resultDisplay)
