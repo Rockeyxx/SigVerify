@@ -612,3 +612,97 @@ class TestDeriveDeltas:
             batched = model.encode(padded, lengths)
             alone = model.encode(short, torch.tensor([12]))
         assert torch.allclose(batched[0], alone[0], atol=1e-6)
+
+
+class TestPoolingGridIsRecoverable:
+    """
+    `pool_grid` decides how much spatial detail reaches the embedding, and it was
+    a bare `self.pool_grid = 4` — unreachable from config or the CLI, so never
+    swept. Making it tunable is only safe if a checkpoint still carries its own
+    architecture, which for this parameter means recovering it from the
+    projection width: in_features = 2 (avg+max) x trunk_channels x grid^2.
+    """
+
+    @pytest.mark.parametrize("grid", [2, 4, 8])
+    def test_grid_round_trips_through_from_state_dict(self, grid):
+        from config.settings import SPATIAL_INPUT_SIZE
+        width, height = SPATIAL_INPUT_SIZE
+        original = SpatialSiamese(pool_grid=grid).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict())
+
+        assert restored.pool_grid == grid, "grid must come from the checkpoint"
+        x = torch.randn(1, 1, height, width)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(x), restored.encode(x))
+
+    def test_default_is_the_shipped_grid(self):
+        assert SpatialSiamese().pool_grid == 4
+
+    def test_unrecoverable_width_raises_instead_of_reshaping(self):
+        """
+        A projection width that is not 2 x channels x grid^2 means the grid cannot
+        be recovered. Falling back to the default would silently score the
+        checkpoint under a different embedding geometry — a plausible wrong
+        number rather than an error, which is the failure mode `from_state_dict`
+        exists to prevent.
+        """
+        state = SpatialSiamese(pool_grid=4).state_dict()
+        state["embedding.1.weight"] = torch.zeros(512, 8191)
+        with pytest.raises(ValueError, match="grid"):
+            SpatialSiamese.from_state_dict(state)
+
+    @pytest.mark.parametrize("grid", [2, 8])
+    def test_grid_round_trips_with_the_fc_hidden_head(self, grid):
+        """
+        `from_state_dict` reads the projection width off `embedding.1.weight`,
+        but the branch above it keys the FC-1024 variant on `embedding.4.weight`.
+        Index 1 exists in both head shapes — this asserts that rather than
+        leaving it to reasoning, since a wrong read here recovers the wrong grid
+        and reshapes the embedding silently.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        width, height = SPATIAL_INPUT_SIZE
+        original = SpatialSiamese(pool_grid=grid, fc_hidden=1024).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict())
+
+        assert restored.pool_grid == grid
+        x = torch.randn(1, 1, height, width)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(x), restored.encode(x))
+
+
+class TestPoolChannelReduction:
+    """
+    §22 could not attribute its result: raising the pooling grid to 8 also
+    quadrupled the head, and §5 already measured extra head capacity as harmful
+    at this data scale. A 1x1 convolution before pooling cuts channels so the
+    head width is unchanged, which isolates spatial resolution from capacity.
+
+    2 * 64 * 8^2 == 2 * 256 * 4^2 == 8192.
+    """
+
+    def test_reduction_holds_the_head_width_while_quadrupling_resolution(self):
+        shipped = SpatialSiamese()
+        matched = SpatialSiamese(pool_grid=8, pool_channels=64)
+
+        assert matched.embedding[1].in_features == shipped.embedding[1].in_features, \
+            "the point of the reduction is an identical head width"
+        assert matched.pool_grid ** 2 == 4 * shipped.pool_grid ** 2, \
+            "4x the spatial cells"
+
+    def test_reduction_round_trips_through_from_state_dict(self):
+        """A checkpoint must still carry its own architecture, per AGENTS.md."""
+        from config.settings import SPATIAL_INPUT_SIZE
+        width, height = SPATIAL_INPUT_SIZE
+        original = SpatialSiamese(pool_grid=8, pool_channels=64).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict())
+
+        assert restored.pool_grid == 8
+        assert restored.pool_channels == 64
+        x = torch.randn(1, 1, height, width)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(x), restored.encode(x))
+
+    def test_default_has_no_reduction(self):
+        """The shipped model must be untouched by this addition."""
+        assert SpatialSiamese().pool_channels is None
