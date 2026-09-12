@@ -232,4 +232,51 @@ QPushButton[role="danger"] {{
 QPushButton[role="danger"]:hover {{
     background-color: {DANGER_BG};
 }}
+QFrame[role="stat-card"] {{
+    background-color: {PRIMARY};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+
+QLabel[role="stat-value"] {{
+    font-size: 26px;
+    font-weight: 800;
+    color: {ACCENT};
+}}
+
+QLabel[role="stat-title"] {{
+    font-size: 10px;
+    font-weight: 600;
+    color: {TEXT_MUTED};
+    letter-spacing: 0.5px;
+}}
+
+QPushButton[role="sidebar-toggle"] {{
+    background-color: transparent;
+    border: none;
+    color: {TEXT_LIGHT};
+    font-size: 16px;
+    padding: 4px;
+}}
+
+QPushButton[role="sidebar-toggle"]:hover {{
+    background-color: {BORDER};
+    border-radius: 4px;
+}}
+
+QTableWidget {{
+    background-color: {PRIMARY};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    gridline-color: {BORDER};
+    color: {TEXT_LIGHT};
+}}
+
+QHeaderView::section {{
+    background-color: {PRIMARY_DARK};
+    color: {TEXT_MUTED};
+    padding: 6px;
+    border: none;
+    font-weight: 600;
+}}
 """

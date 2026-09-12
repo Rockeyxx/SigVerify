@@ -1,9 +1,8 @@
 """
 Enrollment Panel — Signature Verification System
 
-Supports: new client enrollment (5 image refs required), loading and
-editing an existing client's references (view / remove / re-add),
-and deleting a client entirely.
+Clients are scoped per employee: an employee can only load/edit
+clients they personally enrolled.
 """
 
 from PyQt5.QtCore import pyqtSignal
@@ -21,7 +20,6 @@ REQUIRED_DYNAMIC_REFERENCES = 5
 
 
 class ImagePreviewDialog(QDialog):
-    """نافذة صغيرة تعرض الصورة بحجم أكبر عند الضغط على 'View'"""
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Reference Preview")
@@ -42,8 +40,8 @@ class EnrollmentPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.current_employee_username = None
-        self.image_references = []      # مسارات الصور الحالية (جديدة أو محملة من ملف)
-        self.dynamic_references = []    # فاضية حاليًا لحد ما يتوصل جهاز التابلت
+        self.image_references = []
+        self.dynamic_references = []
         self._selected_new_image_path = None
 
         layout = QVBoxLayout()
@@ -139,17 +137,12 @@ class EnrollmentPanel(QWidget):
 
         self._update_counts()
 
-    # ---------- عام ----------
-
     def set_current_employee(self, username: str):
         self.current_employee_username = username
 
     def prefill_client(self, client_id: str):
-        """يُستدعى من الشريط الجانبي لتحميل عميل موجود مباشرة"""
         self.clientIdInput.setText(client_id)
         self.load_or_start_new_client()
-
-    # ---------- منطق العميل ----------
 
     def load_or_start_new_client(self):
         client_id = self.clientIdInput.text().strip()
@@ -157,10 +150,23 @@ class EnrollmentPanel(QWidget):
             self.clientStatusLabel.setText("Please enter a client ID first")
             return
 
-        existing = storage.get_client(client_id)
-        if existing:
-            self.image_references = list(existing.get("image_references", []))
-            self.dynamic_references = list(existing.get("dynamic_references", []))
+        # نتحقق أول: هل فيه سجل بهذا الاسم أصلاً (بأي موظف)؟
+        any_owner_record = storage.get_client(client_id, employee_username=None)
+        own_record = storage.get_client(client_id, employee_username=self.current_employee_username)
+
+        if any_owner_record and not own_record:
+            self.clientStatusLabel.setText(
+                "⚠ A client with this name already exists under another employee"
+            )
+            self.image_references = []
+            self.dynamic_references = []
+            self._refresh_image_list()
+            self._update_counts()
+            return
+
+        if own_record:
+            self.image_references = list(own_record.get("image_references", []))
+            self.dynamic_references = list(own_record.get("dynamic_references", []))
             self.clientStatusLabel.setText(
                 f"Loaded existing client '{client_id}' — edit references below"
             )
@@ -174,8 +180,6 @@ class EnrollmentPanel(QWidget):
         self._refresh_image_list()
         self._update_counts()
         self.statusLabel.setText("")
-
-    # ---------- الصور ----------
 
     def select_reference_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -229,8 +233,6 @@ class EnrollmentPanel(QWidget):
     def _update_counts(self):
         self.imageCountLabel.setText(f"{len(self.image_references)}/{REQUIRED_IMAGE_REFERENCES} image references")
 
-    # ---------- الحفظ / الحذف ----------
-
     def run_enrollment(self):
         client_id = self.clientIdInput.text().strip()
 
@@ -260,8 +262,8 @@ class EnrollmentPanel(QWidget):
 
     def delete_client(self):
         client_id = self.clientIdInput.text().strip()
-        if not client_id or not storage.client_exists(client_id):
-            self._set_status_error("No existing client loaded to delete")
+        if not client_id or not storage.client_exists(client_id, self.current_employee_username):
+            self._set_status_error("No existing client of yours loaded to delete")
             return
 
         confirm = QMessageBox.question(

@@ -15,6 +15,8 @@ from enrollment import EnrollmentPanel
 from verification import VerificationPanel
 from sidebar import Sidebar
 from dashboard import DashboardScreen
+from clients_page import ClientsPage
+from profile_page import ProfilePage
 from styles import STYLE
 import storage
 
@@ -37,7 +39,6 @@ def create_icon_label(size=160):
 
 
 def centered(content_layout):
-    """يلف أي layout بحيث يكون متمركز أفقيًا وعموديًا"""
     outer = QVBoxLayout()
     outer.addStretch(1)
     row = QHBoxLayout()
@@ -250,7 +251,6 @@ class MainWindow(QMainWindow):
         self.current_employee = None
         self._build_auth_stack()
 
-    # ---- قبل تسجيل الدخول ----
     def _build_auth_stack(self):
         self.auth_stack = QStackedWidget()
 
@@ -273,7 +273,6 @@ class MainWindow(QMainWindow):
         self.auth_stack.setCurrentWidget(self.welcome_screen)
         self.setCentralWidget(self.auth_stack)
 
-    # ---- بعد تسجيل الدخول: Sidebar + المحتوى ----
     def _build_app_stack(self):
         container = QWidget()
         main_layout = QHBoxLayout()
@@ -284,19 +283,27 @@ class MainWindow(QMainWindow):
         self.sidebar.go_dashboard.connect(lambda: self.content_stack.setCurrentWidget(self.dashboard_screen))
         self.sidebar.go_enrollment.connect(lambda: self.content_stack.setCurrentWidget(self.enrollment_panel))
         self.sidebar.go_verification.connect(lambda: self.content_stack.setCurrentWidget(self.verification_panel))
+        self.sidebar.go_clients.connect(self._open_clients_page)
+        self.sidebar.go_profile.connect(self._open_profile_page)
         self.sidebar.go_logout.connect(self._handle_logout)
-        self.sidebar.client_selected.connect(self._open_client_in_enrollment)
         main_layout.addWidget(self.sidebar)
 
         self.content_stack = QStackedWidget()
         self.dashboard_screen = DashboardScreen()
         self.enrollment_panel = EnrollmentPanel()
         self.verification_panel = VerificationPanel()
+        self.clients_page = ClientsPage()
+        self.profile_page = ProfilePage()
+
         self.enrollment_panel.client_list_changed.connect(self._refresh_after_change)
+        self.clients_page.client_selected.connect(self._open_client_in_enrollment)
+        self.profile_page.profile_updated.connect(self._handle_profile_updated)
 
         self.content_stack.addWidget(self.dashboard_screen)
         self.content_stack.addWidget(self.enrollment_panel)
         self.content_stack.addWidget(self.verification_panel)
+        self.content_stack.addWidget(self.clients_page)
+        self.content_stack.addWidget(self.profile_page)
         self.content_stack.setCurrentWidget(self.dashboard_screen)
 
         main_layout.addWidget(self.content_stack)
@@ -307,21 +314,38 @@ class MainWindow(QMainWindow):
         self.current_employee = employee
         self._build_app_stack()
         self.sidebar.set_employee(employee["full_name"], employee["username"])
+        self.dashboard_screen.set_employee_name(employee["full_name"])
         self.enrollment_panel.set_current_employee(employee["username"])
         self.verification_panel.set_current_employee(employee["username"])
+        self.profile_page.load_employee(employee)
         self._refresh_after_change()
 
     def _handle_logout(self):
         self.current_employee = None
         self._build_auth_stack()
 
+    def _open_clients_page(self):
+        self.clients_page.refresh(self.current_employee["username"])
+        self.content_stack.setCurrentWidget(self.clients_page)
+
+    def _open_profile_page(self):
+        self.content_stack.setCurrentWidget(self.profile_page)
+
+    def _handle_profile_updated(self, updated_employee: dict):
+        self.current_employee = updated_employee
+        self.sidebar.set_employee(updated_employee["full_name"], updated_employee["username"])
+        self.dashboard_screen.set_employee_name(updated_employee["full_name"])
+        self.enrollment_panel.set_current_employee(updated_employee["username"])
+        self.verification_panel.set_current_employee(updated_employee["username"])
+
     def _open_client_in_enrollment(self, client_id: str):
         self.enrollment_panel.prefill_client(client_id)
         self.content_stack.setCurrentWidget(self.enrollment_panel)
 
     def _refresh_after_change(self):
-        self.sidebar.refresh_clients()
-        self.dashboard_screen.refresh()
+        username = self.current_employee["username"]
+        self.dashboard_screen.refresh(username)
+        self.clients_page.refresh(username)
 
 
 if __name__ == "__main__":

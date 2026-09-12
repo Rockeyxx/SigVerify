@@ -12,12 +12,6 @@ import interfaces
 
 
 class SignatureService:
-    """
-    نقطة مركزية وحدة تجمع منطق التسجيل والتحقق. تعتمد على interfaces.py
-    (للموديل، لما يجهز) و storage.py (للتخزين) — هما نقطتا الاستبدال
-    الوحيدتان لما يجهز الفريق شغلهم الحقيقي.
-    """
-
     @staticmethod
     def enroll(client_id: str, image_paths: list) -> tuple:
         if not client_id:
@@ -33,13 +27,13 @@ class SignatureService:
         return True, "References processed"
 
     @staticmethod
-    def verify(client_id: str, probe_image_path: str) -> tuple:
+    def verify(client_id: str, probe_image_path: str, employee_username: str) -> tuple:
         """Returns: (success, message, decision, confidence)"""
         if not client_id:
             return False, "Please enter a client ID", "", 0.0
 
-        if not storage.client_exists(client_id):
-            return False, f"No enrolled record found for '{client_id}'. Please enroll them first.", "", 0.0
+        if not storage.client_exists(client_id, employee_username):
+            return False, f"No enrolled record found for '{client_id}' under your account. Please enroll them first.", "", 0.0
 
         if not probe_image_path:
             return False, "Please select a probe image", "", 0.0
@@ -158,7 +152,7 @@ class VerificationPanel(QWidget):
         client_id = self.clientIdInput.text().strip()
 
         success, message, decision, confidence = SignatureService.verify(
-            client_id, self.selected_image_path
+            client_id, self.selected_image_path, self.current_employee_username
         )
 
         if not success:
