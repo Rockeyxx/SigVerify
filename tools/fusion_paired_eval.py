@@ -37,7 +37,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from scripts.evaluate import (alpha_grid_search, compute_eer, compute_far_frr,
                               embed_samples,
                               load_branch_model, similarity_from_distance, enrollment_draw,)
-from config.settings import MODEL_WEIGHTS_DIR, SIGCOMP2011_DIR, SIGCOMP2011_OFFLINE_DIR
+from config.settings import (MODEL_WEIGHTS_DIR, SIGCOMP2011_DIR, SIGCOMP2011_OFFLINE_DIR,
+                             TEMPORAL_CHANNELS)
 from src.data.parsers import load_sigcomp2011_file
 
 _OFF = os.path.join(SIGCOMP2011_OFFLINE_DIR, "trainingSet", "OfflineSignatures")
@@ -96,6 +97,19 @@ def build_paired_index(scripts=("Dutch", "Chinese")):
     return paired, stats
 
 
+def load_paired_trajectory(path):
+    """
+    One online sample at the width the shipped temporal model expects.
+
+    `load_sigcomp2011_file` defaults to the legacy 3-channel `xyp`. Calling it
+    bare here crashed against the 4-channel `dt` weights and, before that, let
+    this tool report a fusion number for a model other than the one shipped.
+    `TEMPORAL_CHANNELS` is the single knob; nothing here may name a width.
+    """
+    extra = None if TEMPORAL_CHANNELS == "xyp" else TEMPORAL_CHANNELS
+    return load_sigcomp2011_file(path, extra_channels=extra)
+
+
 def _embed_both(paired, spatial_model, temporal_model, device):
     """Embed every paired sample once per branch, preserving list order."""
     embedded = {}
@@ -108,7 +122,7 @@ def _embed_both(paired, spatial_model, temporal_model, device):
                                 np.zeros((0, 1), np.float32))
                 continue
             images = [p for p, _ in items]
-            trajectories = [load_sigcomp2011_file(t) for _, t in items]
+            trajectories = [load_paired_trajectory(t) for _, t in items]
             entry[label] = (
                 embed_samples(spatial_model, images, "spatial", device),
                 embed_samples(temporal_model, trajectories, "temporal", device),
