@@ -17,7 +17,10 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (
+    MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
+    SIGCOMP2011_DIR,
+    SVC2004_TASK2_DIR,
     TEMPORAL_CHANNELS,
     TEMPORAL_SPLIT_RATIOS,
 )
@@ -25,6 +28,7 @@ from scripts.evaluate import compute_eer, compute_far_frr
 from src.data.dataset import writer_independent_split
 from src.data.parsers import merge_datasets
 from src.data.renderer import render_trajectory_to_image
+from src.verification import similarity_from_distance
 from src.models.siamese import SpatialSiamese, TemporalSiamese
 
 
@@ -110,8 +114,8 @@ def evaluate_paired_corpus(
             # Nearest-of-K spatial distances & similarities
             s_d_gen = np.linalg.norm(gen_s_emb[:, None, :] - ref_s_emb[None, :, :], axis=2).min(axis=1)
             s_d_forg = np.linalg.norm(forg_s_emb[:, None, :] - ref_s_emb[None, :, :], axis=2).min(axis=1)
-            s_gen_all.append(1.0 / (1.0 + s_d_gen))
-            s_imp_all.append(1.0 / (1.0 + s_d_forg))
+            s_gen_all.append(similarity_from_distance(s_d_gen))
+            s_imp_all.append(similarity_from_distance(s_d_forg))
 
             # 2. Temporal Embeddings (padded variable length)
             def embed_trajs(traj_list):
@@ -126,8 +130,8 @@ def evaluate_paired_corpus(
 
             t_d_gen = np.linalg.norm(gen_t_emb[:, None, :] - ref_t_emb[None, :, :], axis=2).min(axis=1)
             t_d_forg = np.linalg.norm(forg_t_emb[:, None, :] - ref_t_emb[None, :, :], axis=2).min(axis=1)
-            t_gen_all.append(1.0 / (1.0 + t_d_gen))
-            t_imp_all.append(1.0 / (1.0 + t_d_forg))
+            t_gen_all.append(similarity_from_distance(t_d_gen))
+            t_imp_all.append(similarity_from_distance(t_d_forg))
 
     if not s_gen_all:
         return np.array([]), np.array([]), np.array([]), np.array([])
@@ -142,9 +146,12 @@ def evaluate_paired_corpus(
 
 def main():
     parser = argparse.ArgumentParser(description="Calibrate multimodal fusion parameters")
-    parser.add_argument("--spatial-weights", default="models/weights/spatial_cnn.pth")
-    parser.add_argument("--temporal-weights", default="models/weights/temporal_lstm.pth")
-    parser.add_argument("--data-dirs", nargs="+", default=["data/svc2004_task2", "data/sigcomp2011"])
+    parser.add_argument("--spatial-weights",
+                        default=os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+    parser.add_argument("--temporal-weights",
+                        default=os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth"))
+    parser.add_argument("--data-dirs", nargs="+",
+                        default=[SVC2004_TASK2_DIR, SIGCOMP2011_DIR])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--alpha-steps", type=int, default=21)
     args = parser.parse_args()

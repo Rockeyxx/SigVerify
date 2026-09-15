@@ -2,9 +2,11 @@ name: Run Tests
 
 on:
   push:
-    branches: [main, develop]
+    # `develop` never existed, so naming it here meant pushes to the branch the
+    # work actually happens on (`Model`) ran no CI at all.
+    branches: [main, Model]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
   workflow_dispatch:
 
 # Least privilege by default. A job that needs more grants it itself.
@@ -51,11 +53,30 @@ jobs:
       - name: Download release weights (mandatory)
         env:
           GH_TOKEN: ${{ github.token }}
+          WEIGHTS_TAG: v0.9.0
         run: |
           mkdir -p models/weights
-          # Download only spatial_cnn.pth and temporal_lstm.pth from GitHub releases.
-          # Ensemble weights (6 seeds) are optional and not distributed in releases.
-          gh release download --dir models/weights -p "spatial_cnn.pth" -p "temporal_lstm.pth" --clobber
+          # Pinned to an explicit tag. Untagged, `gh release download` takes
+          # whatever release is newest, so cutting a release silently changed
+          # what CI was testing with no commit to point at. Bumping weights is
+          # now a deliberate edit to this line.
+          gh release download "$WEIGHTS_TAG" --dir models/weights \
+            -p "spatial_cnn.pth" -p "temporal_lstm.pth" --clobber
+
+      - name: Download ensemble weights (optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEIGHTS_TAG: v0.9.0
+        continue-on-error: true
+        run: |
+          # The six seeds ARE published in the release — an earlier comment here
+          # claimed they were not, which is why CI fetched 2 of the 8 assets and
+          # the only test that loads a real ensemble
+          # (tests/test_service.py::test_load_temporal_ensemble_returns_models_when_present)
+          # skipped on every run. They stay optional: a release without them, or
+          # a fork without release access, must not fail the build.
+          gh release download "$WEIGHTS_TAG" --dir models/weights \
+            -p "temporal_dt_s4*.pth" --clobber
 
       - name: Run pytest
         run: |

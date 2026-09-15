@@ -54,7 +54,8 @@ SPATIAL_EMBEDDING_DIM = 512
 # Image spatial mapping behavior.
 #   True  — Pre-pad image to square prior to scaling. Maintains aspect ratio; wide BHSig260 ribbons maintain proportion but allocate canvas area to padding.
 #   False — Direct scaling to SPATIAL_INPUT_SIZE (155x220). Modifies aspect ratio while maximizing signature canvas occupancy, following Dey et al.
-# Verified via empirical evaluation — see docs/SOLUTIONS.md for comparison data.
+# Verified by measurement: direct scaling won on every corpus. Square-padding
+# spends canvas on padding for the wide BHSig260 ribbons and measured worse.
 SPATIAL_SQUARE_PAD = False
 
 # Quality filtering limits (proxies for effective image resolution)
@@ -88,8 +89,11 @@ RENDER_PEN_UP_DT_RATIO = 3.0            # A gap this many times the median perio
 # draw. Averaging their per-model SCORES instead reaches 4.53%, but that cannot
 # be expressed through the `.encode()` interface `embed()` calls, so the
 # embedding mean ships and gives up 0.29 points for a far smaller change.
-# These weights are gitignored and are NOT part of the v0.8.0 release, so a
-# machine that only has the release cannot form the ensemble.
+# These weights are gitignored, but they ARE published as release assets from
+# v0.9.0 on (all six `temporal_dt_s4*.pth`), so a machine that only has the
+# release CAN form the ensemble. The previous note here said the opposite,
+# which is why CI fetched 2 of the 8 assets and the one test that loads a real
+# ensemble skipped on every run.
 TEMPORAL_ENSEMBLE_SEEDS = (42, 43, 44, 45, 46, 47)
 TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
 
@@ -199,7 +203,10 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# ALPHA_DEFAULT = 0.5 is equal branch weighting per AGENTS.md until in-house multimodal dataset collection.
+# ALPHA_DEFAULT = 0.5 is equal branch weighting per AGENTS.md. It stays
+# provisional because alpha has not been re-derived, NOT because paired data is
+# missing: SUMMARY.md Part 7 retracts that premise — SigComp2011's training set
+# is already fully paired across modalities.
 ALPHA_DEFAULT = 0.5                     # PROVISIONAL — equal branch weighting
 ALPHA_GRID_STEP = 0.05
 
@@ -211,10 +218,10 @@ TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (
 DECISION_THRESHOLD = 0.8196             # Calibrated threshold tau for late-fused model evaluation
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
-# These were documented in AGENTS.md and docs/rules.md as hard constraints but
-# existed nowhere in code, so nothing could enforce or even report them. Declared
-# here so `tools/profile_latency.py` and the test suite can assert against the
-# same numbers the spec states.
+# These were documented in AGENTS.md as hard constraints but existed nowhere in
+# code, so nothing could enforce or even report them. Declared here so
+# `tools/profile_latency.py` and the test suite can assert against the same
+# numbers the spec states.
 LATENCY_SLA_SECONDS = 3.0               # End-to-end verification decision budget
 INFERENCE_RAM_CEILING_GB = 4.0          # Peak RSS ceiling for a single verification
 
@@ -227,7 +234,10 @@ INFERENCE_RAM_CEILING_GB = 4.0          # Peak RSS ceiling for a single verifica
 INFERENCE_NUM_THREADS = 4
 
 # ─── Evaluation Targets ──────────────────────────────────────────────
-# Target error metrics specified in Term-1 design requirements (AGENTS.md Hard Constraints).
+# Term-1 target error metrics. NOT from AGENTS.md's Hard Constraints table,
+# which lists only RAM, latency, execution, platform and build steps. README's
+# device-tier table is the source, and it is tiered (primary <=5%, secondary
+# <=10%, tertiary <=20%); these flat constants encode the primary tier only.
 TARGET_FAR = 0.05                       # 5% target False Acceptance Rate
 TARGET_FRR = 0.05                       # 5% target False Rejection Rate
 TARGET_ACCURACY = 0.95                  # 95% target accuracy (100% - EER)

@@ -129,8 +129,10 @@ them, even if they appear in the literature review or older drafts:
   setting moves the gate, the parsers and the test suite together, so a
   checkpoint trained under any of the three stays reproducible. `dt` is what
   ships and is what `models/weights/temporal_lstm.pth` was trained as
-- **Derived dynamics:** the model appends per-frame deltas `(dX, dY, dP)` to
-  form a `[1, L, 6]` tensor _internally_, before the LSTM. Velocity is the most
+- **Derived dynamics:** the model appends one per-frame delta per input channel
+  to form a `[1, L, TEMPORAL_INPUT_FEATURES x 2]` tensor _internally_, before the
+  LSTM — **8** under the shipped `dt` contract (4 channels); 6 was the legacy
+  3-channel (`xyp`) value. Velocity is the most
   discriminative feature family in the online-verification literature: a forger
   can copy the shape of a signature while tracing it far more slowly and evenly.
   This costs the capture device nothing, since deltas come from consecutive

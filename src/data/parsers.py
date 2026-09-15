@@ -466,7 +466,8 @@ def load_sigcomp2011_file(path, extra_channels=None):
        at all (measured: 0 of 100,494). Mixing the two unfiltered would make the
        pressure channel and its derivative mean different things per writer_samples,
        which is precisely what collapsed the earlier SVC2004 Task1 + Task2 merge
-       (see `docs/SOLUTIONS.md`).
+       (43.75% EER; the per-writer pair cap means merging adds no pairs, only
+       mixes pressure-blind samples into the pressure channel).
 
     The cost is stated plainly: in-air trajectory is discriminative in the
     online-verification literature, and this discards it. It is discarded
@@ -489,7 +490,16 @@ def load_sigcomp2011_file(path, extra_channels=None):
     rows = np.loadtxt(path, dtype=np.float32, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2011")
 
+
+def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
+    """
+    Shared core for the NFI tablet archives: `[N, 3]` rows of X, Y, force on the
+    200 Hz grid in, model sample out. SigComp2009 and SigComp2011 differ only in
+    file syntax; the decimation, pen-up drop and `dt` reconstruction documented
+    on `load_sigcomp2011_file` apply to both.
+    """
     rows = rows[::SIGCOMP_DECIMATION]
     pen_down = np.flatnonzero(rows[:, 2] > 0)
     if len(pen_down) < 2:
@@ -507,13 +517,35 @@ def load_sigcomp2011_file(path, extra_channels=None):
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
     elif extra_channels is not None:
         raise ValueError(
-            f"SigComp2011 cannot supply '{extra_channels}' — the archive ships "
+            f"{corpus} cannot supply '{extra_channels}' — the archive ships "
             f"three columns (X, Y, force). Only 'dt' is reconstructable."
         )
 
     rows = rows[pen_down]
     return normalize_trajectory(rows[:, :2], rows[:, 2] / SIGCOMP_PRESSURE_MAX,
                                 extra)
+
+
+def load_nfi2009_file(path, extra_channels=None):
+    """
+    Load one SigComp2009 / NFI online `.hwr` file into the model's input.
+
+    Same NFI collection family and WACOM Intuos3 tablet as SigComp2011 (200 Hz,
+    force on the 0-1023 scale), so it shares `_sigcomp_rows_to_sample`. The
+    syntax differs: line one is `<id> <point count>`, then five columns per
+    point (X, Y, force, azimuth, altitude), with force `-1` while the pen is in
+    the air. Azimuth and altitude are dropped: `tilt` is deferred until the
+    deployment tablet is confirmed to report them, and no shipped weight reads
+    them.
+    """
+    with open(path, encoding="latin-1") as handle:
+        lines = handle.read().splitlines()
+    points = [line.split() for line in lines[1:]]
+    rows = np.array([[float(c) for c in cols[:3]] for cols in points if len(cols) == 5],
+                    dtype=np.float32)
+    if rows.size == 0:
+        raise ValueError(f"No trajectory points in {path}")
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2009")
 
 
 def _sigcomp_parts(dirpath, root):

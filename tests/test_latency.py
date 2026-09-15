@@ -17,7 +17,6 @@ here skips cleanly on a fresh clone rather than failing.
 
 import os
 
-import numpy as np
 import pytest
 
 from config.settings import (
@@ -40,8 +39,6 @@ class TestLatencyBudget:
 
     @needs_spatial
     def test_warm_spatial_verification_is_inside_the_sla(self, tmp_path):
-        import time
-
         from tools.profile_latency import measure_warm
 
         median, worst, _ = measure_warm("spatial", repeats=5, tmpdir=str(tmp_path))

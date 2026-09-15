@@ -1,5 +1,5 @@
 import numpy as np
-import pytest
+from config.settings import SPATIAL_INPUT_SIZE
 from src.data.renderer import render_trajectory_to_image
 
 
@@ -20,14 +20,14 @@ class TestTrajectoryRenderer:
 
     def test_output_tensor_shape_and_dtype(self):
         traj = self._sample_trajectory(100)
-        img = render_trajectory_to_image(traj, target_size=(220, 155))
+        img = render_trajectory_to_image(traj)
         assert isinstance(img, np.ndarray)
-        assert img.shape == (1, 155, 220)
+        assert img.shape == (1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0])
         assert img.dtype == np.float32
 
     def test_inverted_polarity_background_is_zero_ink_is_positive(self):
         traj = self._sample_trajectory(100)
-        img = render_trajectory_to_image(traj, target_size=(220, 155))
+        img = render_trajectory_to_image(traj)
         # Background must be 0.0
         assert img[0, 0, 0] == 0.0
         # Canvas corners should be empty background
@@ -47,7 +47,7 @@ class TestTrajectoryRenderer:
             [0.9, 0.0, 0.8, 0.01],
             [1.0, 0.0, 0.8, 0.01],
         ], dtype=np.float32)
-        img = render_trajectory_to_image(traj, target_size=(220, 155))
+        img = render_trajectory_to_image(traj)
         # Midpoint horizontally (x=110) should have no ink because pen was lifted
         mid_x = 110
         assert (img[0, :, mid_x] == 0.0).all()
@@ -55,7 +55,7 @@ class TestTrajectoryRenderer:
     def test_passes_spatial_quality_gate(self):
         from src.data.dataset import quality_gate
         traj = self._sample_trajectory(200)
-        img = render_trajectory_to_image(traj, target_size=(220, 155))
+        img = render_trajectory_to_image(traj)
         passed, details = quality_gate(img)
         assert passed, f"Rendered image failed quality gate: {details}"
 

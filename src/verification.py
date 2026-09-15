@@ -187,6 +187,13 @@ def _nearest_reference_score(references, probe_embedding):
 
     Evaluates minimum distance (nearest-reference matching) across registered templates.
     """
+    if references is None or len(references) == 0:
+        raise ValueError(
+            "Cannot score a probe against an empty reference list — this identity "
+            "has no enrolled templates. numpy reported this as \"need at least one "
+            "array to concatenate\" from inside np.vstack, which names numpy's "
+            "argument rather than the caller's empty enrolment.")
+
     stacked = np.vstack([np.asarray(r, dtype=EMBEDDING_DTYPE) for r in references])
     distances = np.linalg.norm(stacked - probe_embedding[None, :], axis=1)
     return float(similarity_from_distance(distances.min()))
@@ -196,6 +203,33 @@ def _pressure_is_imputed(trajectory):
     """Check whether input sequence uses flat imputed pressure values."""
     trajectory = np.asarray(trajectory, dtype=np.float32)
     return bool(np.allclose(trajectory[:, 2], PRESSURE_IMPUTATION_VALUE))
+
+
+def _gate_enrollment_sample(sample, modality, index):
+    """
+    Refuse an enrolment sample that `verify()` would refuse as a probe.
+
+    `verify()` gates every probe it scores, but the three `enroll_*` methods
+    called `embed()` directly and gated nothing, so a blank scan or a trajectory
+    still in raw device units became a stored template. A bad template is worse
+    than a bad probe: the probe is rejected once and the user retries, whereas
+    the template silently corrupts every future comparison against that identity,
+    and the diagnostic points at whatever probe happened to arrive rather than at
+    the reference it was measured against. `as_spatial_input` already rejected
+    grossly wrong *shapes*; nothing checked *content*.
+    """
+    if modality == "spatial":
+        passed, details = quality_gate(sample)
+        fallback = "failed the quality gate"
+    else:
+        passed, details = trajectory_gate(sample)
+        fallback = "failed the input gate"
+
+    if not passed:
+        raise ValueError(
+            f"Enrolment sample {index} failed the {modality} input gate: "
+            f"{details.get('error', fallback)}. A rejected sample is not enrolled "
+            f"— recapture it. See the README's Capture Contract.")
 
 
 def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True):
@@ -493,6 +527,11 @@ class SignatureService:
         if not trajectories:
             raise ValueError("No trajectories provided for enrollment.")
 
+        # Gate the whole batch first. Enrolling the samples that happened to
+        # precede a bad one leaves a half-built identity behind on the raise.
+        for index, traj in enumerate(trajectories):
+            _gate_enrollment_sample(traj, "temporal", index)
+
         spatial_bytes = []
         temporal_bytes = []
 
@@ -525,6 +564,11 @@ class SignatureService:
                 f"Mismatch in enrollment sample count: {len(images)} images vs {len(trajectories)} trajectories."
             )
 
+        for index, img in enumerate(images):
+            _gate_enrollment_sample(img, "spatial", index)
+        for index, traj in enumerate(trajectories):
+            _gate_enrollment_sample(traj, "temporal", index)
+
         spatial_bytes = [
             embedding_to_bytes(embed(self.spatial_model, img, "spatial", self.device))
             for img in images
@@ -552,6 +596,9 @@ class SignatureService:
         """
         if modality not in ("spatial", "temporal"):
             raise ValueError(f"Unknown modality '{modality}'. Expected 'spatial' or 'temporal'.")
+
+        for index, sample in enumerate(samples):
+            _gate_enrollment_sample(sample, modality, index)
 
         model = self.spatial_model if modality == "spatial" else self.temporal_model
         blobs = [

@@ -39,7 +39,7 @@ from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               enrolled_trial_scores, enrolled_writer_count,
                               load_branch_model, score_pairs,
                               writer_dependent_scores, znorm_trial_scores)
-from src.data.dataset import writer_independent_split
+from src.data.dataset import pin_holdout, writer_independent_split
 
 
 
@@ -207,6 +207,19 @@ def parse_args(argv=None):
                         help="Must match the --split-ratios the weights were trained "
                              "with. The split is derived from the ratios, so a "
                              "mismatch scores the model on writers it trained on.")
+    parser.add_argument("--split-seed", type=int, default=None,
+                        help="Seed for the writer split only; defaults to --seed, "
+                             "matching scripts/train.py. Training holds this fixed "
+                             "while varying --seed to measure training variance on "
+                             "one held-out set — which is how the six ensemble seeds "
+                             "were produced. Scoring such a checkpoint without "
+                             "repeating the value re-derives a different partition "
+                             "and reports EER over writers the model trained on.")
+    parser.add_argument("--holdout-writers", nargs="+", metavar="ID", default=None,
+                        help="Must match the --holdout-writers the weights were "
+                             "trained with. --writers pins the scored set directly; "
+                             "this reproduces training's own partition instead, for "
+                             "the usual case where the same IDs were pinned there.")
     parser.add_argument("--writers", nargs="+", default=None,
                         help="Score only these writer IDs instead of the whole held-out "
                              "split. For comparing two models trained on different dataset "
@@ -214,6 +227,8 @@ def parse_args(argv=None):
                              "of them held out. Every ID given must be outside this run's "
                              "own training set, or the run is rejected")
     args = parser.parse_args(argv)
+    if args.split_seed is None:
+        args.split_seed = args.seed
 
     if args.wd_classifier and not args.enroll:
         parser.error("--wd-classifier requires --enroll: the per-user classifier is "
@@ -286,8 +301,13 @@ def main(argv=None):
     # Re-derives the exact partition training used — same writer list, same seed.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
         TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
-    train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(writer_samples), *ratios, seed=args.seed)
+    if args.holdout_writers:
+        train_ids, val_ids, test_ids = pin_holdout(
+            sorted(writer_samples), args.holdout_writers, *ratios,
+            seed=args.split_seed)
+    else:
+        train_ids, val_ids, test_ids = writer_independent_split(
+            sorted(writer_samples), *ratios, seed=args.split_seed)
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.writers:

@@ -26,8 +26,9 @@ from torch.utils.checkpoint import checkpoint_sequential
 from config.settings import (
     SPATIAL_CONV_DROPOUT, SPATIAL_EMBEDDING_DIM, SPATIAL_FC_HIDDEN,
     SPATIAL_HEAD_DROPOUT, SPATIAL_TRUNK,
-    TEMPORAL_EMBEDDING_DIM, TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
-    PRESSURE_DROPOUT_RATE,
+    TEMPORAL_EMBEDDING_DIM, TEMPORAL_HIDDEN_SIZE, TEMPORAL_INPUT_FEATURES,
+    TEMPORAL_NUM_LAYERS, PRESSURE_DROPOUT_RATE,
+    ALPHA_DEFAULT, DECISION_THRESHOLD,
 )
 
 
@@ -91,7 +92,8 @@ class SpatialSiamese(nn.Module):
 
     def __init__(self, embedding_dim=SPATIAL_EMBEDDING_DIM, head_dropout=SPATIAL_HEAD_DROPOUT,
                  trunk=SPATIAL_TRUNK, conv_dropout=SPATIAL_CONV_DROPOUT,
-                 fc_hidden=SPATIAL_FC_HIDDEN, grad_checkpoint=0):
+                 fc_hidden=SPATIAL_FC_HIDDEN, grad_checkpoint=0,
+                 pool_grid=4, pool_channels=None):
         super().__init__()
         if trunk not in SPATIAL_TRUNKS:
             raise ValueError(f"Unknown trunk '{trunk}' — expected one of {sorted(SPATIAL_TRUNKS)}")
@@ -128,10 +130,40 @@ class SpatialSiamese(nn.Module):
             in_channels = out_channels
         self.features = nn.Sequential(*layers)
 
-        # A 4x4 grid keeps 16 regions per channel, which preserves the coarse
-        # stroke geometry that identifies a signer. Pooling every position into
-        # one channel mean would describe ink density instead of shape.
-        self.pool_grid = 4
+        # How many regions per channel reach the embedding, as an N x N grid.
+        #
+        # 4 keeps 16 regions, which holds the coarse stroke geometry that
+        # identifies a signer. Pooling every position into one value per channel
+        # describes ink density instead of shape and measured 28.23% against this
+        # grid's 18.96%.
+        #
+        # The number lives here rather than in config/settings.py because it
+        # cannot be set on its own. The projection width below is
+        # 2 * channels * grid^2, so 8,192 inputs at grid 4 becomes 32,768 at
+        # grid 8 and the head has to grow with it. A config knob would invite
+        # someone to change one number and get a shape error.
+        #
+        # What 4 costs, measured 2026-09-08: each cell averages a 39x55 patch of
+        # the 155x220 input, about 2,131 pixels. Stroke-scale detail is gone
+        # before the loss sees it, which is what UTSig's 1.75 forgery margin
+        # looks like against CEDAR's 41.65. Raising the grid is untested.
+        # `from_state_dict` reads it back off the projection width, so a
+        # checkpoint trained at another value still loads.
+        self.pool_grid = int(pool_grid)
+
+        # Optional 1x1 convolution before pooling, so the grid can be raised
+        # without the head growing with it. The projection width is
+        # 2 * channels * grid^2, which means grid 4 -> 8 quadruples the head on
+        # its own: §22 raised the grid and got a worse model, but that arm also
+        # took the head from 4.2M to 16.8M parameters, and §5 measured extra head
+        # capacity as harmful at ~300 training writers. Reducing 256 channels to
+        # 64 alongside grid 8 keeps the width at 8,192, identical to the shipped
+        # grid-4 model, so resolution moves and capacity does not.
+        self.pool_channels = None if pool_channels is None else int(pool_channels)
+        if self.pool_channels is not None:
+            self.reduce = nn.Conv2d(in_channels, self.pool_channels, kernel_size=1)
+            in_channels = self.pool_channels
+
         self.pool_avg = nn.AdaptiveAvgPool2d((self.pool_grid, self.pool_grid))
         self.pool_max = nn.AdaptiveMaxPool2d((self.pool_grid, self.pool_grid))
 
@@ -209,10 +241,29 @@ class SpatialSiamese(nn.Module):
                 "the current pipeline at all."
             )
 
+        # Pooling grid is recoverable from the projection width:
+        # in_features = 2 (avg+max) * trunk_out_channels * pool_grid^2.
+        in_features = state_dict["embedding.1.weight"].shape[1]
+        # A 1x1 reduction, if present, is what the pooling actually sees.
+        pool_channels = (int(state_dict["reduce.weight"].shape[0])
+                         if "reduce.weight" in state_dict else None)
+        trunk_out = pool_channels or SPATIAL_TRUNKS[trunk][-1][0]
+        cells = in_features / (2 * trunk_out)
+        pool_grid = int(round(cells ** 0.5))
+        if pool_grid < 1 or 2 * trunk_out * pool_grid ** 2 != in_features:
+            raise ValueError(
+                f"Checkpoint projection width {in_features} is not "
+                f"2 x {trunk_out} x grid^2 for any integer grid, so the pooling "
+                f"grid it was trained with cannot be recovered. Scoring it under "
+                f"the default grid would silently reshape the embedding.")
+
         model = cls(embedding_dim=int(embedding_dim), trunk=trunk,
-                    fc_hidden=int(fc_hidden), **overrides)
+                    fc_hidden=int(fc_hidden), pool_grid=pool_grid,
+                    pool_channels=pool_channels, **overrides)
         model.load_state_dict(state_dict)
-        return model
+        # Archived checkpoints carry real dropout; a caller that forgets .eval()
+        # gets nondeterministic embeddings scored against the wrong benchmark.
+        return model.eval()
 
     def encode(self, x):
         """
@@ -235,6 +286,8 @@ class SpatialSiamese(nn.Module):
                                       use_reentrant=False)
         else:
             x = self.features(x)
+        if self.pool_channels is not None:
+            x = self.reduce(x)
         pooled = torch.cat(
             [torch.flatten(self.pool_avg(x), 1), torch.flatten(self.pool_max(x), 1)],
             dim=1,
@@ -256,7 +309,7 @@ class TemporalSiamese(nn.Module):
     remains inside the model's learned feature distribution.
     """
 
-    def __init__(self, input_features=3, hidden_size=TEMPORAL_HIDDEN_SIZE,
+    def __init__(self, input_features=TEMPORAL_INPUT_FEATURES, hidden_size=TEMPORAL_HIDDEN_SIZE,
                  num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
                  pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True):
         super().__init__()
@@ -359,7 +412,9 @@ class TemporalSiamese(nn.Module):
             state_dict = {**state_dict,
                           "derive_deltas_flag": torch.tensor(float(derive_deltas))}
         model.load_state_dict(state_dict)
-        return model
+        # A 2-layer checkpoint has real inter-layer dropout; a caller that
+        # forgets .eval() gets nondeterministic embeddings.
+        return model.eval()
 
     @staticmethod
     def _add_dynamics(x):
@@ -492,7 +547,7 @@ class FusionEngine:
     to the available branch (setting α = 1.0 or α = 0.0).
     """
 
-    def __init__(self, alpha=0.5, threshold=0.5,
+    def __init__(self, alpha=ALPHA_DEFAULT, threshold=DECISION_THRESHOLD,
                  spatial_norm=None, temporal_norm=None):
         self.alpha = alpha
         self.threshold = threshold

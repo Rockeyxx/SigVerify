@@ -12,16 +12,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config.settings import (
     MODEL_WEIGHTS_DIR,
     TEMPORAL_CHANNELS,
+    TEMPORAL_ENSEMBLE_SEEDS,
+    TEMPORAL_ENSEMBLE_TEMPLATE,
     TEMPORAL_SPLIT_RATIOS,
     NUM_ENROLLMENT_REFERENCES,
 )
 from scripts.train import build_writer_samples
 from src.data.dataset import writer_independent_split
 from src.models.siamese import TemporalSiamese
+from src.verification import similarity_from_distance
 from scripts.evaluate import compute_eer, compute_far_frr, enrollment_draw
 
-SEEDS = [42, 43, 44, 45, 46, 47]
-WEIGHT_FILES = [f"temporal_dt_s{s}.pth" for s in SEEDS]
+SEEDS = list(TEMPORAL_ENSEMBLE_SEEDS)
+WEIGHT_FILES = [TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=s) for s in SEEDS]
 
 
 def load_ensemble(device="cpu"):
@@ -91,7 +94,7 @@ def main():
             for i, model in enumerate(models):
                 probe_emb = embed_trajectory(model, g_traj, device)
                 dists = np.linalg.norm(model_ref_embs[i] - probe_emb[None, :], axis=1)
-                sim = 1.0 / (1.0 + dists.min())
+                sim = float(similarity_from_distance(dists.min()))
                 all_single_gen_scores[i].append(sim)
                 sims.append(sim)
             all_ens_gen_scores.append(np.mean(sims))
@@ -102,7 +105,7 @@ def main():
             for i, model in enumerate(models):
                 probe_emb = embed_trajectory(model, f_traj, device)
                 dists = np.linalg.norm(model_ref_embs[i] - probe_emb[None, :], axis=1)
-                sim = 1.0 / (1.0 + dists.min())
+                sim = float(similarity_from_distance(dists.min()))
                 all_single_imp_scores[i].append(sim)
                 sims.append(sim)
             all_ens_imp_scores.append(np.mean(sims))

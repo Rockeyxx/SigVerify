@@ -571,7 +571,8 @@ class TestSkilledPairBalance:
 class TestSpatialInputGeometry:
     """
     Square-pad versus direct resize. Which one wins is a measurement, not a
-    preference — see docs/SOLUTIONS.md for the numbers.
+    preference: direct resize won on every corpus, so SPATIAL_SQUARE_PAD ships
+    False. Padding spends canvas on the wide BHSig260 ribbons and measured worse.
     """
 
     def _wide_image(self, tmp_path):

@@ -876,3 +876,45 @@ class TestTemporalGapChannel:
         writers = parse_sigcomp2011(root, extra_channels="dt")
 
         assert writers["sigcomp_Dutch_001"]["genuine"][0].shape[1] == 4
+
+
+class TestLoadNfi2009File:
+    """SigComp2009 / NFI online: header line, five columns, pressure -1 in the air.
+
+    Same tablet family and 200 Hz grid as SigComp2011, so the sample must come
+    out of the same core: decimated, pen-up dropped, `dt` reconstructed, width
+    equal to TEMPORAL_INPUT_FEATURES.
+    """
+
+    @staticmethod
+    def _write(tmp_path, pressures):
+        lines = [f"ABCDE-012_345_678 {len(pressures)}"]
+        lines += [f"\t {7000 + 3 * i} {19000 - 2 * i} {p:5d}  1610   480" for i, p in enumerate(pressures)]
+        path = tmp_path / "NFI-00101001.hwr"
+        path.write_text("\n".join(lines) + "\n")
+        return str(path)
+
+    def test_width_follows_the_channel_knob_and_pen_up_is_dropped(self, tmp_path):
+        from config.settings import TEMPORAL_INPUT_FEATURES
+        from src.data.parsers import SIGCOMP_DECIMATION, load_nfi2009_file
+
+        pressures = [600] * 40 + [-1] * 20 + [700] * 40
+        sample = load_nfi2009_file(self._write(tmp_path, pressures), extra_channels="dt")
+
+        assert sample.shape[1] == TEMPORAL_INPUT_FEATURES
+        # 80 pen-down rows on the 200 Hz grid -> 40 after decimation; the header
+        # line and the 20 in-air rows contribute nothing.
+        assert sample.shape[0] == 80 // SIGCOMP_DECIMATION
+
+    def test_matches_the_2011_loader_on_identical_points(self, tmp_path):
+        import numpy as np
+        from src.data.parsers import load_nfi2009_file, load_sigcomp2011_file
+
+        pressures = [500] * 30 + [-1] * 10 + [900] * 30
+        nfi = load_nfi2009_file(self._write(tmp_path, pressures), extra_channels="dt")
+        rows = [f"{7000 + 3 * i} {19000 - 2 * i} {max(p, 0)}" for i, p in enumerate(pressures)]
+        p2011 = tmp_path / "001_01.hwr"
+        p2011.write_text("\n".join(rows) + "\n")
+        sig = load_sigcomp2011_file(str(p2011), extra_channels="dt")
+
+        np.testing.assert_allclose(nfi, sig)

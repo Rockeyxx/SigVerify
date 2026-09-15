@@ -34,7 +34,7 @@ from config.settings import (
 
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
-    collate_temporal_pairs, generate_skilled_pairs, preprocess_image,
+    collate_temporal_pairs, generate_skilled_pairs, pin_holdout, preprocess_image,
     writer_independent_split,
 )
 from src.models.siamese import SpatialSiamese, TemporalSiamese
@@ -651,11 +651,32 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=42,
                         help="Must match the training seed to reproduce the same split")
+    parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
+                        metavar=("TRAIN", "VAL", "TEST"),
+                        help="Must match the --split-ratios the weights were trained "
+                             "with. The split is derived from the ratios, so a "
+                             "mismatch scores the model on writers it trained on.")
+    parser.add_argument("--split-seed", type=int, default=None,
+                        help="Seed for the writer split only; defaults to --seed, "
+                             "matching scripts/train.py. Training holds this fixed "
+                             "while varying --seed to measure training variance on "
+                             "one held-out set — which is how the six ensemble seeds "
+                             "were produced. Scoring such a checkpoint without "
+                             "repeating the value re-derives a different partition "
+                             "and reports EER over writers the model trained on.")
+    parser.add_argument("--holdout-writers", nargs="+", metavar="ID", default=None,
+                        help="Must match the --holdout-writers the weights were "
+                             "trained with. Pinned writers are forced into test; "
+                             "omitting them here reshuffles the partition and can "
+                             "move a training writer into the scored split.")
     parser.add_argument("--temporal-channels", default=TEMPORAL_CHANNELS,
                         choices=sorted(TEMPORAL_CHANNEL_WIDTHS),
                         help="Temporal channel mode: 'xyp' (3ch), 'dt' (4ch), or 'tilt' (5ch)")
     parser.add_argument("--alpha-sweep", action="store_true", help="Run α grid search")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.split_seed is None:
+        args.split_seed = args.seed
+    return args
 
 
 
@@ -853,11 +874,21 @@ def main(argv=None):
     writer_samples = build_writer_samples(
         args.data_dir, None if channels in (None, "xyp") else channels)
 
-    # Re-derives the exact partition training used — same writer list, same seed.
-    ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
-              else SPATIAL_SPLIT_RATIOS)
-    train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(writer_samples), *ratios, seed=args.seed)
+    # Re-derives the exact partition training used — same writer list, same seed,
+    # same ratios, same pinned holdout. The last two used to be unreachable here:
+    # this comment claimed to reproduce training's partition while reading the
+    # ratios straight from config and ignoring pin_holdout entirely, so a model
+    # trained with either flag was scored against a DIFFERENT split — quietly
+    # reporting EER over writers it had trained on.
+    ratios = tuple(args.split_ratios) if args.split_ratios else (
+        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
+    if args.holdout_writers:
+        train_ids, val_ids, test_ids = pin_holdout(
+            sorted(writer_samples), args.holdout_writers, *ratios,
+            seed=args.split_seed)
+    else:
+        train_ids, val_ids, test_ids = writer_independent_split(
+            sorted(writer_samples), *ratios, seed=args.split_seed)
 
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
