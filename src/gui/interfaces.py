@@ -76,33 +76,19 @@ def fuse_scores(s_spatial: float, s_temporal: float, alpha: float = 0.5) -> floa
 # DATABASE LAYER — expected from Abdullah
 # ============================================================
 
-_mock_db = {}  # temporary in-memory store, replaced by real SQLite+AES-256-GCM later
+_mock_db = {}
+
+def _norm_key(user_id: str) -> str:
+    return user_id.strip().lower()
 
 def store_embedding(user_id: str, embedding: np.ndarray, modality: str) -> bool:
-    """
-    TODO (Abdullah): replace with real encrypted SQLite storage.
-    modality: "spatial" or "temporal"
-    """
-    _mock_db.setdefault(user_id, {}).setdefault(modality, []).append(embedding)
+    key = _norm_key(user_id)
+    _mock_db.setdefault(key, {}).setdefault(modality, []).append(embedding)
     return True
 
-
 def get_references(user_id: str, modality: str) -> list:
-    """
-    TODO (Abdullah): replace with real encrypted retrieval.
-    Returns a list of stored embeddings for that user/modality.
-    """
-    return _mock_db.get(user_id, {}).get(modality, [])
-
-
-def log_verification_event(user_id: str, decision: str, score: float, modality_state: str) -> None:
-    """
-    TODO (Abdullah): replace with real plaintext audit log write
-    (IEEE 730 traceability requirement — rules.md §8).
-    """
-    print(f"[AUDIT LOG] user={user_id} decision={decision} "
-          f"score={score} modality_state={modality_state}")
-
+    key = _norm_key(user_id)
+    return _mock_db.get(key, {}).get(modality, [])
 
 # ============================================================
 # MOCK DECISION HELPER — used only until real model is connected
