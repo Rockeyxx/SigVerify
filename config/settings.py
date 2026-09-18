@@ -203,11 +203,14 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# ALPHA_DEFAULT = 0.5 is equal branch weighting per AGENTS.md. It stays
-# provisional because alpha has not been re-derived, NOT because paired data is
-# missing: SUMMARY.md Part 7 retracts that premise — SigComp2011's training set
-# is already fully paired across modalities.
-ALPHA_DEFAULT = 0.5                     # PROVISIONAL — equal branch weighting
+# ALPHA_DEFAULT = 0.5 was measured, not assumed. On paired SigComp2011 writers
+# (25 writer-disjoint splits, alpha fitted on 10 writers and scored on the other
+# 10) the fixed 0.5 scored 13.85% against 14.57% for a per-split grid search;
+# the fitted value was 0.548 +/- 0.122, statistically the default. Cascade, AND,
+# likelihood-ratio and band rules all measured worse than the plain average
+# (SUMMARY.md Part 9, sections 7 and 25). Do not grid-search alpha on small
+# calibration sets; it overfits.
+ALPHA_DEFAULT = 0.5                     # Measured: equal weighting is the optimum
 ALPHA_GRID_STEP = 0.05
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
