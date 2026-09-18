@@ -369,6 +369,8 @@ The verification engine provides three explicit operational modes:
 | --- | --- | --- |
 | **`"unimodal"`** | `probe_trajectory` + `reference_temporal`<br>*OR*<br>`probe_image` + `reference_spatial` | Runs single-branch verification (`spatial_only` or `temporal_only`). Flagged as `degraded: True` because it relies on one modality. |
 | **`"temporal-multi"`** | `probe_trajectory` + `reference_temporal` + `reference_spatial` | **Single-action digitizer verification.** The user signs once on the tablet. The engine extracts the temporal embedding, auto-renders the spatial stroke image ($1.8\text{ ms}$), extracts the spatial embedding, and evaluates late fusion. Routing: `multimodal`. |
+
+**A spatial probe is scored only against references of the same origin.** Measured 2026-09-18 on 20 paired SigComp2011 writers: rendered probe against rendered references 22.9% EER, scanned against scanned 24.5%, rendered probe against scanned references **57.4%**, scanned probe against rendered references **54.1%**, both worse than chance. A render sits about 3.6 times further from its own scan than two scans of one writer sit from each other, so across that gap the spatial score carries no identity. Enforced in `SignatureService.verify()` since 2026-09-19: every `enroll_*` helper returns `"spatial_origin"` (`"render"` from `enroll_from_tablet`, `"scan"` from `enroll_multimodal` and spatial `enroll_unimodal`), `verify()` requires `reference_spatial_origin` whenever spatial references are passed and raises rather than guessing, and on a mismatch it drops the spatial branch (routing `temporal_only`, `degraded: True`, a reason naming both origins); a unimodal spatial call with mismatched references raises. **The database therefore stores `spatial_origin` next to each spatial template, alongside `model_version`.** A user who must be verifiable both by tablet and by scan is enrolled through both paths and holds two spatial reference sets.
 | **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
 
 **Returns:**
@@ -391,13 +393,15 @@ Frontend and database developers should use these helper methods during enrollme
 
 - **`service.enroll_from_tablet(trajectories: list[np.ndarray]) -> dict`**
   - Input: List of $K=5$ normalized $[L, 4]$ trajectories from the tablet.
-  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`
-  - Automatically renders each trajectory to spatial images and computes both 512-d and 128-d embeddings.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...], "spatial_origin": "render"}`
+  - Automatically renders each trajectory to spatial images and computes both 512-d and 128-d embeddings. The spatial templates are renders and can only be verified against rendered probes (`temporal-multi`).
 - **`service.enroll_multimodal(images: list, trajectories: list) -> dict`**
   - Input: $K=5$ image paths/arrays and $K=5$ trajectories.
-  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...], "spatial_origin": "scan"}`.
 - **`service.enroll_unimodal(samples: list, modality: "spatial"|"temporal") -> dict`**
-  - Output: `{"embeddings": [bytes...], "modality": str}`.
+  - Output: `{"embeddings": [bytes...], "modality": str}`, plus `"spatial_origin": "scan"` when the modality is spatial.
+
+Store `spatial_origin` with the spatial templates and pass it back as `verify(..., reference_spatial_origin=...)`; `verify()` raises without it whenever `reference_spatial` is given.
 
 All reference templates accept either decrypted raw Python `bytes` (contiguous
 IEEE 754 float32 bytes directly from the database layer) or `np.ndarray` float32 embeddings.

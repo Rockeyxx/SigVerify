@@ -391,7 +391,12 @@ def writer_independent_split(writer_ids, train_ratio=SPATIAL_SPLIT_RATIOS[0],
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
     rng = random.Random(seed)
-    ids = list(writer_ids)
+    # Sorted first, so the partition depends on the seed and the SET of IDs,
+    # never on the order the caller happened to pass. Every in-repo caller
+    # already passed sorted(...), but a holdout list built from dict-key order
+    # on 2026-09-04 differed from theirs by 40 of 65 writers and let a
+    # checkpoint be scored on writers it had trained on (SUMMARY.md Part 9 §27).
+    ids = sorted(writer_ids)
     rng.shuffle(ids)
     n = len(ids)
     t1 = int(n * train_ratio)
@@ -427,7 +432,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
 
-    ids = list(writer_ids)
+    ids = sorted(writer_ids)  # same order-independence guarantee as writer_independent_split
     unknown = sorted(set(pinned) - set(ids))
     if unknown:
         raise ValueError(

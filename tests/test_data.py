@@ -731,6 +731,20 @@ class TestPinnedHoldout:
         for a, b in ((train, val), (train, test), (val, test)):
             assert not set(a) & set(b)
 
+    def test_split_does_not_depend_on_input_order(self):
+        """
+        2026-09-18: a holdout list generated from an unsorted dict-key order
+        differed from the sorted split by 40 of 65 writers, and a checkpoint
+        pinned to it was then scored on writers it had trained on. The split
+        must depend on the seed and the set of IDs, never on their order.
+        """
+        ids = [f"w{i}" for i in range(100)]
+        shuffled = list(reversed(ids))
+        assert writer_independent_split(ids, 0.7, 0.15, 0.15, seed=42) == \
+            writer_independent_split(shuffled, 0.7, 0.15, 0.15, seed=42)
+        assert pin_holdout(ids, ["w5"], 0.5, 0.25, 0.25, seed=42) == \
+            pin_holdout(shuffled, ["w5"], 0.5, 0.25, 0.25, seed=42)
+
     def test_unpinned_writers_split_reproducibly(self):
         ids = [f"w{i}" for i in range(100)]
 

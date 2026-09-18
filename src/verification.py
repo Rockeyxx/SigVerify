@@ -546,6 +546,7 @@ class SignatureService:
         return {
             "spatial_embeddings": spatial_bytes,
             "temporal_embeddings": temporal_bytes,
+            "spatial_origin": "render",
         }
 
     def enroll_multimodal(
@@ -581,6 +582,7 @@ class SignatureService:
         return {
             "spatial_embeddings": spatial_bytes,
             "temporal_embeddings": temporal_bytes,
+            "spatial_origin": "scan",
         }
 
     def enroll_unimodal(
@@ -605,7 +607,41 @@ class SignatureService:
             embedding_to_bytes(embed(model, s, modality, self.device))
             for s in samples
         ]
-        return {"embeddings": blobs, "modality": modality}
+        result = {"embeddings": blobs, "modality": modality}
+        if modality == "spatial":
+            result["spatial_origin"] = "scan"
+        return result
+
+    _SPATIAL_ORIGINS = ("scan", "render")
+    _ORIGIN_MISMATCH_NOTE = (
+        "A spatial probe and its references must share an origin: measured on 20 paired "
+        "SigComp2011 writers, a rendered probe against scanned references scores 57.4% EER "
+        "and a scanned probe against rendered references 54.1%, worse than chance, against "
+        "22.9% and 24.5% for matched pairs. Enrol the user through the path that matches how "
+        "they will be verified, or store both kinds of reference.")
+
+    @classmethod
+    def _checked_spatial_origin(cls, origin):
+        if origin not in cls._SPATIAL_ORIGINS:
+            raise ValueError(
+                "reference_spatial requires reference_spatial_origin, one of "
+                f"{cls._SPATIAL_ORIGINS}; got {origin!r}. Every enroll_* helper returns it as "
+                "\"spatial_origin\": store it with the templates and pass it back. It is "
+                "not guessed because both wrong guesses measured worse than chance. "
+                + cls._ORIGIN_MISMATCH_NOTE)
+        return origin
+
+    def _temporal_only_after_origin_mismatch(self, ref_t, probe_trajectory, probe_origin, reference_origin):
+        """Score the temporal branch alone and say why the spatial branch was dropped."""
+        result = verify(
+            temporal=(self.temporal_model, ref_t, probe_trajectory),
+            device=self.device,
+        )
+        result["degraded"] = True
+        result["reasons"].append(
+            f"spatial: dropped, the probe is a {probe_origin} and the references were "
+            f"enrolled as {reference_origin}s. " + self._ORIGIN_MISMATCH_NOTE)
+        return result
 
     def verify(
         self,
@@ -614,6 +650,7 @@ class SignatureService:
         probe_image: str | np.ndarray | None = None,
         reference_spatial: list[bytes | np.ndarray] | None = None,
         reference_temporal: list[bytes | np.ndarray] | None = None,
+        reference_spatial_origin: str | None = None,
     ) -> dict:
         """
         Verify a signature probe against enrolled reference templates under the specified mode.
@@ -624,12 +661,25 @@ class SignatureService:
             probe_image: Optional image file path or numpy array.
             reference_spatial: List of enrolled spatial reference templates (bytes or numpy).
             reference_temporal: List of enrolled temporal reference templates (bytes or numpy).
+            reference_spatial_origin: How the spatial references were made, 'scan' or
+                'render'. Required whenever reference_spatial is used; every enroll_*
+                helper returns it as "spatial_origin", so store it with the templates
+                and pass it back. Never guessed: a spatial probe scored against
+                references of the other origin measured worse than chance (2026-09-18,
+                20 paired SigComp2011 writers: render probe vs scan references 57.4%
+                EER, scan probe vs render references 54.1%, against 22.9% and 24.5%
+                for matched pairs). On a mismatch the spatial branch is dropped and
+                the verdict is temporal-only with `degraded: True` and a reason; a
+                unimodal spatial call with mismatched references has no evidence left
+                and raises.
 
         Returns:
             {"decision": "Genuine"|"Forged", "confidence": float, "routing": str, "degraded": bool, "reasons": list[str]}
         """
         ref_s = self._ensure_embeddings(reference_spatial)
         ref_t = self._ensure_embeddings(reference_temporal)
+        if ref_s:
+            origin = self._checked_spatial_origin(reference_spatial_origin)
 
         if mode == "temporal-multi":
             if probe_trajectory is None:
@@ -637,6 +687,11 @@ class SignatureService:
             if not ref_t or not ref_s:
                 raise ValueError("Mode 'temporal-multi' requires both reference_temporal and reference_spatial.")
 
+            if origin != "render":
+                # The probe will be a render of the tablet stroke; scanned references
+                # are a different image domain and the spatial score would be noise.
+                return self._temporal_only_after_origin_mismatch(
+                    ref_t, probe_trajectory, probe_origin="render", reference_origin=origin)
             return verify(
                 spatial=(self.spatial_model, ref_s, None),
                 temporal=(self.temporal_model, ref_t, probe_trajectory),
@@ -650,6 +705,9 @@ class SignatureService:
             if not ref_s or not ref_t:
                 raise ValueError("Mode 'multimodal' requires both reference_spatial and reference_temporal.")
 
+            if origin != "scan":
+                return self._temporal_only_after_origin_mismatch(
+                    ref_t, probe_trajectory, probe_origin="scan", reference_origin=origin)
             return verify(
                 spatial=(self.spatial_model, ref_s, probe_image),
                 temporal=(self.temporal_model, ref_t, probe_trajectory),
@@ -664,6 +722,11 @@ class SignatureService:
                     device=self.device,
                 )
             elif probe_image is not None and ref_s:
+                if origin != "scan":
+                    raise ValueError(
+                        "Mode 'unimodal' scores a scanned probe_image, but reference_spatial "
+                        f"was enrolled as '{origin}'. " + self._ORIGIN_MISMATCH_NOTE
+                        + " There is no temporal branch to fall back to.")
                 return verify(
                     spatial=(self.spatial_model, ref_s, probe_image),
                     device=self.device,
