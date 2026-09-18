@@ -36,7 +36,7 @@ from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, pin_holdout, preprocess_image,
     writer_independent_split,
-)
+    check_split_against_record)
 from src.models.siamese import SpatialSiamese, TemporalSiamese
 from src.verification import similarity_from_distance
 
@@ -891,6 +891,12 @@ def main(argv=None):
             sorted(writer_samples), *ratios, seed=args.split_seed)
 
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
+
+    # Refuse a partition the checkpoint was not trained under (Part 9 §27);
+    # checkpoints older than 2026-09-19 carry no record and are not checked.
+    record = check_split_against_record(args.weights, train_ids, test_ids)
+    print("Split record: matches the checkpoint" if record else
+          "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")
 
     if args.branch in ("spatial", "temporal"):
         weights = args.weights or (args.spatial_weights if args.branch == "spatial"

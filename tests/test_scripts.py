@@ -228,6 +228,28 @@ class TestEvaluateMain:
         assert report["threshold_tuned_on"] == "validation"
         assert report["reported_on"] == "test"
 
+    def test_evaluating_on_a_split_the_checkpoint_did_not_train_under_raises(self, tmp_path):
+        """
+        The 2026-09-06 leak: a checkpoint scored on writers it trained on because
+        the scorer recomputed a different partition than training used. Training
+        now records its split beside the weights and evaluation refuses a
+        partition that disagrees with it.
+        """
+        from src.data.dataset import load_split_record
+        data = _make_cedar_fixture(str(tmp_path / "cedar"))
+        weights_dir = str(tmp_path / "weights")
+        weights = os.path.join(weights_dir, "spatial_cnn.pth")
+
+        history = train_main(["--branch", "spatial", "--data-dir", data,
+                              "--epochs", "1", "--batch-size", "8", "--split-seed", "42",
+                              "--weights-dir", weights_dir, "--num-workers", "0"])
+        record = load_split_record(weights)
+        assert record is not None and set(record["test"]) == set(history["split"]["test"])
+
+        with pytest.raises(ValueError, match="trained on|held-out"):
+            evaluate_main(["--branch", "spatial", "--weights", weights, "--data-dir", data,
+                           "--split-seed", "7", "--output-dir", str(tmp_path / "r"), "--num-workers", "0"])
+
 
 class TestFusedChannelDispatch:
     """

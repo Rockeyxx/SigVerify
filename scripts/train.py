@@ -42,7 +42,7 @@ from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, pin_holdout,
     writer_independent_split,
-)
+    save_split_record, split_record_path)
 from src.data.features import NUM_DERIVED_CHANNELS
 from src.data.parsers import (
     EXTRA_CHANNEL_SUPPORT, is_known_dataset, is_temporal_dataset, merge_datasets,
@@ -731,6 +731,12 @@ def main(argv=None):
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")
     print(f"Weights: {weights_path}")
+    # The partition travels with the weights, so benchmark.py and evaluate.py can
+    # refuse to score this checkpoint on writers it trained on (Part 9 §27).
+    save_split_record(weights_path, train_ids, val_ids, test_ids,
+                      data_dirs=args.data_dir, split_seed=args.split_seed,
+                      holdout_writers=args.holdout_writers)
+    print(f"Split record: {split_record_path(weights_path)}")
     return {**history,
             "split": {"train": list(train_ids), "val": list(val_ids), "test": list(test_ids)}}
 

@@ -25,6 +25,7 @@ Supported Datasets:
 """
 
 import itertools
+import json
 import os
 import random
 
@@ -402,6 +403,80 @@ def writer_independent_split(writer_ids, train_ratio=SPATIAL_SPLIT_RATIOS[0],
     t1 = int(n * train_ratio)
     t2 = t1 + int(n * val_ratio)
     return ids[:t1], ids[t1:t2], ids[t2:]
+
+
+def split_record_path(weights_path):
+    """`models/weights/spatial_cnn.pth` -> `models/weights/spatial_cnn.split.json`."""
+    root, _ = os.path.splitext(weights_path)
+    return root + ".split.json"
+
+
+def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, split_seed,
+                      holdout_writers=None):
+    """
+    Write the writer partition a checkpoint was trained under, next to the weights.
+
+    A checkpoint that does not say which writers it trained on cannot be scored
+    honestly: on 2026-09-06 one was benchmarked on 34 writers from its own
+    training set because the scorer recomputed a different partition than
+    training had used, and nothing on disk could say so (SUMMARY.md Part 9 §27).
+    The record is the provenance that experiment had to reconstruct by scoring
+    seen and unseen writers separately.
+    """
+    record = {
+        "data_dirs": [str(d) for d in data_dirs],
+        "split_seed": split_seed,
+        "holdout_writers": sorted(holdout_writers) if holdout_writers else None,
+        "train": list(train_ids), "val": list(val_ids), "test": list(test_ids),
+    }
+    with open(split_record_path(weights_path), "w") as fh:
+        json.dump(record, fh, indent=1)
+    return record
+
+
+def load_split_record(weights_path):
+    """The stored partition, or None for a checkpoint that predates the record."""
+    path = split_record_path(weights_path)
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True):
+    """
+    Refuse to score a checkpoint on a partition that disagrees with its record.
+
+    Two failures, both hard errors: a writer about to be scored sits in the
+    checkpoint's stored training set (a leak, whatever else matches), or the
+    set about to be scored is not the stored held-out set (a different, and so
+    incomparable, partition: corpus list, split seed or pinned holdout changed
+    since training). `require_same_test=False` is for an explicit `--writers`
+    narrowing, where a subset of the held-out writers is the intention; the
+    leak check still applies. Returns the record, or None when there is none.
+    """
+    record = load_split_record(weights_path)
+    if record is None:
+        return None
+    scoring = set(test_ids)
+    leaked = sorted(scoring & set(record["train"]))
+    if leaked:
+        raise ValueError(
+            f"Refusing to score {len(leaked)} writers the checkpoint trained on "
+            f"(e.g. {leaked[:5]}). {weights_path} was trained with split seed "
+            f"{record['split_seed']} on {record['data_dirs']}"
+            + (f" with {len(record['holdout_writers'])} pinned holdout writers" if record["holdout_writers"] else "")
+            + "; the partition recomputed here does not match it. Pass the same "
+            "--data-dir, --split-seed and --holdout-writers as training, or use "
+            "--writers with writers held out by every model compared.")
+    if require_same_test and scoring != set(record["test"]):
+        raise ValueError(
+            f"The recomputed held-out set ({len(scoring)} writers) is not the one "
+            f"{weights_path} was trained against ({len(record['test'])} writers, "
+            f"{len(scoring - set(record['test']))} differ). No writer leaked, but the "
+            "number would describe a different partition than the documented one. "
+            f"Training used split seed {record['split_seed']} on {record['data_dirs']}.")
+    return record
 
 
 def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],

@@ -117,6 +117,7 @@ class TestSignatureService:
             reference_spatial_origin=enrollment["spatial_origin"],
         )
         assert result["routing"] == "multimodal"
+        assert not result["degraded"]
         assert result["decision"] in ("Genuine", "Forged")
 
     # ── spatial reference origin ──────────────────────────────────────────

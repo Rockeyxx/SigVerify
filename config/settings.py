@@ -39,6 +39,11 @@ SIGCOMP2011_DIR = os.path.join(DATA_DIR, "sigcomp2011")
 # no constant existed, which only resolved when cwd happened to be the repo root.
 SIGCOMP2011_OFFLINE_DIR = os.path.join(DATA_DIR, "sigcomp2011_offline")
 
+# SigComp2009 / NFI: paired online (.hwr) and offline (.png) of the same signing
+# events, used only as an evaluation corpus (fusion replication, cross-corpus
+# spatial checks). Not a training corpus for any shipped weight.
+SIGCOMP2009_DIR = os.path.join(DATA_DIR, "sigcomp2009_dl", "extracted")
+
 # DeepSignDB (BiDA Lab, UAM): Aggregates MCYT, BiosecurID, BiosecureDS2, and e-BioSign. The stylus partition supplies 498 Development signers (compared to 124 in baseline sets).
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")

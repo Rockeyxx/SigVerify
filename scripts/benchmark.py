@@ -39,7 +39,7 @@ from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
                               enrolled_trial_scores, enrolled_writer_count,
                               load_branch_model, score_pairs,
                               writer_dependent_scores, znorm_trial_scores)
-from src.data.dataset import pin_holdout, writer_independent_split
+from src.data.dataset import check_split_against_record, pin_holdout, writer_independent_split
 
 
 
@@ -313,6 +313,14 @@ def main(argv=None):
     if args.writers:
         test_ids = select_test_writers(args.writers, train_ids, val_ids, test_ids)
         print(f"Restricted to {len(test_ids)} explicitly requested held-out writers")
+
+    # A checkpoint trained since 2026-09-19 carries its partition; refuse to score
+    # it on a writer it trained on, or on a held-out set that is not the one it
+    # was trained against (Part 9 §27). Older checkpoints have no record.
+    record = check_split_against_record(args.weights, train_ids, test_ids,
+                                        require_same_test=not args.writers)
+    print("Split record: matches the checkpoint" if record else
+          "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")
 
     model = load_branch_model(args.branch, args.weights, device)
 

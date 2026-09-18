@@ -98,6 +98,7 @@ them, even if they appear in the literature review or older drafts:
   301 writers the failure is data scarcity, not excess capacity, so regularizing
   removes capacity the model needs. **`wide` is what ships** (`SPATIAL_TRUNK =
   "wide"`); its dropout schedule and FC-1024 head are the parts that do not.
+- **A checkpoint carries its own writer split.** Since 2026-09-19 `scripts/train.py` writes `<weights>.split.json` beside the weights (`data_dirs`, `split_seed`, `holdout_writers`, and the `train` / `val` / `test` writer IDs), and `benchmark.py` and `evaluate.py` refuse to score a checkpoint on any writer in its stored `train` set, or on a held-out set that is not the stored one (`--writers` may narrow to a subset). This is the check that would have stopped the 2026-09-06 leak at the first benchmark: `exp_sc11` was trained against one 65-writer list and scored on another that overlapped its training set by 34 writers (SUMMARY.md Part 9 §27). Checkpoints without a record are scored with a printed warning, never silently. **Ship the `.split.json` next to every `.pth` in a release**, and never edit a record by hand to make a benchmark pass.
 - **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
