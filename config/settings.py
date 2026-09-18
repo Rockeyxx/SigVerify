@@ -69,7 +69,9 @@ MIN_LAPLACIAN_VARIANCE = 50.0           # Minimum Laplacian sharpness threshold
 # SPATIAL_INPUT_SIZE the moment either moved, which is the same failure a
 # hardcoded channel count already caused on the temporal side.
 RENDER_MARGIN_RATIO = 0.12              # Fraction of each edge left blank, so strokes never clip
-RENDER_BASE_THICKNESS = 2.0             # Stroke width in pixels at full pressure
+RENDER_BASE_THICKNESS = 3.0             # Stroke width in pixels at full pressure; 3 px measured
+                                        # 4.8 points better than 2 px on 20 SigComp2011 writers
+                                        # (rendered-only EER, 10/10 draws), 0.6 better on NFI
 RENDER_MIN_THICKNESS = 1                # Thinnest drawable stroke; cv2.line needs >= 1
 # A sample is pen-up when pressure vanishes OR the clock jumps. SigComp2011
 # records pen-up travel as force = 0, but SVC2004 and DeepSignDB mark a lift by
@@ -218,7 +220,11 @@ ALPHA_GRID_STEP = 0.05
 # See AGENTS.md and SUMMARY.md.
 SPATIAL_DECISION_THRESHOLD = 0.7731     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-DECISION_THRESHOLD = 0.8196             # Calibrated threshold tau for late-fused model evaluation
+# Fused tau: EER point of 0.5*s + 0.5*t on the 24 paired writers held out by
+# both branches (10 SigComp2011 + 14 SigComp2009/NFI), K=5, 10 draws, measured
+# 2026-09-18 (SUMMARY.md Part 9 section 28). The previous 0.8196 was the midpoint
+# of the two branch thresholds and refused 15% of genuine users on those writers.
+DECISION_THRESHOLD = 0.7751             # Measured fused threshold (EER point on clean paired writers)
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
 # These were documented in AGENTS.md as hard constraints but existed nowhere in
