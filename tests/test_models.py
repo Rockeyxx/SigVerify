@@ -527,6 +527,26 @@ class TestTemporalArchitectureRecovery:
         with torch.no_grad():
             assert torch.allclose(original.encode(batch), restored.encode(batch))
 
+    def test_direction_is_recovered_and_a_unidirectional_model_scores_identically(self):
+        """
+        The bidirectional LSTM was never compared with a forward-only one. A
+        forward-only checkpoint has no `_reverse` weights and a half-width
+        head, so the loader must rebuild it as such rather than fail or, worse,
+        load it into a bidirectional shell with silently missing halves.
+        """
+        torch.manual_seed(0)
+        original = TemporalSiamese(input_features=4, embedding_dim=128, bidirectional=False).eval()
+        assert original.embedding.in_features == original.lstm.hidden_size
+        assert not any(k.endswith("_reverse") for k in original.state_dict())
+        restored = TemporalSiamese.from_state_dict(original.state_dict()).eval()
+        assert restored.lstm.bidirectional is False
+        batch = torch.randn(2, 25, 4)
+        with torch.no_grad():
+            out = original.encode(batch)
+            assert out.shape == (2, 128)
+            assert torch.allclose(out, restored.encode(batch))
+        assert TemporalSiamese.from_state_dict(TemporalSiamese(input_features=4).state_dict()).lstm.bidirectional is True
+
     def test_embedding_width_and_depth_are_recovered(self):
         original = TemporalSiamese(input_features=3, embedding_dim=64, num_layers=2)
         restored = TemporalSiamese.from_state_dict(original.state_dict())

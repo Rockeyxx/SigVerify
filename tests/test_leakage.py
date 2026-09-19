@@ -26,6 +26,8 @@ from config.settings import (
     BHSIG260_DIR, CEDAR_DIR, SIGCOMP2009_DIR, SIGCOMP2011_DIR, SIGCOMP2011_OFFLINE_DIR,
     SPATIAL_SPLIT_RATIOS, SVC2004_TASK2_DIR, TEMPORAL_SPLIT_RATIOS, UTSIG_DIR,
 )
+from config.settings import spatial_input_size_from_env
+from src.data.parsers import max_gap_ms_from_env
 from src.data.dataset import (check_split_against_record, load_split_record, pin_holdout,
                               save_split_record, split_record_path, writer_independent_split)
 
@@ -181,6 +183,69 @@ class TestSplitRecord:
 
     def test_checkpoint_without_a_record_is_not_checked(self, tmp_path):
         assert check_split_against_record(str(tmp_path / "old.pth"), train_ids=["a"], test_ids=["b"]) is None
+
+    def test_record_stores_the_input_size_and_a_mismatch_refuses_to_score(self, tmp_path):
+        """
+        A checkpoint trained at another image size is not recoverable from its
+        weights (adaptive pooling makes the trunk size-agnostic), so the record
+        must carry it. Scoring it at the config size would preprocess every scan
+        at the wrong geometry and print a plausible EER for a model it never was.
+        """
+        weights = str(tmp_path / "model.pth")
+        save_split_record(weights, ["a"], ["b"], ["c"], data_dirs=["data/x"], split_seed=42,
+                          input_size=(110, 78))
+        assert load_split_record(weights)["input_size"] == [110, 78]
+        with pytest.raises(ValueError, match="input size"):
+            check_split_against_record(weights, train_ids=["a"], test_ids=["c"], input_size=(220, 155))
+        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"],
+                                          input_size=(110, 78)) is not None
+
+    def test_record_without_an_input_size_is_scored_at_the_config_size(self, tmp_path):
+        weights = self._record(tmp_path, ["a"], ["b"], ["c"])   # pre-2026-09-19 record shape
+        assert "input_size" not in load_split_record(weights) or load_split_record(weights)["input_size"] is None
+        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"], input_size=(220, 155)) is not None
+
+
+class TestRecipeRecord:
+    """The record carries every training-time constant that is not recoverable
+    from the weights and that scoring must reproduce; a mismatch refuses."""
+
+    def test_max_gap_ms_is_recorded_and_a_mismatch_refuses_to_score(self, tmp_path):
+        weights = str(tmp_path / "t.pth")
+        save_split_record(weights, ["a"], ["b"], ["c"], data_dirs=["data/x"], split_seed=42, max_gap_ms=200.0)
+        assert load_split_record(weights)["max_gap_ms"] == 200.0
+        with pytest.raises(ValueError, match="MAX_GAP_MS"):
+            check_split_against_record(weights, train_ids=["a"], test_ids=["c"], max_gap_ms=100.0)
+        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"], max_gap_ms=200.0) is not None
+
+    def test_old_record_without_the_field_is_accepted(self, tmp_path):
+        weights = str(tmp_path / "t.pth")
+        save_split_record(weights, ["a"], ["b"], ["c"], data_dirs=["data/x"], split_seed=42)
+        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"], max_gap_ms=100.0) is not None
+
+    def test_gap_env_parser(self):
+        assert max_gap_ms_from_env(None, 100.0) == 100.0
+        assert max_gap_ms_from_env("200", 100.0) == 200.0
+        assert max_gap_ms_from_env("50.5", 100.0) == 50.5
+        for bad in ("0", "-5", "fast", ""):
+            with pytest.raises(ValueError, match="SIGVER_MAX_GAP_MS"):
+                max_gap_ms_from_env(bad, 100.0)
+
+
+class TestInputSizeOverride:
+    """`SIGVER_SPATIAL_INPUT_SIZE=WxH` is the sweep's only way to train and score
+    at another geometry; a malformed value must fail loudly, not fall back."""
+
+    def test_unset_keeps_the_config_default(self):
+        assert spatial_input_size_from_env(None, (220, 155)) == (220, 155)
+
+    def test_width_by_height_is_parsed_as_the_cv2_tuple(self):
+        assert spatial_input_size_from_env("110x78", (220, 155)) == (110, 78)
+
+    @pytest.mark.parametrize("bad", ["78", "110x", "wide", "0x78", "110x78x1"])
+    def test_malformed_values_raise(self, bad):
+        with pytest.raises(ValueError, match="SIGVER_SPATIAL_INPUT_SIZE"):
+            spatial_input_size_from_env(bad, (220, 155))
 
 
 # ─── The corpora on disk (skipped when not downloaded) ───────────────────
