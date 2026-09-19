@@ -22,6 +22,7 @@ This document covers installation, quickstart, project structure, evaluation ben
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
   - [Running the Application](#running-the-application)
+  - [GUI](#gui)
   - [Input Specifications](#input-specifications)
   - [Enrollment and Decision](#enrollment-and-decision)
   - [Model Weights & GitHub Releases](#model-weights--github-releases)
@@ -193,12 +194,67 @@ python tools/verify_my_signature.py --crop \
 - **Spatial Branch (Offline):** Single-channel grayscale images formatted to `[1, 1, 155, 220]`. Inverted pixel polarity (ink high, background 0), divided by 255. Bounding box quality gate requires `min(w, h) >= 64 px` and Laplacian variance `≥ 50.0`.
 - **Temporal Branch (Online):** Trajectory tensors formatted to `[1, L, 4]` containing $(X, Y, P, dt)$. Coordinates $X$ and $Y$ are z-scored per signature; pressure $P$ is scaled to $[0.0, 1.0]$; $dt$ represents elapsed time between consecutive points (clipped at 100 ms and normalized to $[0.0, 1.0]$).
 
+### GUI
+
+A standalone PyQt5 desktop application (`src/gui/`) provides the
+employee-facing interface for enrollment and verification. It is
+implemented and tested on the `mo-gui` branch, pending merge into `main`.
+
+**Employee workflow:**
+
+1. **Register / Login** — Each employee has their own account (full name,
+   User ID, password). Enrolled clients are scoped per employee: an
+   employee only sees the clients they personally registered.
+2. **Enrollment** — Register a new client by ID and attach exactly 5
+   reference signature images. References can be previewed, replaced, or
+   removed before saving, and re-opened for editing at any time afterward.
+3. **Verification** — Enter a claimed client ID, select modality (image
+   input currently; dynamic tablet input is scaffolded but disabled until
+   `src/capture/` is implemented), submit a probe signature, and receive
+   the result rendered exactly as `[Genuine/Forged, Confidence %]`.
+4. **Dashboard** — Landing screen after login showing per-employee stats:
+   clients enrolled this month, total enrolled clients, total
+   verifications run, and a live genuine-rate indicator.
+5. **Clients** — A table of the employee's enrolled clients (enrollment
+   date, reference count, most recent verification), used to reopen an
+   existing client for editing.
+6. **Profile** — Employee account settings (name, User ID, password).
+
+**Current integration status:** the GUI calls a single interface module
+(`src/gui/interfaces.py`) for every ML and storage operation
+(`get_spatial_embedding`, `get_references`, `store_embedding`, etc.). Those
+functions are currently mocked; wiring them to the real `src/models/` and
+`src/database/` implementations requires no change to the GUI layer itself
+— only `interfaces.py`.
+
+**Screenshots:**
+
+| Login | Dashboard |
+|---|---|
+| ![Login screen](docs/screenshots/login.png) | ![Dashboard with per-employee stats](docs/screenshots/dashboard.png) |
+
+| Enrollment | Verification |
+|---|---|
+| ![Enrollment panel — 5 reference images per client](docs/screenshots/enrollment.png) | ![Verification result display](docs/screenshots/verification.png) |
+
+| Clients | Profile |
+|---|---|
+| ![Enrolled clients table](docs/screenshots/clients.png) | ![Employee profile editing](docs/screenshots/profile.png) |
+
+**Running the GUI:**
+
+```bash
+cd src/gui
+python app.py
+```
+
 #### The `dt` Channel
 
 `dt` represents the time delta between sampled points (admitted 2026-08-19, widening the input tensor from 3 to 4 channels).
 
 Without timing deltas, uniform-rate models lose visibility into pen pauses and air-travel hesitations. Genuine signers execute signatures with continuous motor memory rhythm, whereas forgers hesitate and trace strokes slowly. `dt` remains ~10 ms during continuous pen-down contact and jumps significantly at pen lifts. Across six paired random seeds, adding `dt` improved pooled temporal EER from **10.45% to 8.97%** ($t = 3.25$).
 
+---
 ---
 
 ### Enrollment and Decision
