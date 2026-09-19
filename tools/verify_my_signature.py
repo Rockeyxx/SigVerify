@@ -23,8 +23,9 @@ from PIL import Image, ImageOps
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.settings import DECISION_THRESHOLD, MODEL_WEIGHTS_DIR
-from src.verification import embed, load_model, verify
+from config.settings import (MODEL_WEIGHTS_DIR, NUM_ENROLLMENT_REFERENCES,
+                             SPATIAL_DECISION_THRESHOLD)
+from src.verification import embed, load_model, similarity_from_distance, verify
 
 
 def crop_to_ink(path, destination):
@@ -147,10 +148,14 @@ def main():
                             for path in args.references]
     print(f"Enrolled {len(reference_embeddings)} reference(s) from "
           f"{', '.join(os.path.basename(p) for p in args.references)}")
-    if len(reference_embeddings) < 5:
-        print("  NOTE: the reported accuracy assumes 5 references. With fewer, "
+    if len(reference_embeddings) < NUM_ENROLLMENT_REFERENCES:
+        print(f"  NOTE: the reported accuracy assumes "
+              f"{NUM_ENROLLMENT_REFERENCES} references. With fewer, "
               "expect worse — this is the harder pair-scoring regime.")
-    print(f"Threshold t = {DECISION_THRESHOLD:.4f}\n")
+    # This script is spatial-only, so verify() decides against the spatial
+    # threshold. Printing the fused one showed a negative margin beside a
+    # "Genuine" verdict for any score between the two (0.6299 to 0.8196).
+    print(f"Threshold t = {SPATIAL_DECISION_THRESHOLD:.4f}\n")
 
     stacked = np.vstack(reference_embeddings)
     for path in args.probes:
@@ -159,14 +164,14 @@ def main():
         # did this internally to reach its decision.
         distance = float(np.linalg.norm(
             stacked - embed(model, path, "spatial", args.device)[None, :], axis=1).min())
-        score = 1.0 / (1.0 + distance)
+        score = similarity_from_distance(distance)
 
         flags = " [DEGRADED — reduced evidence]" if result["degraded"] else ""
         print(f"{os.path.basename(path)}")
         print(f"  decision   {result['decision']}{flags}")
         print(f"  confidence {result['confidence']:.1f}%")
         print(f"  score      {score:.4f}  (nearest-reference distance {distance:.4f})")
-        print(f"  margin     {score - DECISION_THRESHOLD:+.4f} from the threshold\n")
+        print(f"  margin     {score - SPATIAL_DECISION_THRESHOLD:+.4f} from the threshold\n")
 
 
 if __name__ == "__main__":

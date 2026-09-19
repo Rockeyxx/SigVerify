@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import torch
 
+from config.settings import TEMPORAL_INPUT_FEATURES
 from scripts.evaluate import fit_writer_classifier, writer_dependent_scores
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 from src.verification import (
@@ -43,6 +44,27 @@ def _blank_image():
     return tmp.name
 
 
+def _valid_trajectory(length=50, seed=1):
+    """
+    A gate-passing trajectory of whatever width the shipped contract declares.
+
+    Built from `TEMPORAL_INPUT_FEATURES` rather than a literal so that flipping
+    `TEMPORAL_CHANNELS` in `config/settings.py` — the single knob selecting
+    3 (`xyp`), 4 (`dt`) or 5 (`tilt`) channels — moves the whole suite with it.
+    A checkpoint trained under any of those settings stays reproducible without
+    anyone editing a test.
+
+    X/Y are z-scored per signature; every trailing channel (P, dt, ...) is a
+    physical quantity the parsers have already scaled onto [0, 1].
+    """
+    rng = np.random.default_rng(seed)
+    columns = [rng.standard_normal((length, 2)),
+               rng.uniform(0.0, 1.0, size=(length, 1))]
+    for _ in range(TEMPORAL_INPUT_FEATURES - 3):
+        columns.append(np.full((length, 1), 0.1))
+    return np.hstack(columns).astype(np.float32)
+
+
 class TestLoadModel:
     """Contract ①: teammates load weights without knowing the class names."""
 
@@ -70,7 +92,10 @@ class TestLoadModel:
         path = tmp_path / "temporal_lstm.pth"
         torch.save(original.state_dict(), path)
 
-        x = torch.randn(1, 40, 3)
+        # Not a literal 3. `TemporalSiamese` now takes its default width from
+        # TEMPORAL_INPUT_FEATURES, so a fixed 3 here fed a 6-wide LSTM into a
+        # model built 8 wide the moment the shipped contract moved to `dt`.
+        x = torch.randn(1, 40, TEMPORAL_INPUT_FEATURES)
         with torch.no_grad():
             expected = original.encode(x)
             actual = load_model("temporal", str(path)).encode(x)
@@ -130,7 +155,10 @@ class TestEmbed:
         os.unlink(path)
 
     def test_temporal_embed_from_array(self):
-        trajectory = np.random.default_rng(0).standard_normal((60, 3)).astype(np.float32)
+        # Not a literal 3 — same reason as test_temporal_round_trip above: the
+        # constructor's default width now follows TEMPORAL_INPUT_FEATURES.
+        trajectory = np.random.default_rng(0).standard_normal(
+            (60, TEMPORAL_INPUT_FEATURES)).astype(np.float32)
         embedding = embed(TemporalSiamese(embedding_dim=128).eval(), trajectory, "temporal")
         assert embedding.shape == (128,)
 
@@ -145,16 +173,13 @@ class TestVerify:
         return model, references, path
 
     def _temporal_setup(self):
-        model = TemporalSiamese(embedding_dim=128).eval()
-        # Pressure must be in [0, 1] — it is scaled by a fixed device maximum,
-        # not z-scored like X/Y. The old fixture drew all three columns from a
-        # standard normal, so its pressure column held negatives and values above
-        # 1: input no capture layer could produce, and which `trajectory_gate`
-        # now correctly rejects.
-        rng = np.random.default_rng(1)
-        xy = rng.standard_normal((50, 2))
-        pressure = rng.uniform(0.0, 1.0, size=(50, 1))
-        trajectory = np.hstack([xy, pressure]).astype(np.float32)
+        # Width follows `TEMPORAL_CHANNELS`, so this fixture keeps working across
+        # a 3 -> 4 -> 5 channel change without being rewritten. Pressure and the
+        # trailing channels are in [0, 1] — they are scaled by a fixed device
+        # maximum, not z-scored like X/Y.
+        model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
+                                embedding_dim=128).eval()
+        trajectory = _valid_trajectory()
         references = [embed(model, trajectory, "temporal")]
         return model, references, trajectory
 
@@ -177,7 +202,11 @@ class TestVerify:
     def test_returns_the_gui_contract(self):
         model, references, path = self._spatial_setup()
         result = verify(spatial=(model, references, path))
-        assert set(result) == {"decision", "confidence", "routing", "degraded"}
+        # `reasons` is additive: a list, empty on a clean multimodal verdict, and
+        # carrying the gate's own message for every piece of evidence that was
+        # dropped. `degraded: True` alone could not say *why*.
+        assert set(result) == {"decision", "confidence", "routing", "degraded", "reasons"}
+        assert isinstance(result["reasons"], list)
         os.unlink(path)
 
     def test_spatial_only_is_degraded(self):
@@ -203,6 +232,19 @@ class TestVerify:
         result = verify(spatial=(smodel, srefs, spath), temporal=(tmodel, trefs, traj))
         assert result["routing"] == "multimodal"
         os.unlink(spath)
+
+    def test_paired_digitizer_input_auto_renders_spatial_for_multimodal_routing(self):
+        """When user provides temporal trajectory and spatial=(smodel, srefs, None),
+        verify() auto-renders the trajectory to an image and routes as multimodal."""
+        smodel, srefs, _ = self._spatial_setup()
+        tmodel, trefs, traj = self._temporal_setup()
+        result = verify(
+            spatial=(smodel, srefs, None),
+            temporal=(tmodel, trefs, traj),
+            auto_render_spatial=True,
+        )
+        assert result["routing"] == "multimodal"
+        assert result["decision"] in ("Genuine", "Forged")
 
     def test_failed_quality_gate_drops_the_spatial_branch(self):
         """
@@ -267,6 +309,22 @@ class TestVerify:
         result = verify(spatial=(model, [bytes_to_embedding(b) for b in stored], path),
                         engine=FusionEngine(threshold=0.5))
         assert result["decision"] == "Genuine"
+        os.unlink(path)
+
+    def test_empty_reference_list_names_the_real_problem(self):
+        """
+        An identity with no enrolled templates used to surface as numpy's
+        "need at least one array to concatenate", raised from inside
+        `np.vstack` — a message about numpy's argument, not about the caller's
+        empty enrolment. `SignatureService.verify()` truthy-checks its reference
+        lists, so only the free function is exposed, and a GUI holding an empty
+        row is exactly the caller that reaches it.
+        """
+        model, _, path = self._spatial_setup()
+
+        with pytest.raises(ValueError, match="empty reference list"):
+            verify(spatial=(model, [], path))
+
         os.unlink(path)
 
 
@@ -372,3 +430,194 @@ class TestWriterDependentClassifier:
         b, _ = writer_dependent_scores(embedded, num_references=5, seed=7)
 
         assert np.allclose(a, b)
+
+
+class TestThresholdFollowsRouting:
+    """
+    A branch dropped by its own gate must not change the surviving branch's verdict.
+
+    `verify()` used to pick the decision threshold from *which arguments were
+    passed*, before either gate ran. So a probe that ended up scored
+    `spatial_only` was compared against the fused threshold (0.8196) whenever a
+    temporal probe had merely been offered and rejected, instead of against
+    SPATIAL_DECISION_THRESHOLD (0.6299). The fused bar is the highest of the
+    three, so the error only ever pushed toward `Forged`: a genuine signer whose
+    tablet timed out was rejected where the same image alone was accepted.
+    """
+
+    def _spatial_at_score(self, target_score):
+        """A spatial setup whose nearest-reference score is exactly `target_score`."""
+        model = SpatialSiamese(embedding_dim=512).eval()
+        path = _sharp_signature_image()
+        probe = embed(model, path, "spatial")
+        # S = 1 / (1 + d)  ->  d = 1/S - 1, placed on a single axis.
+        offset = np.zeros_like(probe)
+        offset[0] = (1.0 / target_score) - 1.0
+        return model, [probe + offset], path
+
+    def _rejected_trajectory(self):
+        """Raw tablet units — passes nothing, so the temporal branch is dropped."""
+        raw = _valid_trajectory()
+        raw[:, 0] = raw[:, 0] * 1200 + 8000     # back into raw tablet units
+        raw[:, 1] = raw[:, 1] * 1200 + 6000
+        return raw
+
+    def test_dropped_temporal_branch_does_not_move_the_spatial_verdict(self):
+        # 0.70 sits above SPATIAL_DECISION_THRESHOLD and below DECISION_THRESHOLD,
+        # which is the only band where the two disagree.
+        model, references, path = self._spatial_at_score(0.70)
+        temporal_model = TemporalSiamese(
+            input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
+        dead_probe = self._rejected_trajectory()
+
+        alone = verify(spatial=(model, references, path))
+        offered = verify(spatial=(model, references, path),
+                         temporal=(temporal_model, [np.zeros(128, np.float32)], dead_probe))
+
+        assert alone["routing"] == offered["routing"] == "spatial_only"
+        assert offered["decision"] == alone["decision"]
+        assert offered["confidence"] == pytest.approx(alone["confidence"])
+
+    def test_gate_failure_reason_reaches_the_caller(self):
+        """`degraded: True` alone cannot tell the GUI *why* evidence was dropped."""
+        model, references, path = self._spatial_at_score(0.70)
+        temporal_model = TemporalSiamese(
+            input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
+
+        result = verify(spatial=(model, references, path),
+                        temporal=(temporal_model, [np.zeros(128, np.float32)],
+                                  self._rejected_trajectory()))
+
+        assert result["degraded"] is True
+        assert result["reasons"], "a degraded verdict must say what was dropped"
+        assert any("temporal" in r for r in result["reasons"])
+
+
+class TestShippedChannelContract:
+    """
+    A probe of the configured width verifies end to end.
+
+    `TEMPORAL_CHANNELS` is the single knob: `xyp` -> 3, `dt` -> 4 (what ships
+    today, and what `models/weights/temporal_lstm.pth` was trained as), `tilt`
+    -> 5. This test asserts the shipped setting round-trips, whichever it is.
+    """
+
+    def _setup(self):
+        model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
+                                embedding_dim=128).eval()
+        trajectory = _valid_trajectory(length=60, seed=7)
+        return model, [embed(model, trajectory, "temporal")], trajectory
+
+    def test_probe_of_the_configured_width_verifies_end_to_end(self):
+        model, references, trajectory = self._setup()
+        result = verify(temporal=(model, references, trajectory))
+        assert result["decision"] in ("Genuine", "Forged")
+        assert result["routing"] == "temporal_only"
+
+
+class TestSpatialArrayInputsAreCanonicalized:
+    """
+    An array reaching the spatial branch must be treated like the path it stands
+    in for.
+
+    `SpatialSiamese` pools adaptively, so a wrong-sized, un-inverted uint8 scan
+    produces a perfectly plausible 512-d embedding and raises nothing — and
+    enrolment writes that template to the database. Polarity inversion alone is
+    recorded as worth 4.86% -> 0.00% EER on CEDAR, so the failure is silent and
+    expensive. Shape and dtype are therefore gated here rather than trusted.
+    """
+
+    def _model(self):
+        from config.settings import MODEL_WEIGHTS_DIR
+        return load_model("spatial", os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+
+    def test_raw_scan_array_matches_the_same_scan_on_disk(self):
+        """
+        The array and the path are the same signature, so they must produce the
+        same embedding. Before this gate the array skipped both the resize and
+        the inversion, and the two disagreed completely.
+        """
+        path = _sharp_signature_image()
+        array = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+
+        model = self._model()
+        from_path = embed(model, path, "spatial")
+        from_array = embed(model, array, "spatial")
+
+        np.testing.assert_allclose(from_path, from_array, rtol=1e-5, atol=1e-6)
+
+    def test_rendered_trajectory_is_not_inverted_a_second_time(self):
+        """
+        The renderer already emits the canonical contract. Sending it through
+        `preprocess_image` would invert it again and hand the model a negative.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        from src.verification import _as_spatial_input
+
+        width, height = SPATIAL_INPUT_SIZE
+        rendered = np.zeros((1, height, width), dtype=np.float32)
+        rendered[0, 70:80, 40:180] = 1.0
+
+        out = _as_spatial_input(rendered)
+        np.testing.assert_array_equal(out, rendered)
+
+    def test_canonical_shape_with_scan_range_is_refused(self):
+        """
+        The shape says 'already canonical' while the values say 'raw scan'. That
+        combination is exactly what would sail through unscaled, so it must
+        raise rather than be guessed at.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        from src.verification import _as_spatial_input
+
+        width, height = SPATIAL_INPUT_SIZE
+        raw = np.full((1, height, width), 255.0, dtype=np.float32)
+
+        with pytest.raises(ValueError, match=r"\[0\.0, 1\.0\]"):
+            _as_spatial_input(raw)
+
+    def test_uninterpretable_shape_raises(self):
+        from src.verification import _as_spatial_input
+
+        with pytest.raises(ValueError, match="Cannot interpret"):
+            _as_spatial_input(np.zeros((3, 64, 64), dtype=np.float32))
+
+    def test_canonical_array_carrying_nan_is_refused(self):
+        """
+        The range check cannot see a NaN: every comparison against NaN is False,
+        so `low < -1e-6 or high > 1.0 + 1e-6` was False for a poisoned array and
+        it passed straight through. `embed()` then returned a 512-d embedding of
+        NaN, which enrolment stores and which every later distance against it
+        reports as NaN — a template that can never match anything, silently.
+        `trajectory_gate` has always checked this explicitly; the spatial path
+        did not.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        from src.verification import _as_spatial_input
+
+        width, height = SPATIAL_INPUT_SIZE
+        poisoned = np.zeros((1, height, width), dtype=np.float32)
+        poisoned[0, height // 2, width // 2] = np.nan
+
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            _as_spatial_input(poisoned)
+
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            embed(SpatialSiamese(embedding_dim=512).eval(), poisoned, "spatial")
+
+    def test_scan_array_carrying_a_non_finite_pixel_is_refused(self):
+        """
+        The scan branch is reachable with a float array too, and it loses the
+        poison rather than propagating it: `preprocess_image` casts through
+        `np.clip(...).astype(np.uint8)`, which turns NaN into an arbitrary byte
+        and infinity into 255. Either way the embedding looks perfectly ordinary
+        and nothing says the pixel was never a measurement.
+        """
+        from config.settings import MIN_BBOX_PIXELS
+        from src.verification import _as_spatial_input
+
+        scan = np.full((MIN_BBOX_PIXELS * 2, MIN_BBOX_PIXELS * 2), 255.0, dtype=np.float32)
+        scan[0, 0] = np.inf
+
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            _as_spatial_input(scan)

@@ -8,7 +8,7 @@ DTW's only capability is elastic alignment and it uses zero training writers,
 so if it wins on a corpus, alignment is what that corpus needs.
 
 The previous version of this script was never committed and is gone, which
-means the 12.24% figure quoted across `docs/` and `docs/SOLUTIONS.md` is not
+means the 12.24% figure quoted in earlier local notes is not
 currently reproducible. This is a fresh implementation; its numbers are the
 ones to trust, and where they disagree with the old ones the old ones lose.
 

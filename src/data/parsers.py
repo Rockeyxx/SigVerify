@@ -33,6 +33,7 @@ from config.settings import (
     PRESSURE_IMPUTATION_VALUE,
     SIGCOMP2011_DIR,
     SVC2004_DIR,
+    TEMPORAL_SAMPLE_PERIOD_MS,
     UTSIG_DIR,
 )
 
@@ -51,7 +52,8 @@ SIGCOMP_PRESSURE_MAX = 1023.0
 SIGCOMP_DECIMATION = 2
 # Milliseconds per row *after* decimation — 200 Hz halved. This is what makes
 # a dropped pen-up run measurable as elapsed time rather than just a hole.
-SIGCOMP_SAMPLE_MS = 10.0
+# Equals the corpus-wide target period: decimation exists to land on it.
+SIGCOMP_SAMPLE_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
 # ─── DeepSignDB ───────────────────────────────────────────────────────
 # Mapping definition matching source database distributions across Development and Evaluation partitions.
@@ -71,8 +73,9 @@ DEEPSIGN_PRESSURE_COLUMN = {"MCYT": 5, "BiosecurID": 6, "BiosecureDS2": 6,
 DEEPSIGN_PEN_SOURCES = ("MCYT", "BiosecurID", "BiosecureDS2")
 DEEPSIGN_PRESSURE_MAX = 1023.0
 
-# Target temporal period in milliseconds (10 ms period = 100 Hz frequency).
-DEEPSIGN_TARGET_PERIOD_MS = 10.0
+# Target temporal period in milliseconds, derived from the corpus-wide
+# sampling rate rather than restated as a literal.
+DEEPSIGN_TARGET_PERIOD_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _CEDAR_FORGED = re.compile(r"^forgeries_(\d+)_(\d+)\.png$", re.IGNORECASE)
@@ -304,7 +307,7 @@ def load_svc2004_file(path, extra_channels=None):
     The first line is a point count, which is skipped — the actual rows are
     trusted over the declared number.
     """
-    with open(path, "r") as fh:
+    with open(path, "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = [line.split() for line in fh.read().splitlines() if line.strip()]
 
     rows = np.array([[float(v) for v in row] for row in lines[1:]], dtype=np.float32)
@@ -355,7 +358,7 @@ def svc2004_has_pressure(root=SVC2004_DIR):
     for filename in sorted(os.listdir(root)):
         if not _SVC_FILE.match(filename):
             continue
-        with open(os.path.join(root, filename), "r") as fh:
+        with open(os.path.join(root, filename), "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] filename matched _SVC_FILE
             fh.readline()  # point-count header
             first = fh.readline().split()
         return len(first) >= 7
@@ -396,7 +399,7 @@ def load_mobisig_file(path):
     channels, and the model derives its own dynamics from them.
     """
     xs, ys, ps = [], [], []
-    with open(path, newline="") as handle:
+    with open(path, newline="") as handle:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         for row in csv.DictReader(handle):
             xs.append(float(row["x"]))
             ys.append(float(row["y"]))
@@ -463,7 +466,8 @@ def load_sigcomp2011_file(path, extra_channels=None):
        at all (measured: 0 of 100,494). Mixing the two unfiltered would make the
        pressure channel and its derivative mean different things per writer_samples,
        which is precisely what collapsed the earlier SVC2004 Task1 + Task2 merge
-       (see `docs/SOLUTIONS.md`).
+       (43.75% EER; the per-writer pair cap means merging adds no pairs, only
+       mixes pressure-blind samples into the pressure channel).
 
     The cost is stated plainly: in-air trajectory is discriminative in the
     online-verification literature, and this discards it. It is discarded
@@ -486,7 +490,16 @@ def load_sigcomp2011_file(path, extra_channels=None):
     rows = np.loadtxt(path, dtype=np.float32, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2011")
 
+
+def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
+    """
+    Shared core for the NFI tablet archives: `[N, 3]` rows of X, Y, force on the
+    200 Hz grid in, model sample out. SigComp2009 and SigComp2011 differ only in
+    file syntax; the decimation, pen-up drop and `dt` reconstruction documented
+    on `load_sigcomp2011_file` apply to both.
+    """
     rows = rows[::SIGCOMP_DECIMATION]
     pen_down = np.flatnonzero(rows[:, 2] > 0)
     if len(pen_down) < 2:
@@ -504,13 +517,35 @@ def load_sigcomp2011_file(path, extra_channels=None):
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
     elif extra_channels is not None:
         raise ValueError(
-            f"SigComp2011 cannot supply '{extra_channels}' — the archive ships "
+            f"{corpus} cannot supply '{extra_channels}' — the archive ships "
             f"three columns (X, Y, force). Only 'dt' is reconstructable."
         )
 
     rows = rows[pen_down]
     return normalize_trajectory(rows[:, :2], rows[:, 2] / SIGCOMP_PRESSURE_MAX,
                                 extra)
+
+
+def load_nfi2009_file(path, extra_channels=None):
+    """
+    Load one SigComp2009 / NFI online `.hwr` file into the model's input.
+
+    Same NFI collection family and WACOM Intuos3 tablet as SigComp2011 (200 Hz,
+    force on the 0-1023 scale), so it shares `_sigcomp_rows_to_sample`. The
+    syntax differs: line one is `<id> <point count>`, then five columns per
+    point (X, Y, force, azimuth, altitude), with force `-1` while the pen is in
+    the air. Azimuth and altitude are dropped: `tilt` is deferred until the
+    deployment tablet is confirmed to report them, and no shipped weight reads
+    them.
+    """
+    with open(path, encoding="latin-1") as handle:
+        lines = handle.read().splitlines()
+    points = [line.split() for line in lines[1:]]
+    rows = np.array([[float(c) for c in cols[:3]] for cols in points if len(cols) == 5],
+                    dtype=np.float32)
+    if rows.size == 0:
+        raise ValueError(f"No trajectory points in {path}")
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2009")
 
 
 def _sigcomp_parts(dirpath, root):
@@ -908,5 +943,20 @@ def supports_extra_channel(path, channel):
 
 
 SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig", "sigcomp2011_offline")
-TEMPORAL_DATASETS = ("svc2004", "mobisig", "sigcomp2011", "deepsigndb")
+TEMPORAL_DATASETS = ("svc2004", "svc2004_task1", "svc2004_task2",
+                     "mobisig", "sigcomp2011", "deepsigndb")
+
+
+def is_temporal_dataset(path):
+    """
+    Whether the corpus rooted at `path` yields trajectories rather than images.
+
+    `extra_channels` is a temporal-only concept. A fused run lists both families
+    in one `--data-dir`, so offering the channel to the image corpora aborts a
+    run that is otherwise entirely valid — they cannot supply `dt` and were
+    never going to be asked for a trajectory width in the first place. Keyed
+    exactly as `_PARSERS` is, so `sigcomp2011_offline` cannot be mistaken for
+    its online sibling.
+    """
+    return os.path.basename(os.path.normpath(path)).lower() in TEMPORAL_DATASETS
 

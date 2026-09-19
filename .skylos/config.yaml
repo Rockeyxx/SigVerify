@@ -1,0 +1,29 @@
+# Skylos project configuration, read by the CI gate in
+# .github/workflows/tests.yml and by a local `skylos .` run.
+#
+# Deliberately minimal. No security rule is disabled project-wide — every
+# exception lives on the line it applies to as a `# skylos: ignore[RULE]`
+# comment with a reason, so the rule stays armed for code written later.
+# SKY-D265 (unsafe torch.load) in particular stays on: it caught a real defect
+# in src/verification.py, which loaded weights downloaded from Releases without
+# weights_only=True.
+
+exclude:
+  # Test code only. Every security hit under tests/ was a pytest tmp_path
+  # fixture writing its own scratch files — 41 of the 44 path-traversal and
+  # symlink findings in the first report. Excluding the folder is scoped to
+  # test code; src/, scripts/ and tools/ keep full rule coverage.
+  - tests
+
+# Symbols Skylos reports as dead because it does not parse .ipynb. Both are
+# reached only from Signature_Verification_Pipeline.ipynb, and a cleanup pass
+# that trusted the report would break the notebook.
+whitelist_documented:
+  "plot_loss_curve": "called by Signature_Verification_Pipeline.ipynb cells 5 and 10"
+  "SPATIAL_DATASETS": "imported by Signature_Verification_Pipeline.ipynb cell 3"
+
+gate:
+  fail_on_critical: true
+  max_critical: 0
+  max_high: 5
+  max_security: 10

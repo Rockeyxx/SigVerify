@@ -43,9 +43,12 @@ them, even if they appear in the literature review or older drafts:
   continuous embeddings with L2 or cosine distance
 - **No SQLCipher / whole-file DB encryption** — encryption is
   application-layer AES-256-GCM only
-- **No extra _captured_ channels** — the capture contract is `[1, L, 3]`,
-  `(X, Y, Pressure)`. The device must not be asked for azimuth, altitude or
-  tilt. Features **derived** from those three channels inside the model are
+- **No extra _captured_ channels beyond the four in the contract** — the capture
+  contract is `[1, L, 4]`, `(X, Y, Pressure, dt)`. The device must not be asked
+  for azimuth, altitude or tilt. `dt` was admitted on 2026-08-19 because a
+  timestamp is channel 3 of the standard 7 every digitizer already reports, so
+  the ban, which exists for channels the hardware cannot deliver, did not apply
+  to it. Features **derived** from those four channels inside the model are
   allowed and expected (see Temporal Branch below)
 - **No cloud APIs, no remote inference, no discrete GPU at inference**
 
@@ -119,9 +122,17 @@ them, even if they appear in the literature review or older drafts:
 
 ### Temporal Branch (Online)
 
-- Input tensor: **`[1, L, 3]`** — `(X, Y, Pressure)`, variable length `L`
-- **Derived dynamics:** the model appends per-frame deltas `(dX, dY, dP)` to
-  form a `[1, L, 6]` tensor _internally_, before the LSTM. Velocity is the most
+- Input tensor: **`[1, L, 4]`** — `(X, Y, Pressure, dt)`, variable length `L`.
+  The width is **not** a literal anywhere in the code: it is
+  `TEMPORAL_INPUT_FEATURES`, derived from `TEMPORAL_CHANNELS` in
+  `config/settings.py` (`xyp` → 3, `dt` → 4, `tilt` → 5). Flipping that one
+  setting moves the gate, the parsers and the test suite together, so a
+  checkpoint trained under any of the three stays reproducible. `dt` is what
+  ships and is what `models/weights/temporal_lstm.pth` was trained as
+- **Derived dynamics:** the model appends one per-frame delta per input channel
+  to form a `[1, L, TEMPORAL_INPUT_FEATURES x 2]` tensor _internally_, before the
+  LSTM — **8** under the shipped `dt` contract (4 channels); 6 was the legacy
+  3-channel (`xyp`) value. Velocity is the most
   discriminative feature family in the online-verification literature: a forger
   can copy the shape of a signature while tracing it far more slowly and evenly.
   This costs the capture device nothing, since deltas come from consecutive
@@ -311,6 +322,7 @@ SigComp writer the same signature scored **0.9370 → Genuine** normalized and
 | X / Y centred | `abs(mean) <= 0.5` per axis | `MAX_NORMALIZED_XY_MEAN = 0.5` |
 | X / Y scaled | `std` within `[0.2, 5.0]` per axis | `NORMALIZED_XY_STD_RANGE` |
 | Pressure range | within `[0, 1]` | — |
+| `dt` range | within `[0, 1]`, when the contract is 4 channels or wider | — |
 | Finite | no NaN or infinity | — |
 
 The X/Y bounds detect the *class* of error rather than a device's particular
@@ -318,16 +330,98 @@ scale, so no per-device configuration is needed. A flat `P = 1.0` **passes**:
 that is the legitimate pressure-blind device, reported as `degraded`, not
 rejected.
 
+**The width check is the one that bit.** Between the `dt` contract landing on
+2026-08-19 and 2026-08-31 the gate still required exactly 3 columns while the
+shipped weights required 4, so the temporal branch could not be reached through
+`verify()` at all: the parser emitted `[L, 4]`, `embed()` accepted it, and the
+gate refused it. A temporal-only call raised; a multimodal call silently dropped
+to spatial-only. Deriving the width from config rather than a literal is what
+prevents that recurring the next time the contract moves.
+
 ### Trajectory format
 
 | requirement | value |
 | --- | --- |
-| Shape | `[L, 3]` float32 — X, Y, Pressure |
+| Shape | `[L, 4]` float32 — X, Y, Pressure, dt. Width follows `TEMPORAL_INPUT_FEATURES` |
 | Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
 | Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
 | Pen-up samples | dropped (`P = 0`) |
 | X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
 | No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
+
+### High-Level Service Contract: `SignatureService` (for GUI & Backend Teams)
+
+To isolate frontend (PyQt5) and backend (SQLite/AES) developers from PyTorch internals,
+model weights management, and byte deserialization, `src/verification.py` exposes
+`SignatureService`. Developers should instantiate this class once at app startup:
+
+```python
+from src.verification import SignatureService
+
+service = SignatureService(device="cpu")
+```
+
+#### 1. Verification Modes (`service.verify(mode=...)`)
+
+The verification engine provides three explicit operational modes:
+
+| Mode | Input Arguments Required | Processing & Routing |
+| --- | --- | --- |
+| **`"unimodal"`** | `probe_trajectory` + `reference_temporal`<br>*OR*<br>`probe_image` + `reference_spatial` | Runs single-branch verification (`spatial_only` or `temporal_only`). Flagged as `degraded: True` because it relies on one modality. |
+| **`"temporal-multi"`** | `probe_trajectory` + `reference_temporal` + `reference_spatial` | **Single-action digitizer verification.** The user signs once on the tablet. The engine extracts the temporal embedding, auto-renders the spatial stroke image ($1.8\text{ ms}$), extracts the spatial embedding, and evaluates late fusion. Routing: `multimodal`. |
+| **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
+
+**Returns:**
+```python
+{
+    "decision": "Genuine" | "Forged",
+    "confidence": float,       # 0.0-100.0. The fused similarity scaled by 100,
+                               # NOT a calibrated probability. S = 1/(1+d) against
+                               # the nearest reference; do not present it as a
+                               # percentage likelihood of being genuine.
+    "routing": str,            # "multimodal", "spatial_only", or "temporal_only"
+    "degraded": bool,          # True if a modality was dropped or pressure was imputed
+    "reasons": list[str]       # Explanations if degraded or gate failure occurred
+}
+```
+
+#### 2. Enrollment Helpers (Returns DB-Ready Blobs)
+
+Frontend and database developers should use these helper methods during enrollment:
+
+- **`service.enroll_from_tablet(trajectories: list[np.ndarray]) -> dict`**
+  - Input: List of $K=5$ normalized $[L, 4]$ trajectories from the tablet.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`
+  - Automatically renders each trajectory to spatial images and computes both 512-d and 128-d embeddings.
+- **`service.enroll_multimodal(images: list, trajectories: list) -> dict`**
+  - Input: $K=5$ image paths/arrays and $K=5$ trajectories.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`.
+- **`service.enroll_unimodal(samples: list, modality: "spatial"|"temporal") -> dict`**
+  - Output: `{"embeddings": [bytes...], "modality": str}`.
+
+All reference templates accept either decrypted raw Python `bytes` (contiguous
+IEEE 754 float32 bytes directly from the database layer) or `np.ndarray` float32 embeddings.
+
+#### 3. Architectural Boundary: Model Branch vs. Database/Security Layer
+
+To preserve strict separation of concerns and engineering modularity:
+- **Model Branch (`src/`):** Performs biometric feature extraction and mathematical verification only.
+  Outputs plain, unencrypted embeddings (512-d and 128-d float32) and expects plain, decrypted
+  reference templates for comparison. The model branch never holds encryption keys and never performs
+  cryptographic operations.
+- **Backend / Database Layer:** Manages application-layer AES-256-GCM encryption and decryption (ISO/IEC 18033-1),
+  key management (OS keyring / environment), and SQLite persistence (ISO/IEC 9075-1). It receives plain
+  embeddings from `SignatureService.enroll_*()`, encrypts them for storage, and decrypts them before passing
+  to `SignatureService.verify()`.
+
+**Image arrays must be raw scans** — 2-D, paper bright, ink dark, any size, exactly what
+`cv2.imread(..., IMREAD_GRAYSCALE)` returns. They are resized and inverted on the way in,
+identically to a path. An already-canonical `[1, 155, 220]` float array in `[0, 1]` (what
+the renderer emits) is passed through untouched. Anything else raises rather than being
+guessed at: `SpatialSiamese` pools adaptively, so a wrong-sized or un-inverted array would
+otherwise yield a plausible 512-d embedding with no error and be stored as a template.
+
+---
 
 ## Standards
 
@@ -528,7 +622,7 @@ and align inside that dataset's loader, not in the model:
 This is not hypothetical bookkeeping. Merging SVC2004 Task1 into Task2 without
 reconciling the pressure channel collapsed the model to Cohen's d 0.279, and
 SigComp2011 differed on the first two rows above. Alignment belongs in the
-parser so the `[L, 3]` capture contract stays untouched.
+parser so the capture contract stays untouched.
 
 A fourth property, added after DeepSignDB: **the sample rate can vary per file
 inside one dataset.** BiosecurID's Development half is a near-even mix of 100 Hz

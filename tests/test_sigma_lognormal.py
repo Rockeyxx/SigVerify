@@ -24,6 +24,28 @@ from tools.sigma_lognormal import (LognormalStroke, decompose, distort,
                                    reconstruct, stroke_velocity, synthesize)
 
 
+_FIT_CACHE = {}
+
+
+def _fit_cached(sig):
+    """
+    Fit the sigma-lognormal decomposition once per distinct template.
+
+    `decompose` is a deterministic nonlinear fit costing seconds, and
+    `reconstruct` of its output is deterministic too. The ranking tests below
+    call this 24 times on the byte-identical `_spiral()`, varying only the
+    distortion seed, so 23 of those fits were recomputing an identical result.
+
+    Safe to cache because `distort` builds new stroke objects with
+    `dataclasses.replace` and never mutates the params it is handed.
+    """
+    key = sig.tobytes()
+    if key not in _FIT_CACHE:
+        params = decompose(sig)
+        _FIT_CACHE[key] = (params, reconstruct(params))
+    return _FIT_CACHE[key]
+
+
 def _spiral(length=90, turns=1.5):
     """
     A looping path with a *modulated* speed profile.
@@ -73,7 +95,7 @@ class TestDecomposeReconstruct:
 
     def test_reconstruction_preserves_length(self):
         sig = _spiral()
-        assert len(reconstruct(decompose(sig))) == len(sig)
+        assert len(_fit_cached(sig)[1]) == len(sig)
 
     def test_reconstruction_is_faithful_to_a_real_shape(self):
         """
@@ -82,13 +104,13 @@ class TestDecomposeReconstruct:
         resembling the template and the method measures noise.
         """
         sig = _spiral()
-        rebuilt = reconstruct(decompose(sig))
+        rebuilt = _fit_cached(sig)[1]
         rmse = np.sqrt(np.mean((rebuilt[:, :2] - sig[:, :2]) ** 2))
         assert rmse < 0.25, f"reconstruction RMSE {rmse:.3f} too high to synthesise from"
 
     def test_finds_more_than_one_stroke_on_a_complex_path(self):
         """A 2.5-turn spiral is many velocity peaks, not one."""
-        assert len(decompose(_spiral()).strokes) >= 3
+        assert len(_fit_cached(_spiral())[0].strokes) >= 3
 
     def test_handles_a_degenerate_input_without_crashing(self):
         flat = np.zeros((40, 3), dtype=np.float32)
@@ -96,6 +118,7 @@ class TestDecomposeReconstruct:
         assert len(out) == 40 and np.all(np.isfinite(out))
 
     def test_is_deterministic(self):
+        # Deliberately NOT cached: two independent fits is the assertion.
         sig = _spiral()
         a, b = reconstruct(decompose(sig)), reconstruct(decompose(sig))
         assert np.allclose(a, b)
@@ -110,8 +133,7 @@ class TestDistortionOrdering:
 
     def _deviation(self, sig, level, seed):
         rng = np.random.default_rng(seed)
-        params = decompose(sig)
-        rebuilt = reconstruct(params)
+        params, rebuilt = _fit_cached(sig)
         out = reconstruct(distort(params, level=level, rng=rng))
         n = min(len(out), len(rebuilt))
         return float(np.sqrt(np.mean((out[:n, :2] - rebuilt[:n, :2]) ** 2)))
@@ -128,7 +150,7 @@ class TestDistortionOrdering:
 
     def test_rejects_an_unknown_distortion_level(self):
         with pytest.raises(ValueError, match="level"):
-            distort(decompose(_spiral()), level=7, rng=np.random.default_rng(0))
+            distort(_fit_cached(_spiral())[0], level=7, rng=np.random.default_rng(0))
 
 
 class TestSynthesize:

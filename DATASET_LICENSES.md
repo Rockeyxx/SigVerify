@@ -21,7 +21,9 @@ Credit the corpus creators across any published work. Corresponding citations ar
 
 Distribution of DeepSignDB is managed by the **Biometrics and Data Pattern Analytics (BiDA) Lab, Universidad Autónoma de Madrid**. Access is not public; obtaining the archive involves submitting a signed license request to BiDA Lab, which usually processes requests within a few days to weeks.
 
-A valid agreement for this project took effect on **25 July 2026** for a period of two years. Although **raw data files were purged from this local system**, the codebase retains parser logic and test coverage to preserve reproducibility for credentialed license holders.
+A valid agreement for this project took effect on **25 July 2026** for a period of two years. **The raw archive is held locally under that agreement** (`data/deepsigndb/`, ~866 MB, 44,535 trajectory files). It is gitignored via the `/data/` rule and has never been committed; no derived asset, figure or distributed weight incorporates it, and models trained on it carry the `DONT_SHIP` filename tag described below.
+
+> **Corrected 2026-09-07.** This paragraph previously stated the raw files "were purged from this local system". They were not. Holding them is permitted by the live agreement, so the error was in the record rather than in the handling — but a compliance document asserting a purge that did not happen is the wrong direction to be wrong in, and an auditor reading it would have concluded no licensed data was present.
 
 The binding terms of this agreement constrain repository operations through several explicit provisions:
 

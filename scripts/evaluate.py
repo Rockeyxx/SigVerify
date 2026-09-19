@@ -25,21 +25,20 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
-    ALPHA_GRID_STEP, TARGET_ACCURACY, TARGET_FAR, TARGET_FRR, TARGET_ACCURACY,
-    TEMPORAL_EMBEDDING_DIM,
-    TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
+    ALPHA_GRID_STEP, TARGET_ACCURACY, TARGET_FAR, TARGET_FRR,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
+    TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS,
 )
 
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
-    collate_temporal_pairs, generate_skilled_pairs, preprocess_image,
+    collate_temporal_pairs, generate_skilled_pairs, pin_holdout, preprocess_image,
     writer_independent_split,
 )
-from src.data.parsers import merge_datasets, parse_dataset
 from src.models.siamese import SpatialSiamese, TemporalSiamese
+from src.verification import similarity_from_distance
 
 
 def compute_eer(genuine_scores, impostor_scores):
@@ -248,16 +247,7 @@ def tri_point_report(spatial_eer, temporal_eer, fused_eer, fused_is_provisional=
     print("=" * 50)
 
 
-def similarity_from_distance(distance):
-    """
-    Convert an L2 embedding distance into a bounded similarity score.
 
-        S = 1 / (1 + d)
-
-    Maps d ∈ [0, ∞) onto S ∈ (0, 1], so identical signatures approach 1 and
-    wildly different ones approach 0. Every metric below consumes S, not d.
-    """
-    return 1.0 / (1.0 + distance)
 
 
 def build_eval_loader(writer_samples, writer_ids, branch, batch_size, num_workers, seed):
@@ -387,6 +377,25 @@ def _draw(samples, indices):
     return [samples[i] for i in indices]
 
 
+def enrollment_draw(rng, num_genuine, num_references):
+    """
+    One enrollment draw: which genuine samples are references, which are probes.
+
+    Returns `(reference_indices, probe_indices)`. The writer's forgeries are not
+    involved — they are always probes, never references.
+
+    This existed eight times across `scripts/` and `tools/` in two different
+    idioms: `rng.permutation(n)` sliced in two here, and `rng.choice` plus
+    `np.setdiff1d` in the tools. Both draw a uniformly random K-subset, so they
+    were statistically equivalent but consumed the RNG stream differently, which
+    meant "the same seed" named two different draws depending on which file you
+    were reading. The permutation form is canonical because it is what the
+    enrolment protocol in `src/verification.py` mirrors.
+    """
+    order = rng.permutation(num_genuine)
+    return order[:num_references], order[num_references:]
+
+
 def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
                           seed=42, distance=None):
     """
@@ -426,9 +435,9 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
         if len(genuine) < num_references + 1 or not len(forged):
             continue
 
-        order = rng.permutation(len(genuine))
-        references = _draw(genuine, order[:num_references])
-        genuine_probes = _draw(genuine, order[num_references:])
+        ref_idx, probe_idx = enrollment_draw(rng, len(genuine), num_references)
+        references = _draw(genuine, ref_idx)
+        genuine_probes = _draw(genuine, probe_idx)
 
         for probes, label in ((genuine_probes, 1), (forged, 0)):
             if not len(probes):
@@ -440,7 +449,7 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
                 distances = np.array(
                     [min(distance(probe, reference) for reference in references)
                      for probe in probes])
-            all_scores.append(1.0 / (1.0 + distances))
+            all_scores.append(similarity_from_distance(distances))
             all_labels.append(np.full(len(probes), label))
 
     if not all_scores:
@@ -490,9 +499,9 @@ def znorm_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES, seed=
         if len(genuine) < num_references + 1 or not len(forged):
             continue
 
-        order = rng.permutation(len(genuine))
-        references = _draw(genuine, order[:num_references])
-        genuine_probes = _draw(genuine, order[num_references:])
+        ref_idx, probe_idx = enrollment_draw(rng, len(genuine), num_references)
+        references = _draw(genuine, ref_idx)
+        genuine_probes = _draw(genuine, probe_idx)
 
         # The writer's own scale: how far their enrolled references sit from one
         # another. Upper triangle only — the diagonal is zero by construction and
@@ -578,9 +587,9 @@ def writer_dependent_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
         if len(genuine) < num_references + 1 or not len(forged) or not others:
             continue
 
-        order = rng.permutation(len(genuine))
-        references = genuine[order[:num_references]]
-        genuine_probes = genuine[order[num_references:]]
+        ref_idx, probe_idx = enrollment_draw(rng, len(genuine), num_references)
+        references = genuine[ref_idx]
+        genuine_probes = genuine[probe_idx]
 
         # Other writers' genuines only — never this writer's forgeries.
         pool = np.vstack([embedded[w]["genuine"] for w in others])
@@ -608,16 +617,6 @@ def enrolled_writer_count(embedded, num_references=NUM_ENROLLMENT_REFERENCES):
                and len(embedded[w]["forged"]))
 
 
-def score_loader(model, dataloader, device, desc="scoring"):
-    """
-    Run inference over a loader and split the similarity scores by true label.
-
-    Returns: (genuine_scores, impostor_scores) as numpy arrays.
-    """
-    scores, labels = score_pairs(model, dataloader, device, desc=desc)
-    return scores[labels == 1], scores[labels == 0]
-
-
 def load_branch_model(branch, weights_path, device):
     """
     Instantiate the requested backbone and load its trained weights.
@@ -629,7 +628,7 @@ def load_branch_model(branch, weights_path, device):
     raise a shape error or, worse, load a subset of the weights and report a
     number that means nothing.
     """
-    state_dict = torch.load(weights_path, map_location="cpu")
+    state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
     if branch == "spatial":
         model = SpatialSiamese.from_state_dict(state_dict)
     else:
@@ -652,10 +651,32 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=42,
                         help="Must match the training seed to reproduce the same split")
-    parser.add_argument("--temporal-channels", default="dt", choices=["xyp", "dt", "tilt"],
+    parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
+                        metavar=("TRAIN", "VAL", "TEST"),
+                        help="Must match the --split-ratios the weights were trained "
+                             "with. The split is derived from the ratios, so a "
+                             "mismatch scores the model on writers it trained on.")
+    parser.add_argument("--split-seed", type=int, default=None,
+                        help="Seed for the writer split only; defaults to --seed, "
+                             "matching scripts/train.py. Training holds this fixed "
+                             "while varying --seed to measure training variance on "
+                             "one held-out set — which is how the six ensemble seeds "
+                             "were produced. Scoring such a checkpoint without "
+                             "repeating the value re-derives a different partition "
+                             "and reports EER over writers the model trained on.")
+    parser.add_argument("--holdout-writers", nargs="+", metavar="ID", default=None,
+                        help="Must match the --holdout-writers the weights were "
+                             "trained with. Pinned writers are forced into test; "
+                             "omitting them here reshuffles the partition and can "
+                             "move a training writer into the scored split.")
+    parser.add_argument("--temporal-channels", default=TEMPORAL_CHANNELS,
+                        choices=sorted(TEMPORAL_CHANNEL_WIDTHS),
                         help="Temporal channel mode: 'xyp' (3ch), 'dt' (4ch), or 'tilt' (5ch)")
     parser.add_argument("--alpha-sweep", action="store_true", help="Run α grid search")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.split_seed is None:
+        args.split_seed = args.seed
+    return args
 
 
 
@@ -839,7 +860,7 @@ def main(argv=None):
     matplotlib.use("Agg")
 
     args = parse_args(argv)
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --output-dir
 
     # Dynamic hardware selection for evaluation inference
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -853,11 +874,21 @@ def main(argv=None):
     writer_samples = build_writer_samples(
         args.data_dir, None if channels in (None, "xyp") else channels)
 
-    # Re-derives the exact partition training used — same writer list, same seed.
-    ratios = (TEMPORAL_SPLIT_RATIOS if args.branch == "temporal"
-              else SPATIAL_SPLIT_RATIOS)
-    train_ids, val_ids, test_ids = writer_independent_split(
-        sorted(writer_samples), *ratios, seed=args.seed)
+    # Re-derives the exact partition training used — same writer list, same seed,
+    # same ratios, same pinned holdout. The last two used to be unreachable here:
+    # this comment claimed to reproduce training's partition while reading the
+    # ratios straight from config and ignoring pin_holdout entirely, so a model
+    # trained with either flag was scored against a DIFFERENT split — quietly
+    # reporting EER over writers it had trained on.
+    ratios = tuple(args.split_ratios) if args.split_ratios else (
+        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
+    if args.holdout_writers:
+        train_ids, val_ids, test_ids = pin_holdout(
+            sorted(writer_samples), args.holdout_writers, *ratios,
+            seed=args.split_seed)
+    else:
+        train_ids, val_ids, test_ids = writer_independent_split(
+            sorted(writer_samples), *ratios, seed=args.split_seed)
 
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 

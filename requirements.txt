@@ -2,8 +2,12 @@
 # Adding anything here requires team sign-off + an IEEE 730 deviation log entry.
 
 # Deep Learning Framework
-# CPU-only per the "no dedicated GPU at inference" constraint. Install with:
-#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+# CPU-only per the "no dedicated GPU at inference" constraint. Install torch from
+# the CPU index FIRST, then everything else:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+# Do not use `-r requirements.txt --extra-index-url <pytorch>`: that merges both
+# indexes and pip takes the highest version, which is the CUDA-linked PyPI wheel.
 torch>=2.0.0
 torchvision>=0.15.0
 

@@ -5,15 +5,15 @@ on custom signature photo samples from ~/Downloads (H: English, M: Arabic, Omar:
 """
 
 import os
+import tempfile
 import sys
-import glob
 import cv2
 import numpy as np
 import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.verification import load_model, embed, _nearest_reference_score
-from config.settings import SPATIAL_DECISION_THRESHOLD
+from config.settings import SPATIAL_DECISION_THRESHOLD, MODEL_WEIGHTS_DIR
 
 
 def auto_crop_signature(image_path):
@@ -42,7 +42,10 @@ def auto_crop_signature(image_path):
     x2, y2 = min(w, x_max + pad), min(h, y_max + pad)
 
     cropped = img[y1:y2, x1:x2]
-    tmp_path = f"/tmp/crop_{os.path.basename(image_path)}"
+    # tempfile, not a literal "/tmp": AGENTS.md requires the project run
+    # identically on Windows, which has no /tmp.
+    tmp_path = os.path.join(tempfile.gettempdir(),
+                            f"crop_{os.path.basename(image_path)}")
     cv2.imwrite(tmp_path, cropped)
     return tmp_path
 
@@ -85,8 +88,9 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-    model_with_utsig_path = "models/weights/spatial_cnn.pth"
-    model_without_utsig_path = "models/weights/spatial_cnn_without_utsig.pth"
+    model_with_utsig_path = os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
+    model_without_utsig_path = os.path.join(MODEL_WEIGHTS_DIR,
+                                            "spatial_cnn_without_utsig.pth")
 
     model_with = load_model("spatial", model_with_utsig_path, device=device) if os.path.exists(model_with_utsig_path) else None
     model_without = load_model("spatial", model_without_utsig_path, device=device) if os.path.exists(model_without_utsig_path) else None

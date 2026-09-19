@@ -4,6 +4,7 @@ import pytest
 import torch
 import torch.optim as optim
 
+from config.settings import SPATIAL_INPUT_SIZE
 from src.models.siamese import (
     SPATIAL_TRUNKS,
     ContrastiveLoss,
@@ -58,7 +59,7 @@ class TestSpatialTrunks:
     def test_every_trunk_encodes_at_the_real_input_size(self, trunk):
         """Each trunk maps a 155x220 signature onto the configured embedding width."""
         model = SpatialSiamese(embedding_dim=512, trunk=trunk).eval()
-        out = model.encode(torch.randn(2, 1, 155, 220))
+        out = model.encode(torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0]))
         assert out.shape == (2, 512)
 
     def test_wide_trunk_matches_the_reference_channel_widths(self):
@@ -68,12 +69,19 @@ class TestSpatialTrunks:
         assert [c.out_channels for c in convs] == [96, 256, 384, 256]
         assert [c.kernel_size[0] for c in convs] == [11, 5, 3, 3]
 
-    def test_group_norm_divides_every_trunk_width(self):
-        """GroupNorm groups must divide the channel count, or construction throws."""
-        for trunk in SPATIAL_TRUNKS:
-            for module in SpatialSiamese(trunk=trunk).features:
-                if isinstance(module, torch.nn.GroupNorm):
-                    assert module.num_channels % module.num_groups == 0
+    def test_group_norm_uses_four_channels_per_group_capped_at_32(self):
+        """
+        Pin `_group_norm`'s actual rule, not divisibility.
+
+        The previous version asserted `num_channels % num_groups == 0`, which
+        `nn.GroupNorm.__init__` already raises on, so it could not fail: a
+        constructor that always returned `groups=1` would have satisfied it.
+        """
+        expected = {"compact": [8, 16, 32, 32, 32], "wide": [24, 32, 32, 32]}
+        for trunk, want in expected.items():
+            got = [m.num_groups for m in SpatialSiamese(trunk=trunk).features
+                   if isinstance(m, torch.nn.GroupNorm)]
+            assert got == want, f"{trunk}: {got} != {want}"
 
     def test_unknown_trunk_rejected(self):
         """A typo'd trunk name fails loudly instead of silently falling back."""
@@ -106,7 +114,7 @@ class TestSpatialTrunks:
         assert restored.fc_hidden == fc_hidden
         assert restored.embedding_dim == embedding_dim
 
-        x = torch.randn(2, 1, 155, 220)
+        x = torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0])
         assert torch.allclose(original.encode(x), restored.encode(x))
 
     def test_from_state_dict_rejects_an_unknown_architecture(self):
@@ -137,14 +145,14 @@ class TestTemporalSiamese:
 
     def test_encode_output_shape(self):
         """Verify trajectory encoder maps sequence tensor [B, L, 3] → embedding vector [B, 128]."""
-        model = TemporalSiamese(embedding_dim=128)
+        model = TemporalSiamese(input_features=3, embedding_dim=128)
         x = torch.randn(2, 50, 3)  # 2 signature samples, 50 trajectory points, 3 features (X, Y, P)
         out = model.encode(x)
         assert out.shape == (2, 128)
 
     def test_variable_sequence_length(self):
         """Ensure model cleanly handles variable sequence lengths (different stroke counts)."""
-        model = TemporalSiamese(embedding_dim=128)
+        model = TemporalSiamese(input_features=3, embedding_dim=128)
         short = torch.randn(1, 20, 3)
         long = torch.randn(1, 200, 3)
         assert model.encode(short).shape == (1, 128)
@@ -152,22 +160,46 @@ class TestTemporalSiamese:
 
     def test_pressure_dropout_training(self):
         """Verify pressure channel substitution (P=1.0) executes during training phase."""
-        model = TemporalSiamese(pressure_dropout=1.0)  # Force 100% pressure dropout
+        model = TemporalSiamese(input_features=3, pressure_dropout=1.0)  # Force 100% pressure dropout
         model.train()
         x = torch.randn(4, 30, 3)
         x[:, :, 2] = torch.rand(4, 30) * 5  # Non-trivial raw pressure readings
         emb = model.encode(x.clone())
         assert emb.shape == (4, 128)
+        # Shape alone cannot show the pressure channel was touched. At rate 1.0
+        # every sample must be flattened to the imputation value.
+        assert torch.allclose(model._apply_pressure_dropout(x.clone())[:, :, 2],
+                              torch.ones(4, 30))
 
     def test_pressure_dropout_eval(self):
-        """Ensure pressure dropout is strictly disabled during inference evaluation."""
-        model = TemporalSiamese(pressure_dropout=1.0)
-        model.eval()
+        """
+        Pressure dropout must not fire under `.eval()`.
+
+        The previous version encoded the same input twice and asserted the two
+        embeddings matched. At `pressure_dropout=1.0` the substitution is
+        deterministic, so both calls agreed whether or not the `self.training`
+        gate existed: verified by deleting `and self.training` from
+        `_apply_pressure_dropout`, after which that test still passed.
+
+        Compare against a model that cannot substitute instead. Eval mode must
+        reproduce the `pressure_dropout=0.0` result exactly, and must differ from
+        what the same weights produce in training mode.
+        """
+        model = TemporalSiamese(input_features=3, pressure_dropout=1.0)
+        reference = TemporalSiamese(input_features=3, pressure_dropout=0.0)
+        reference.load_state_dict(model.state_dict())
+
         x = torch.randn(2, 30, 3)
-        x[:, :, 2] = 5.0  # Constant pressure value
-        emb1 = model.encode(x.clone())
-        emb2 = model.encode(x.clone())
-        assert torch.allclose(emb1, emb2)
+        x[:, :, 2] = 0.25          # NOT the imputation value, so substitution shows
+
+        model.eval(); reference.eval()
+        with torch.no_grad():
+            assert torch.allclose(model.encode(x.clone()), reference.encode(x.clone())), \
+                "eval-mode encode must match a model with dropout off"
+
+            model.train()
+            assert not torch.allclose(model.encode(x.clone()), reference.encode(x.clone())), \
+                "training-mode encode must differ, or the substitution never fired"
 
 
 class TestContrastiveLoss:
@@ -211,8 +243,8 @@ class TestContrastiveLoss:
         labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
         loss = loss_fn(emb1, emb2, labels)
         loss.backward()
-        assert emb1.grad is not None
-        assert emb2.grad is not None
+        assert emb1.grad is not None and emb1.grad.abs().sum() > 0
+        assert emb2.grad is not None and emb2.grad.abs().sum() > 0
 
 
 class TestFusionEngine:
@@ -343,7 +375,7 @@ class TestTemporalPackedBatching:
         batch must equal encoding it alone. Without packing, the LSTM keeps
         consuming pad rows and the two diverge.
         """
-        model = TemporalSiamese(embedding_dim=128, pressure_dropout=0.0)
+        model = TemporalSiamese(input_features=3, embedding_dim=128, pressure_dropout=0.0)
         model.eval()
 
         long_seq = torch.randn(300, 3)
@@ -362,7 +394,7 @@ class TestTemporalPackedBatching:
 
     def test_encode_without_lengths_still_works(self):
         """Omitting lengths keeps the original un-packed path for equal-length batches."""
-        model = TemporalSiamese(embedding_dim=128, pressure_dropout=0.0)
+        model = TemporalSiamese(input_features=3, embedding_dim=128, pressure_dropout=0.0)
         model.eval()
         assert model.encode(torch.randn(2, 50, 3)).shape == (2, 128)
 
@@ -383,7 +415,7 @@ class TestWeightsSaveLoad:
         torch.save(model.state_dict(), path)
 
         model2 = SpatialSiamese(embedding_dim=512)
-        model2.load_state_dict(torch.load(path, map_location="cpu"))
+        model2.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         model2.eval()
         with torch.no_grad():
             emb_after = model2.encode(x)
@@ -392,7 +424,7 @@ class TestWeightsSaveLoad:
 
     def test_temporal_save_load_roundtrip(self, tmp_path):
         """Verify TemporalSiamese model weights save/load without embedding deviation."""
-        model = TemporalSiamese(embedding_dim=128)
+        model = TemporalSiamese(input_features=3, embedding_dim=128)
         x = torch.randn(1, 50, 3)
 
         model.eval()
@@ -402,8 +434,8 @@ class TestWeightsSaveLoad:
         path = tmp_path / "temporal.pth"
         torch.save(model.state_dict(), path)
 
-        model2 = TemporalSiamese(embedding_dim=128)
-        model2.load_state_dict(torch.load(path, map_location="cpu"))
+        model2 = TemporalSiamese(input_features=3, embedding_dim=128)
+        model2.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         model2.eval()
         with torch.no_grad():
             emb_after = model2.encode(x)
@@ -425,7 +457,7 @@ class TestWeightsSaveLoad:
             "loss": loss,
         }, path)
 
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         assert checkpoint["epoch"] == 42
         assert abs(checkpoint["loss"] - 0.123) < 1e-6
 
@@ -448,7 +480,7 @@ class TestSpatialGradientCheckpointing:
         checkpointed = SpatialSiamese(embedding_dim=64, trunk="wide", grad_checkpoint=4)
         checkpointed.load_state_dict(plain.state_dict())
 
-        x = torch.randn(2, 1, 155, 220)
+        x = torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0])
         for model in (plain, checkpointed):
             model.train()
             model.encode(x).sum().backward()
@@ -467,7 +499,7 @@ class TestSpatialGradientCheckpointing:
         """Inference has no backward pass to save memory for, so it pays nothing."""
         model = SpatialSiamese(embedding_dim=64, trunk="wide", grad_checkpoint=4).eval()
         with torch.no_grad():
-            out = model.encode(torch.randn(2, 1, 155, 220))
+            out = model.encode(torch.randn(2, 1, SPATIAL_INPUT_SIZE[1], SPATIAL_INPUT_SIZE[0]))
         assert out.shape == (2, 64)
 
 
@@ -580,3 +612,97 @@ class TestDeriveDeltas:
             batched = model.encode(padded, lengths)
             alone = model.encode(short, torch.tensor([12]))
         assert torch.allclose(batched[0], alone[0], atol=1e-6)
+
+
+class TestPoolingGridIsRecoverable:
+    """
+    `pool_grid` decides how much spatial detail reaches the embedding, and it was
+    a bare `self.pool_grid = 4` — unreachable from config or the CLI, so never
+    swept. Making it tunable is only safe if a checkpoint still carries its own
+    architecture, which for this parameter means recovering it from the
+    projection width: in_features = 2 (avg+max) x trunk_channels x grid^2.
+    """
+
+    @pytest.mark.parametrize("grid", [2, 4, 8])
+    def test_grid_round_trips_through_from_state_dict(self, grid):
+        from config.settings import SPATIAL_INPUT_SIZE
+        width, height = SPATIAL_INPUT_SIZE
+        original = SpatialSiamese(pool_grid=grid).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict())
+
+        assert restored.pool_grid == grid, "grid must come from the checkpoint"
+        x = torch.randn(1, 1, height, width)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(x), restored.encode(x))
+
+    def test_default_is_the_shipped_grid(self):
+        assert SpatialSiamese().pool_grid == 4
+
+    def test_unrecoverable_width_raises_instead_of_reshaping(self):
+        """
+        A projection width that is not 2 x channels x grid^2 means the grid cannot
+        be recovered. Falling back to the default would silently score the
+        checkpoint under a different embedding geometry — a plausible wrong
+        number rather than an error, which is the failure mode `from_state_dict`
+        exists to prevent.
+        """
+        state = SpatialSiamese(pool_grid=4).state_dict()
+        state["embedding.1.weight"] = torch.zeros(512, 8191)
+        with pytest.raises(ValueError, match="grid"):
+            SpatialSiamese.from_state_dict(state)
+
+    @pytest.mark.parametrize("grid", [2, 8])
+    def test_grid_round_trips_with_the_fc_hidden_head(self, grid):
+        """
+        `from_state_dict` reads the projection width off `embedding.1.weight`,
+        but the branch above it keys the FC-1024 variant on `embedding.4.weight`.
+        Index 1 exists in both head shapes — this asserts that rather than
+        leaving it to reasoning, since a wrong read here recovers the wrong grid
+        and reshapes the embedding silently.
+        """
+        from config.settings import SPATIAL_INPUT_SIZE
+        width, height = SPATIAL_INPUT_SIZE
+        original = SpatialSiamese(pool_grid=grid, fc_hidden=1024).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict())
+
+        assert restored.pool_grid == grid
+        x = torch.randn(1, 1, height, width)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(x), restored.encode(x))
+
+
+class TestPoolChannelReduction:
+    """
+    §22 could not attribute its result: raising the pooling grid to 8 also
+    quadrupled the head, and §5 already measured extra head capacity as harmful
+    at this data scale. A 1x1 convolution before pooling cuts channels so the
+    head width is unchanged, which isolates spatial resolution from capacity.
+
+    2 * 64 * 8^2 == 2 * 256 * 4^2 == 8192.
+    """
+
+    def test_reduction_holds_the_head_width_while_quadrupling_resolution(self):
+        shipped = SpatialSiamese()
+        matched = SpatialSiamese(pool_grid=8, pool_channels=64)
+
+        assert matched.embedding[1].in_features == shipped.embedding[1].in_features, \
+            "the point of the reduction is an identical head width"
+        assert matched.pool_grid ** 2 == 4 * shipped.pool_grid ** 2, \
+            "4x the spatial cells"
+
+    def test_reduction_round_trips_through_from_state_dict(self):
+        """A checkpoint must still carry its own architecture, per AGENTS.md."""
+        from config.settings import SPATIAL_INPUT_SIZE
+        width, height = SPATIAL_INPUT_SIZE
+        original = SpatialSiamese(pool_grid=8, pool_channels=64).eval()
+        restored = SpatialSiamese.from_state_dict(original.state_dict())
+
+        assert restored.pool_grid == 8
+        assert restored.pool_channels == 64
+        x = torch.randn(1, 1, height, width)
+        with torch.no_grad():
+            assert torch.allclose(original.encode(x), restored.encode(x))
+
+    def test_default_has_no_reduction(self):
+        """The shipped model must be untouched by this addition."""
+        assert SpatialSiamese().pool_channels is None

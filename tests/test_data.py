@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 import torch
 
-from config.settings import SPATIAL_INPUT_SIZE
+from config.settings import (MIN_BBOX_PIXELS, MIN_TRAJECTORY_POINTS,
+                             SPATIAL_INPUT_SIZE, TEMPORAL_INPUT_FEATURES)
 from src.data.dataset import (
     pin_holdout,
     SpatialSignatureDataset,
@@ -33,12 +34,17 @@ class TestTrajectoryGate:
     """
 
     def _normalized(self, n=100, seed=0):
-        """A trajectory shaped the way `normalize_trajectory` leaves one."""
+        """
+        A trajectory shaped the way `normalize_trajectory` leaves one, at
+        whatever width `TEMPORAL_CHANNELS` currently selects.
+        """
         rng = np.random.default_rng(seed)
         xy = rng.normal(0.0, 1.0, size=(n, 2))
         xy = (xy - xy.mean(axis=0)) / xy.std(axis=0)
-        pressure = rng.uniform(0.1, 1.0, size=(n, 1))
-        return np.hstack([xy, pressure]).astype(np.float32)
+        columns = [xy, rng.uniform(0.1, 1.0, size=(n, 1))]
+        for _ in range(TEMPORAL_INPUT_FEATURES - 3):
+            columns.append(np.full((n, 1), 0.1))
+        return np.hstack(columns).astype(np.float32)
 
     def test_normalized_trajectory_passes(self):
         passed, details = trajectory_gate(self._normalized())
@@ -85,6 +91,11 @@ class TestTrajectoryGate:
 
     def test_too_short_is_rejected(self):
         assert not trajectory_gate(self._normalized(n=4))[0]
+
+    def test_the_length_boundary_is_exact(self):
+        """One point under the minimum must fail and the minimum itself must pass."""
+        assert not trajectory_gate(self._normalized(n=MIN_TRAJECTORY_POINTS - 1))[0]
+        assert trajectory_gate(self._normalized(n=MIN_TRAJECTORY_POINTS))[0]
 
     def test_non_finite_is_rejected(self):
         traj = self._normalized()
@@ -200,7 +211,10 @@ class TestQualityGate:
         passed, details = quality_gate(path)
         assert passed is False
         os.unlink(path)
-
+        # Assert it failed on *size*, not sharpness. `quality_gate` ANDs two
+        # conditions, so a sharpness check that always returned False would
+        # satisfy a bare `passed is False` and never be noticed.
+        assert min(details["bbox_width"], details["bbox_height"]) < MIN_BBOX_PIXELS
 
 class TestWriterIndependentSplit:
     """Test suite for ISO/IEC 23053 writer-independent data partition splitting."""
@@ -227,6 +241,13 @@ class TestWriterIndependentSplit:
         assert 10 <= len(val) <= 20
         assert 10 <= len(test) <= 20
 
+    def test_ratios_are_exact_not_merely_approximate(self):
+        """
+        The split is deterministic at a fixed seed, so a band of 60-80% would
+        pass an off-by-one in the `int(n * ratio)` truncation. Pin the counts.
+        """
+        train, val, test = writer_independent_split([f"w{i}" for i in range(100)], seed=42)
+        assert (len(train), len(val), len(test)) == (70, 15, 15)
 
 class TestGenerateSkilledPairs:
     """Test suite for skilled-forgery-aware pairing (AGENTS.md evaluation protocol)."""
@@ -550,7 +571,8 @@ class TestSkilledPairBalance:
 class TestSpatialInputGeometry:
     """
     Square-pad versus direct resize. Which one wins is a measurement, not a
-    preference — see docs/SOLUTIONS.md for the numbers.
+    preference: direct resize won on every corpus, so SPATIAL_SQUARE_PAD ships
+    False. Padding spends canvas on the wide BHSig260 ribbons and measured worse.
     """
 
     def _wide_image(self, tmp_path):
@@ -737,3 +759,98 @@ class TestPinnedHoldout:
         with pytest.raises(ValueError, match="ghost"):
             pin_holdout([f"w{i}" for i in range(10)], ["w1", "ghost"],
                         0.5, 0.25, 0.25, seed=42)
+
+
+class TestChannelContractFollowsConfig:
+    """
+    `TEMPORAL_CHANNELS` is the single knob for the capture width.
+
+    `xyp` -> 3 (what shipped before), `dt` -> 4 (what ships now, and what
+    `models/weights/temporal_lstm.pth` was trained as), `tilt` -> 5 (available
+    once the device is confirmed to report azimuth and altitude). Flipping that
+    one setting must move the gate with it, so a checkpoint trained under any
+    setting stays reproducible without a code change.
+
+    These assert the *relationship* to config rather than a fixed number, so
+    they keep their meaning across every one of those settings.
+    """
+
+    def _at_width(self, width, length=60):
+        rng = np.random.default_rng(3)
+        columns = [rng.standard_normal((length, 2)),
+                   rng.uniform(0.0, 1.0, size=(length, 1))]
+        for _ in range(width - 3):
+            columns.append(np.full((length, 1), 0.1))
+        return np.hstack(columns).astype(np.float32)[:, :width]
+
+    def test_the_configured_width_passes(self):
+        passed, details = trajectory_gate(self._at_width(TEMPORAL_INPUT_FEATURES))
+        assert passed, details.get("error")
+
+    def test_a_narrower_probe_is_rejected(self):
+        """A 3-wide probe cannot score a 4-wide model; the gate must catch it."""
+        narrow = self._at_width(TEMPORAL_INPUT_FEATURES)[:, :TEMPORAL_INPUT_FEATURES - 1]
+        passed, details = trajectory_gate(narrow)
+        assert not passed
+        assert str(TEMPORAL_INPUT_FEATURES) in details["error"]
+
+    def test_a_wider_probe_is_rejected(self):
+        wide = np.hstack([self._at_width(TEMPORAL_INPUT_FEATURES),
+                          np.full((60, 1), 0.1, dtype=np.float32)])
+        assert not trajectory_gate(wide)[0]
+
+    def test_the_error_names_the_expected_width(self):
+        _, details = trajectory_gate(np.zeros((60, 2), dtype=np.float32))
+        assert f"[L, {TEMPORAL_INPUT_FEATURES}]" in details["error"]
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    def test_dt_outside_unit_range_is_rejected(self):
+        """dt is a gap clipped at 100 ms and scaled, never a raw timestamp."""
+        traj = self._at_width(TEMPORAL_INPUT_FEATURES)
+        traj[5, 3] = 4.2
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "dt" in details["error"].lower()
+
+    def test_unnormalized_xy_is_still_rejected_at_this_width(self):
+        traj = self._at_width(TEMPORAL_INPUT_FEATURES)
+        traj[:, :2] += 4000.0
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "z-scored" in details["error"]
+
+
+class TestAugmentTrajectoryPreservesWidth:
+    """
+    `augment_trajectory` rebuilt a hard-coded 3-column array, silently dropping
+    `dt`. At batch size 1 the resulting 6-wide packed sequence fed an 8-wide
+    LSTM without raising, returning a plausible embedding computed from the
+    wrong tensor.
+    """
+
+    def test_four_channel_input_keeps_four_channels(self):
+        rng = np.random.default_rng(11)
+        traj = np.hstack([
+            rng.standard_normal((40, 2)),
+            rng.uniform(0.0, 1.0, size=(40, 1)),
+            np.full((40, 1), 0.1),
+        ]).astype(np.float32)
+        out = augment_trajectory(traj, np.random.default_rng(0))
+        assert out.shape[1] == traj.shape[1]
+
+    def test_three_channel_input_still_returns_three(self):
+        rng = np.random.default_rng(12)
+        traj = np.hstack([rng.standard_normal((40, 2)),
+                          rng.uniform(0.0, 1.0, size=(40, 1))]).astype(np.float32)
+        assert augment_trajectory(traj, np.random.default_rng(0)).shape[1] == 3
+
+    def test_extra_channel_stays_in_range_after_resampling(self):
+        rng = np.random.default_rng(13)
+        traj = np.hstack([
+            rng.standard_normal((40, 2)),
+            rng.uniform(0.0, 1.0, size=(40, 1)),
+            rng.uniform(0.0, 1.0, size=(40, 1)),
+        ]).astype(np.float32)
+        out = augment_trajectory(traj, np.random.default_rng(0))
+        assert out[:, 3].min() >= 0.0 and out[:, 3].max() <= 1.0
