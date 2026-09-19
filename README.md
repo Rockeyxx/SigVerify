@@ -335,7 +335,7 @@ Device support is architected in tiers based on hardware capability:
 
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 Dutch     | Online Pen Trajectory   | $\le 5.0\%$  | **4.11% $\pm$ 1.03%** |
+| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **3.50% $\pm$ 0.70%** fused; 4.11% $\pm$ 1.03% pen alone |
 | **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **8.72% $\pm$ 0.42%** |
 | **Tertiary**  | Mobile / Touchscreen     | MOBISIG               | Capacitive Finger Touch | $\le 20.0\%$ |        21.26%         |
 
