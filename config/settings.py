@@ -53,7 +53,27 @@ NUM_WORKERS = 4                         # Set to 0 if worker process hanging occ
 PIN_MEMORY = False                      # CPU-bound execution — memory pinning provides no benefit
 
 # ─── Spatial Branch (Offline — Siamese CNN) ───────────────────────────
-SPATIAL_INPUT_SIZE = (220, 155)          # cv2 (width, height) → [1, 1, 155, 220] tensor
+def spatial_input_size_from_env(value, default):
+    """
+    Parse `SIGVER_SPATIAL_INPUT_SIZE=WxH`, the one override for the image size.
+
+    It exists for the input-size sweep only: the size has to reach DataLoader
+    workers (which re-import this module under forkserver) and the benchmark
+    alike, and the environment is the only channel both inherit. A checkpoint
+    trained under it records the size in its split record, and benchmark.py
+    refuses to score it at any other size. A malformed value raises rather than
+    falling back, so a typo cannot silently train at the default.
+    """
+    if value is None or value == "":
+        return default
+    parts = value.lower().split("x")
+    if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+        raise ValueError(f"SIGVER_SPATIAL_INPUT_SIZE must be WxH in pixels, e.g. 220x155; got {value!r}")
+    return (int(parts[0]), int(parts[1]))
+
+
+SPATIAL_INPUT_SIZE = spatial_input_size_from_env(
+    os.environ.get("SIGVER_SPATIAL_INPUT_SIZE"), (220, 155))   # cv2 (width, height) → [1, 1, 155, 220] tensor
 SPATIAL_EMBEDDING_DIM = 512
 
 # Image spatial mapping behavior.

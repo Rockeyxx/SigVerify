@@ -31,7 +31,8 @@ from config.settings import (
     TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     PRESSURE_DROPOUT_RATE, HARD_NEGATIVE_RATIO, SPATIAL_HEAD_DROPOUT,
     SPATIAL_TRUNK, SPATIAL_CONV_DROPOUT, SPATIAL_FC_HIDDEN,
-    SPATIAL_GRAD_CHECKPOINT,
+    SPATIAL_GRAD_CHECKPOINT, SPATIAL_INPUT_SIZE,
+    PAIRS_GENUINE_PER_WRITER, PAIRS_IMPOSTOR_PER_WRITER,
     EARLY_STOPPING_PATIENCE, EARLY_STOPPING_MIN_DELTA,
     NUM_WORKERS, PIN_MEMORY,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
@@ -45,7 +46,7 @@ from src.data.dataset import (
     save_split_record, split_record_path)
 from src.data.features import NUM_DERIVED_CHANNELS
 from src.data.parsers import (
-    EXTRA_CHANNEL_SUPPORT, is_known_dataset, is_temporal_dataset, merge_datasets,
+    EXTRA_CHANNEL_SUPPORT, MAX_GAP_MS, is_known_dataset, is_temporal_dataset, merge_datasets,
     parse_dataset, supports_extra_channel,
     svc2004_has_pressure,
 )
@@ -142,6 +143,34 @@ def parse_args(argv=None):
                              "projection, or 0 for the single linear head")
     parser.add_argument("--head-dropout", type=float, default=SPATIAL_HEAD_DROPOUT,
                         help="Dropout rate on the pooled vector feeding the head")
+    parser.add_argument("--pool-grid", type=int, default=4,
+                        help="N for the N x N avg+max pooling grid before the head "
+                             "(spatial branch only). Recoverable from the checkpoint.")
+    parser.add_argument("--embedding-dim", type=int, default=None,
+                        help="Embedding width; defaults to the branch's config value. "
+                             "Recoverable from the checkpoint.")
+    parser.add_argument("--aug-rotation", type=float, default=None, metavar="DEG",
+                        help="Spatial augmentation: max rotation (default SPATIAL_AUG_MAX_ROTATION_DEG)")
+    parser.add_argument("--aug-shear", type=float, default=None,
+                        help="Spatial augmentation: max shear (default SPATIAL_AUG_MAX_SHEAR)")
+    parser.add_argument("--aug-scale", type=float, default=None,
+                        help="Spatial augmentation: max scale change (default SPATIAL_AUG_MAX_SCALE)")
+    parser.add_argument("--aug-translate", type=float, default=None,
+                        help="Spatial augmentation: max translation (default SPATIAL_AUG_MAX_TRANSLATE)")
+    parser.add_argument("--aug-stroke-prob", type=float, default=None,
+                        help="Spatial augmentation: stroke dilate/erode probability (default SPATIAL_AUG_STROKE_PROB)")
+    parser.add_argument("--unidirectional", action="store_true",
+                        help="Temporal branch: forward-only LSTM instead of bidirectional. "
+                             "Recoverable from the checkpoint.")
+    parser.add_argument("--optimizer", choices=["adam", "adamw", "rmsprop"], default="adam",
+                        help="Optimiser; adam is the shipped recipe")
+    parser.add_argument("--min-delta", type=float, default=EARLY_STOPPING_MIN_DELTA,
+                        help="Early-stopping improvement threshold on validation loss")
+    parser.add_argument("--pairs-per-writer", type=int, default=None,
+                        help="Spatial pairs drawn per writer per class for train, val "
+                             "and test alike (default PAIRS_*_PER_WRITER). A reduced "
+                             "budget for screening runs; the shipped recipe uses the "
+                             "config value.")
     parser.add_argument("--grad-checkpoint", type=int, default=SPATIAL_GRAD_CHECKPOINT,
                         metavar="SEGMENTS",
                         help="Recompute the trunk in this many segments during the "
@@ -302,7 +331,7 @@ def _seed_worker(worker_id):
 
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
                  augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
-                 augment_scale=1.0):
+                 augment_scale=1.0, pairs_per_writer=None, augment_params=None):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -320,14 +349,17 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
     ratio = random_impostor_ratio if shuffle else 0.0
 
     if branch == "spatial":
-        pairs, labels = generate_skilled_pairs(subset, seed=seed,
+        genuine_n = pairs_per_writer or PAIRS_GENUINE_PER_WRITER
+        forged_n = pairs_per_writer or PAIRS_IMPOSTOR_PER_WRITER
+        pairs, labels = generate_skilled_pairs(subset, genuine_n, forged_n, seed=seed,
                                                random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, so validation and test
         # are never augmented — an augmented val set would move the target the
         # early-stopping rule is measuring against.
         dataset = SpatialSignatureDataset(pairs, labels,
                                           augment=shuffle and augment,
-                                          seed=seed)
+                                          seed=seed,
+                                          augment_params=augment_params)
         collate = None
     else:
         pairs, labels = generate_skilled_pairs(
@@ -581,16 +613,22 @@ def main(argv=None):
     print(f"  Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     if args.branch == "spatial":
-        model = SpatialSiamese(embedding_dim=SPATIAL_EMBEDDING_DIM,
+        model = SpatialSiamese(embedding_dim=args.embedding_dim or SPATIAL_EMBEDDING_DIM,
                                head_dropout=args.head_dropout,
                                trunk=args.trunk,
                                conv_dropout=args.conv_dropout,
                                fc_hidden=args.fc_hidden,
+                               pool_grid=args.pool_grid,
                                grad_checkpoint=args.grad_checkpoint).to(device)
         print(f"  Trunk: {args.trunk}, conv dropout {args.conv_dropout}, "
               f"head dropout {args.head_dropout}, "
               f"FC hidden {args.fc_hidden or 'none'}, "
+              f"pool grid {args.pool_grid}x{args.pool_grid}, "
+              f"embedding {model.embedding_dim}, "
               f"grad checkpoint {args.grad_checkpoint or 'off'}")
+        # The size is not in the weights, so it is stated here and in the record.
+        print(f"  Input size: {SPATIAL_INPUT_SIZE[1]}x{SPATIAL_INPUT_SIZE[0]} (HxW)"
+              + (" from SIGVER_SPATIAL_INPUT_SIZE" if os.environ.get("SIGVER_SPATIAL_INPUT_SIZE") else ""))
         weights_filename = "spatial_cnn.pth"
     else:
         # Pressure-channel dropout only teaches robustness if real pressure exists
@@ -625,7 +663,8 @@ def main(argv=None):
             input_features=channel_count,
             hidden_size=args.hidden_size,
             num_layers=args.num_layers,
-            embedding_dim=TEMPORAL_EMBEDDING_DIM,
+            embedding_dim=args.embedding_dim or TEMPORAL_EMBEDDING_DIM,
+            bidirectional=not args.unidirectional,
             pressure_dropout=pressure_dropout,
             # The derived set already carries dx, dy, ddx, ddy. Appending deltas
             # to it differentiates them a second time, which is what invalidated
@@ -650,14 +689,29 @@ def main(argv=None):
     if args.weights_name:
         weights_filename = args.weights_name
 
+    augment_params = {k: v for k, v in (("max_rotation_deg", args.aug_rotation),
+                                        ("max_shear", args.aug_shear),
+                                        ("max_scale", args.aug_scale),
+                                        ("max_translate", args.aug_translate),
+                                        ("stroke_prob", args.aug_stroke_prob)) if v is not None}
+    if augment_params:
+        print(f"  Augmentation overrides: {augment_params}")
+    if args.branch == "temporal":
+        print(f"  LSTM: {'forward-only' if args.unidirectional else 'bidirectional'}, "
+              f"embedding {model.embedding_dim}, dt clip {MAX_GAP_MS:g} ms"
+              + (" from SIGVER_MAX_GAP_MS" if os.environ.get("SIGVER_MAX_GAP_MS") else ""))
+
     train_loader, num_train = build_loader(writer_samples, train_ids, args.branch, args.batch_size,
                                            args.num_workers, True, args.seed,
                                            augment=args.augment,
                                            augment_scale=args.augment_scale,
-                                           random_impostor_ratio=args.random_impostor_ratio)
+                                           random_impostor_ratio=args.random_impostor_ratio,
+                                           pairs_per_writer=args.pairs_per_writer,
+                                           augment_params=augment_params)
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
                                        args.num_workers, False, args.seed,
-                                       augment=args.augment)
+                                       augment=args.augment,
+                                       pairs_per_writer=args.pairs_per_writer)
     negatives = ("skilled-forgery negatives" if not args.random_impostor_ratio else
                  f"{1 - args.random_impostor_ratio:.0%} skilled / "
                  f"{args.random_impostor_ratio:.0%} random-impostor negatives in train")
@@ -670,9 +724,12 @@ def main(argv=None):
         print(f"  Loss: margin {args.margin}, hard-negative ratio {args.hard_negative_ratio}")
     loss_fn = ContrastiveLoss(margin=args.margin,
                               hard_negative_ratio=args.hard_negative_ratio)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    early_stopping = EarlyStopping(patience=args.patience,
-                                   min_delta=EARLY_STOPPING_MIN_DELTA)
+    optimizers = {"adam": optim.Adam, "adamw": optim.AdamW, "rmsprop": optim.RMSprop}
+    optimizer = optimizers[args.optimizer](model.parameters(), lr=args.lr,
+                                           weight_decay=args.weight_decay)
+    early_stopping = EarlyStopping(patience=args.patience, min_delta=args.min_delta)
+    if args.optimizer != "adam" or args.min_delta != EARLY_STOPPING_MIN_DELTA:
+        print(f"  Optimiser: {args.optimizer}, early-stopping min delta {args.min_delta:g}")
     start_epoch = 0
     resume_best = None
 
@@ -735,7 +792,9 @@ def main(argv=None):
     # refuse to score this checkpoint on writers it trained on (Part 9 §27).
     save_split_record(weights_path, train_ids, val_ids, test_ids,
                       data_dirs=args.data_dir, split_seed=args.split_seed,
-                      holdout_writers=args.holdout_writers)
+                      holdout_writers=args.holdout_writers,
+                      input_size=SPATIAL_INPUT_SIZE if args.branch == "spatial" else None,
+                      max_gap_ms=MAX_GAP_MS if args.branch == "temporal" else None)
     print(f"Split record: {split_record_path(weights_path)}")
     return {**history,
             "split": {"train": list(train_ids), "val": list(val_ids), "test": list(test_ids)}}

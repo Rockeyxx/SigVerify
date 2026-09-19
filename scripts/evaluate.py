@@ -32,6 +32,7 @@ from config.settings import (
     TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS,
 )
 
+from src.data.parsers import MAX_GAP_MS
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, pin_holdout, preprocess_image,
@@ -894,9 +895,13 @@ def main(argv=None):
 
     # Refuse a partition the checkpoint was not trained under (Part 9 §27);
     # checkpoints older than 2026-09-19 carry no record and are not checked.
-    record = check_split_against_record(args.weights, train_ids, test_ids)
+    record = check_split_against_record(args.weights, train_ids, test_ids, max_gap_ms=MAX_GAP_MS)
     print("Split record: matches the checkpoint" if record else
           "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")
+    if record and record.get("input_size"):
+        print(f"Input size: {record['input_size'][1]}x{record['input_size'][0]} (HxW), from the record")
+    if record and record.get("max_gap_ms"):
+        print(f"dt clip: {record['max_gap_ms']:g} ms, from the record")
 
     if args.branch in ("spatial", "temporal"):
         weights = args.weights or (args.spatial_weights if args.branch == "spatial"

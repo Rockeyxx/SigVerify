@@ -311,9 +311,13 @@ class TemporalSiamese(nn.Module):
 
     def __init__(self, input_features=TEMPORAL_INPUT_FEATURES, hidden_size=TEMPORAL_HIDDEN_SIZE,
                  num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
-                 pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True):
+                 pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True,
+                 bidirectional=True):
         super().__init__()
         self.embedding_dim = embedding_dim
+        # Forward-only is the arm that could score a live stream incrementally;
+        # it was never compared with the bidirectional default until 2026-09-20.
+        self.bidirectional = bool(bidirectional)
         self.pressure_dropout = pressure_dropout
         self.derive_deltas = derive_deltas
 
@@ -347,7 +351,7 @@ class TemporalSiamese(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=0.3 if num_layers > 1 else 0.0,
-            bidirectional=True,
+            bidirectional=self.bidirectional,
         )
 
         # Concatenated final hidden states (2 * hidden_size) projected to 128-d
@@ -359,7 +363,7 @@ class TemporalSiamese(nn.Module):
         # random floor under the genuine-pair distance the loss is trying to
         # drive to zero. A ReLU would also trap every embedding in one convex
         # cone, pushing discrimination into magnitude rather than direction.
-        self.embedding = nn.Linear(hidden_size * 2, embedding_dim)
+        self.embedding = nn.Linear(hidden_size * (2 if self.bidirectional else 1), embedding_dim)
 
     @classmethod
     def from_state_dict(cls, state_dict, **overrides):
@@ -400,6 +404,8 @@ class TemporalSiamese(nn.Module):
             "num_layers": layers,
             "embedding_dim": state_dict["embedding.weight"].shape[0],
             "derive_deltas": derive_deltas,
+            # A forward-only checkpoint has no reverse weights and a half-width head.
+            "bidirectional": "lstm.weight_ih_l0_reverse" in state_dict,
         }
         params.update(overrides)
 
@@ -472,9 +478,10 @@ class TemporalSiamese(nn.Module):
             _, (h_n, _) = self.lstm(x)
 
         # Extract last layer forward state (h_n[-2]) and backward state (h_n[-1])
-        h_forward = h_n[-2]
-        h_backward = h_n[-1]
-        h_combined = torch.cat([h_forward, h_backward], dim=1)
+        if self.bidirectional:
+            h_combined = torch.cat([h_n[-2], h_n[-1]], dim=1)   # last layer, both directions
+        else:
+            h_combined = h_n[-1]
         return self.embedding(h_combined)
 
     def forward(self, x1, x2, lengths1=None, lengths2=None):

@@ -412,7 +412,7 @@ def split_record_path(weights_path):
 
 
 def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, split_seed,
-                      holdout_writers=None):
+                      holdout_writers=None, input_size=None, max_gap_ms=None):
     """
     Write the writer partition a checkpoint was trained under, next to the weights.
 
@@ -428,6 +428,12 @@ def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, spl
         "split_seed": split_seed,
         "holdout_writers": sorted(holdout_writers) if holdout_writers else None,
         "train": list(train_ids), "val": list(val_ids), "test": list(test_ids),
+        # The image size is not recoverable from the weights (adaptive pooling
+        # makes the trunk size-agnostic), so a checkpoint trained under
+        # SIGVER_SPATIAL_INPUT_SIZE says so here and is scored only at that size.
+        "input_size": list(input_size) if input_size else None,
+        # The dt clip (parsers.MAX_GAP_MS) is a data contract the same way.
+        "max_gap_ms": float(max_gap_ms) if max_gap_ms else None,
     }
     with open(split_record_path(weights_path), "w") as fh:
         json.dump(record, fh, indent=1)
@@ -443,7 +449,8 @@ def load_split_record(weights_path):
         return json.load(fh)
 
 
-def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True):
+def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True,
+                               input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None):
     """
     Refuse to score a checkpoint on a partition that disagrees with its record.
 
@@ -458,6 +465,18 @@ def check_split_against_record(weights_path, train_ids, test_ids, require_same_t
     record = load_split_record(weights_path)
     if record is None:
         return None
+    recorded_size = record.get("input_size")
+    if recorded_size and tuple(recorded_size) != tuple(input_size):
+        raise ValueError(
+            f"Refusing to score {weights_path} at input size "
+            f"{input_size[0]}x{input_size[1]}: it was trained at "
+            f"{recorded_size[0]}x{recorded_size[1]}. Set "
+            f"SIGVER_SPATIAL_INPUT_SIZE={recorded_size[0]}x{recorded_size[1]} to score it.")
+    recorded_gap = record.get("max_gap_ms")
+    if recorded_gap and max_gap_ms is not None and float(recorded_gap) != float(max_gap_ms):
+        raise ValueError(
+            f"Refusing to score {weights_path} with MAX_GAP_MS={max_gap_ms:g}: it was "
+            f"trained with {recorded_gap:g}. Set SIGVER_MAX_GAP_MS={recorded_gap:g} to score it.")
     scoring = set(test_ids)
     leaked = sorted(scoring & set(record["train"]))
     if leaked:
@@ -742,11 +761,16 @@ class SpatialSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels, transform=None, augment=False, seed=None):
+    def __init__(self, pairs, labels, transform=None, augment=False, seed=None,
+                 augment_params=None):
         self.pairs = pairs
         self.labels = labels
         self.transform = transform
         self.augment = augment
+        # Overrides for augment_image's ranges (max_rotation_deg, max_shear,
+        # max_scale, max_translate, stroke_prob). Held on the instance so they
+        # reach DataLoader workers, which re-import the module defaults.
+        self.augment_params = dict(augment_params or {})
         # Seeded so an augmented run reproduces from --seed. An unseeded
         # default_rng() draws OS entropy, which silently made augmented training
         # irreproducible even though every other RNG in the pipeline was seeded.
@@ -772,8 +796,8 @@ class SpatialSignatureDataset(Dataset):
             # Each side is warped independently. Warping a pair identically would
             # move both embeddings the same way and leave the distance between
             # them unchanged, which teaches the metric nothing.
-            img1 = augment_image(img1, self._rng)
-            img2 = augment_image(img2, self._rng)
+            img1 = augment_image(img1, self._rng, **self.augment_params)
+            img2 = augment_image(img2, self._rng, **self.augment_params)
 
         if self.transform:
             img1 = self.transform(img1)
