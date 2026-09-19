@@ -98,7 +98,7 @@ them, even if they appear in the literature review or older drafts:
   301 writers the failure is data scarcity, not excess capacity, so regularizing
   removes capacity the model needs. **`wide` is what ships** (`SPATIAL_TRUNK =
   "wide"`); its dropout schedule and FC-1024 head are the parts that do not.
-- **A checkpoint carries its own writer split.** Since 2026-09-19 `scripts/train.py` writes `<weights>.split.json` beside the weights (`data_dirs`, `split_seed`, `holdout_writers`, and the `train` / `val` / `test` writer IDs), and `benchmark.py` and `evaluate.py` refuse to score a checkpoint on any writer in its stored `train` set, or on a held-out set that is not the stored one (`--writers` may narrow to a subset). This is the check that would have stopped the 2026-09-06 leak at the first benchmark: `exp_sc11` was trained against one 65-writer list and scored on another that overlapped its training set by 34 writers (SUMMARY.md Part 9 §27). Checkpoints without a record are scored with a printed warning, never silently. **Ship the `.split.json` next to every `.pth` in a release**, and never edit a record by hand to make a benchmark pass.
+- **A checkpoint carries its own writer split.** Since 2026-09-19 `scripts/train.py` writes `<weights>.split.json` beside the weights (`data_dirs`, `split_seed`, `holdout_writers`, and the `train` / `val` / `test` writer IDs), and `benchmark.py` and `evaluate.py` refuse to score a checkpoint on any writer in its stored `train` set, or on a held-out set that is not the stored one (`--writers` may narrow to a subset). This is the check that would have stopped the 2026-09-06 leak at the first benchmark: `exp_sc11` was trained against one 65-writer list and scored on another that overlapped its training set by 34 writers (SUMMARY.md Part 9 §27). Checkpoints without a record are scored with a printed warning, never silently. **Ship the `.split.json` next to every `.pth` in a release**, and never edit a record by hand to make a benchmark pass. The record also carries `input_size` for a spatial checkpoint: the image geometry is not recoverable from the weights (adaptive pooling makes the trunk size-agnostic), so a checkpoint trained under the sweep-only override `SIGVER_SPATIAL_INPUT_SIZE=WxH` is scored only under the same value, and `benchmark.py` refuses any other. The override exists for the input-size sweep and nothing else; shipped weights train and serve at `SPATIAL_INPUT_SIZE`.
 - **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
@@ -113,10 +113,13 @@ them, even if they appear in the literature review or older drafts:
   → 11.19%. Keep the ranges small; forgery detection keys on fine stroke geometry.
   Warp each side of a pair **independently**, or the distance between them is
   unchanged and the metric learns nothing.
-- **LR schedule: plateau** (`--lr-schedule plateau`, halve after 2 stalled
-  epochs). Fired twice to 2.5e-4 and reached the best validation loss of any
-  spatial run (0.1355). Pooled EER ties augmentation alone, but the draw spread
-  tightened 40% (±0.83 → ±0.47). It ships for the spread, not the mean.
+- **LR schedule: an option, not the shipped recipe.** `--lr-schedule plateau`
+  (halve after 2 stalled epochs) fired twice to 2.5e-4 on the 2026-07-30 run and
+  tightened the draw spread 40% (±0.83 → ±0.47) at the same pooled EER. The flag
+  defaults to `none`, and the shipped `exp_ctrl` weight was trained by
+  `train_ablation.sh` without it, so the plateau constants are not part of the
+  shipped model. On the temporal branch the scheduler never fires (SUMMARY.md
+  Part 9 §10). Pass the flag explicitly if a run is meant to use it.
 - Normalization: **GroupNorm or LayerNorm** — never BatchNorm (pair-sampled batches)
 - Quality gate: effective-resolution proxies (bounding-box pixel size +
   Laplacian-variance sharpness). Do **not** gate on the file's DPI tag
