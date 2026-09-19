@@ -41,7 +41,9 @@ models/weights/
 *.pem
 
 # Planning docs (local only, not repo content)
-docs/
+docs/*
+!docs/screenshots/
+!docs/screenshots/**
 
 # Local diagnostics — instruments for answering "why is this number bad",
 # not project code. Nothing imports them and nothing ships with them, so they
