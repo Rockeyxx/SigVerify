@@ -229,17 +229,19 @@ functions are currently mocked; wiring them to the real `src/models/` and
 
 **Screenshots:**
 
-| Login | Dashboard |
-|---|---|
-| ![Login screen](docs/screenshots/login.png) | ![Dashboard with per-employee stats](docs/screenshots/dashboard.png) |
+|                             Login                                  |                           Dashboard                                  |
+| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
+|         ![Login screen](docs/screenshots/login.png)                | ![Dashboard with per-employee stats](docs/screenshots/dashboard.png) |
 
-| Enrollment | Verification |
-|---|---|
-| ![Enrollment panel — 5 reference images per client](docs/screenshots/enrollment.png) | ![Verification result display](docs/screenshots/verification.png) |
 
-| Clients | Profile |
-|---|---|
-| ![Enrolled clients table](docs/screenshots/clients.png) | ![Employee profile editing](docs/screenshots/profile.png) |
+|                           Enrollment                               |                            Verification                              |
+| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
+| ![Enrollment panel](docs/screenshots/enrollment.png)               | ![Verification result display](docs/screenshots/verification.png)    |
+
+
+|                       Clients                                      |                          Profile                                     |
+| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
+| ![Enrolled clients table](docs/screenshots/clients.png)            | ![Employee profile editing](docs/screenshots/profile.png)            |
 
 **Running the GUI:**
 
