@@ -74,6 +74,46 @@ def _group_norm(channels):
     return nn.GroupNorm(groups, channels)
 
 
+def _adaptive_windows(length, grid):
+    """The windows nn.AdaptiveAvgPool2d / AdaptiveMaxPool2d use along one axis:
+    start = floor(i*L/N), end = ceil((i+1)*L/N); they overlap when L % N != 0."""
+    return [(i * length // grid, -(-(i + 1) * length // grid)) for i in range(grid)]
+
+
+def _pool_windows(x, grid, reduce):
+    rows, cols = _adaptive_windows(x.shape[-2], grid), _adaptive_windows(x.shape[-1], grid)
+    return torch.stack([torch.stack([reduce(x[..., r0:r1, c0:c1]) for c0, c1 in cols], dim=-1)
+                        for r0, r1 in rows], dim=-2)
+
+
+def adaptive_max_pool2d_deterministic(x, grid):
+    """
+    nn.AdaptiveMaxPool2d((grid, grid)) with a deterministic backward; the
+    forward matches the library bit for bit.
+
+    The library's CUDA backward scatters gradients with atomic adds, so the
+    same seed gives different weights run to run. On 2026-09-21 this and the
+    average pool below were the only non-deterministic kernels in either
+    branch: a spatial seed retrained a day apart differed in 17 of 18 tensors
+    while the temporal branch reproduced exactly. Slicing plus `amax` has no
+    atomics, so a run reproduces and `train.py` can enforce
+    `torch.use_deterministic_algorithms(True)`. No parameters: every existing
+    checkpoint loads unchanged.
+    """
+    return _pool_windows(x, grid, lambda win: win.amax(dim=(-2, -1)))
+
+
+def adaptive_avg_pool2d_deterministic(x, grid):
+    """
+    nn.AdaptiveAvgPool2d((grid, grid)) with a deterministic backward.
+
+    Same windows as the library; the forward differs only by float32
+    summation order (about 1e-7, measured), far below anything a benchmark
+    prints. See adaptive_max_pool2d_deterministic for why.
+    """
+    return _pool_windows(x, grid, lambda win: win.mean(dim=(-2, -1)))
+
+
 class SpatialSiamese(nn.Module):
     """
     Siamese CNN for offline signature verification.
@@ -289,7 +329,8 @@ class SpatialSiamese(nn.Module):
         if self.pool_channels is not None:
             x = self.reduce(x)
         pooled = torch.cat(
-            [torch.flatten(self.pool_avg(x), 1), torch.flatten(self.pool_max(x), 1)],
+            [torch.flatten(adaptive_avg_pool2d_deterministic(x, self.pool_grid), 1),
+             torch.flatten(adaptive_max_pool2d_deterministic(x, self.pool_grid), 1)],
             dim=1,
         )
         return self.embedding(pooled)

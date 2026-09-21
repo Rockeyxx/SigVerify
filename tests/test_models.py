@@ -6,6 +6,8 @@ import torch.optim as optim
 
 from config.settings import SPATIAL_INPUT_SIZE
 from src.models.siamese import (
+    adaptive_avg_pool2d_deterministic,
+    adaptive_max_pool2d_deterministic,
     SPATIAL_TRUNKS,
     ContrastiveLoss,
     FusionEngine,
@@ -47,6 +49,52 @@ class TestSpatialSiamese:
         model = SpatialSiamese()
         for module in model.modules():
             assert not isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d))
+
+
+class TestDeterministicPooling:
+    """
+    The spatial head's max pooling must match nn.AdaptiveMaxPool2d exactly in
+    the forward pass (so every existing checkpoint scores identically) and must
+    not be the reason two runs of one seed differ: adaptive_max_pool2d's CUDA
+    backward scatters with atomic adds and was the only non-deterministic
+    kernel in either branch (found 2026-09-21 with use_deterministic_algorithms).
+    """
+
+    @pytest.mark.parametrize("hw,grid", [((19, 27), 4), ((19, 27), 8), ((9, 13), 4), ((7, 7), 3),
+                                         ((38, 55), 6), ((4, 4), 4), ((5, 9), 2)])
+    def test_forward_matches_adaptive_max_pool_exactly(self, hw, grid):
+        torch.manual_seed(0)
+        x = torch.randn(3, 5, *hw)
+        expected = torch.nn.functional.adaptive_max_pool2d(x, (grid, grid))
+        assert torch.equal(adaptive_max_pool2d_deterministic(x, grid), expected)
+
+    @pytest.mark.parametrize("hw,grid", [((19, 27), 4), ((9, 13), 4), ((38, 55), 6), ((5, 9), 2)])
+    def test_forward_matches_adaptive_avg_pool_to_float32_rounding(self, hw, grid):
+        torch.manual_seed(0)
+        x = torch.randn(3, 5, *hw)
+        expected = torch.nn.functional.adaptive_avg_pool2d(x, (grid, grid))
+        assert torch.allclose(adaptive_avg_pool2d_deterministic(x, grid), expected, atol=1e-6, rtol=0)
+
+    def test_backward_matches_adaptive_max_pool(self):
+        torch.manual_seed(0)
+        x = torch.randn(2, 4, 19, 27, requires_grad=True)
+        y = torch.randn(2, 4, 19, 27, requires_grad=True); y.data = x.data.clone()
+        torch.nn.functional.adaptive_max_pool2d(x, (4, 4)).sum().backward()
+        adaptive_max_pool2d_deterministic(y, 4).sum().backward()
+        assert torch.allclose(x.grad, y.grad)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="determinism is a CUDA question")
+    def test_every_kernel_in_the_spatial_branch_is_deterministic_on_cuda(self):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+        try:
+            model = SpatialSiamese(embedding_dim=16).cuda()
+            a = torch.rand(2, 1, *SPATIAL_INPUT_SIZE[::-1], device="cuda")
+            e1, e2 = model(a, a.flip(0))
+            ((e1 - e2) ** 2).sum().backward()      # raises if any kernel is non-deterministic
+        finally:
+            torch.use_deterministic_algorithms(False)
 
 
 class TestSpatialTrunks:

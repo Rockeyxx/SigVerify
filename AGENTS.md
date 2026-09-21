@@ -557,11 +557,18 @@ Two further corrections to the table above:
 - **sigcomp_Dutch is much noisier than 3.48.** A 6-seed control spans **6.90
   points** there (3.42% to 10.32%). Treat any Dutch-only claim under ~5 points as
   unmeasurable.
-- **Individual seeds are not reproducible across sessions,** though the
-  distribution is. Seed 42 of the identical config scored 9.61% on 2026-08-10 and
-  10.62% on 2026-08-19; the 6-seed mean (10.45%) matches the recorded 3-seed mean
-  (10.88%) fine. **Never compare a new arm against numbers recorded in an earlier
-  session** — re-run the control.
+- **A seed is reproducible under identical code and data; a different number
+  means something else changed.** Seed 42 scored 9.61% on 2026-08-10 and 10.62%
+  on 2026-08-19 because the recipe moved between those sessions, not because the
+  GPU did: on 2026-09-20 the shipped temporal seeds retrained a month later
+  matched their weights tensor for tensor. The spatial branch did not reproduce
+  until 2026-09-21 (the adaptive avg/max pool CUDA backward used atomic adds;
+  replaced by sliced pools in `src/models/siamese.py`), and `scripts/train.py`
+  now sets `torch.use_deterministic_algorithms(True)` so any future
+  non-deterministic kernel raises instead of drifting. The rule stands for the
+  original reason: **never compare a new arm against numbers recorded in an
+  earlier session**; re-run the control under current code, because the seed
+  spread (about 0.7 points) is real even when each seed is a fixed point.
 
 Runs cost ~12 minutes each with early stopping, so six seeds is ~75 minutes.
 There is no longer a cost argument for three.

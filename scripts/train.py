@@ -12,6 +12,9 @@ CLI Examples:
 
 import argparse
 import os
+
+# cuBLAS picks a non-deterministic reduction unless told this before CUDA starts.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import random
 import sys
 
@@ -558,16 +561,23 @@ def main(argv=None):
     # `generate_skilled_pairs`, both Dataset classes), so this closes the remaining
     # global surface rather than being the only defence.
     #
-    # This does NOT make GPU training bit-reproducible: some cuDNN kernels stay
-    # nondeterministic even with these flags set. Training here is seed-
-    # *distributional*, not seed-*reproducible* — which is why the project compares
-    # arms over six paired seeds rather than trusting any single run.
+    # Since 2026-09-21 a run IS bit-reproducible per seed on one machine, and
+    # `use_deterministic_algorithms` enforces it: any kernel without a
+    # deterministic implementation raises at the first backward pass instead of
+    # silently varying. The two that did (adaptive avg/max pool backward on CUDA)
+    # were replaced by sliced pools in src/models/siamese.py; the temporal branch
+    # never had one. CUBLAS_WORKSPACE_CONFIG is the cuBLAS half of the same
+    # guarantee and has to be in the environment before the first CUDA call.
+    # Seeds still differ from each other by ~0.7 points, so arms are still
+    # compared over six paired seeds; reproducibility makes each seed a fixed
+    # point, not the spread smaller.
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
     # Dynamic hardware selection: utilize CUDA GPU acceleration when available, else fallback to CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
