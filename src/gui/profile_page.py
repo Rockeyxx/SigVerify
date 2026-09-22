@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton
 )
 
-import storage
+import src.gui.storage as storage
 
 
 class ProfilePage(QWidget):

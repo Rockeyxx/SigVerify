@@ -11,9 +11,10 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QFileDialog, QListWidget, QMessageBox, QDialog
 )
+from src.gui.workers import EnrollWorker
 
-import storage
-from verification import SignatureService
+import src.gui.storage as storage
+import src.gui.interfaces as interfaces
 
 REQUIRED_IMAGE_REFERENCES = 5
 REQUIRED_DYNAMIC_REFERENCES = 5
@@ -150,7 +151,6 @@ class EnrollmentPanel(QWidget):
             self.clientStatusLabel.setText("Please enter a client ID first")
             return
 
-        # نتحقق أول: هل فيه سجل بهذا الاسم أصلاً (بأي موظف)؟
         any_owner_record = storage.get_client(client_id, employee_username=None)
         own_record = storage.get_client(client_id, employee_username=self.current_employee_username)
 
@@ -247,18 +247,40 @@ class EnrollmentPanel(QWidget):
             )
             return
 
-        success, message = SignatureService.enroll(client_id, self.image_references)
-        if not success:
-            self._set_status_error(message)
-            return
+        # نعطل الزر ونعرض مؤشر تحميل عشان المستخدم يعرف فيه شي يشتغل
+        self.enrollButton.setEnabled(False)
+        self.enrollButton.setText("Processing…")
+        self.statusLabel.setText("")
+
+        self._pending_client_id = client_id
+        self._enroll_worker = EnrollWorker(self.image_references)
+        self._enroll_worker.finished.connect(self._on_enroll_success)
+        self._enroll_worker.failed.connect(self._on_enroll_failure)
+        self._enroll_worker.start()
+
+    def _on_enroll_success(self, embeddings_b64: list):
+        client_id = self._pending_client_id
 
         storage.save_client_enrollment(
             client_id, self.image_references, self.dynamic_references,
-            self.current_employee_username or "unknown"
+            self.current_employee_username or "unknown",
+            spatial_embeddings=embeddings_b64,
         )
 
-        self._set_status_success(f"Saved enrollment for '{client_id}'")
+        self._set_status_success(f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} embeddings)")
         self.client_list_changed.emit()
+
+        self.image_references = []
+        self._refresh_image_list()
+        self._update_counts()
+
+        self.enrollButton.setEnabled(True)
+        self.enrollButton.setText("Save Enrollment")
+
+    def _on_enroll_failure(self, error_message: str):
+        self._set_status_error(error_message)
+        self.enrollButton.setEnabled(True)
+        self.enrollButton.setText("Save Enrollment")
 
     def delete_client(self):
         client_id = self.clientIdInput.text().strip()

@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QHeaderView
 )
 
-import storage
+import src.gui.storage as storage
 
 
 class ClientsPage(QWidget):

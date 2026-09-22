@@ -7,8 +7,8 @@ from PyQt5.QtCore import Qt, QRectF
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame
 
-import storage
-from styles import ACCENT, BORDER, TEXT_LIGHT, TEXT_MUTED
+import src.gui.storage as storage
+from src.gui.styles import ACCENT, BORDER, TEXT_LIGHT, TEXT_MUTED
 
 
 class ProgressRing(QWidget):

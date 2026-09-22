@@ -2,6 +2,10 @@
 Main Application — Signature Verification System
 """
 
+# Must load before PyQt5 — Windows DLL search-path conflict otherwise
+import torch  # noqa: F401 (imported here only to force early DLL init)
+import cv2    # noqa: F401
+
 import os
 import sys
 from PyQt5.QtCore import Qt
@@ -11,14 +15,14 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QLineEdit
 )
 
-from enrollment import EnrollmentPanel
-from verification import VerificationPanel
-from sidebar import Sidebar
-from dashboard import DashboardScreen
-from clients_page import ClientsPage
-from profile_page import ProfilePage
-from styles import STYLE
-import storage
+from src.gui.enrollment import EnrollmentPanel
+from src.gui.verification import VerificationPanel
+from src.gui.sidebar import Sidebar
+from src.gui.dashboard import DashboardScreen
+from src.gui.clients_page import ClientsPage
+from src.gui.profile_page import ProfilePage
+from src.gui.styles import STYLE
+import src.gui.storage as storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "signature_icon.png")

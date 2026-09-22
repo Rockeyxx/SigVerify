@@ -147,15 +147,17 @@ def list_clients(employee_username: str = None) -> list:
     return results
 
 
-def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list, employee_username: str):
+def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
+                             employee_username: str, spatial_embeddings: list = None):
     data = load_enrollments()
     key = _norm(client_id)
     existing = data["clients"].get(key, {})
     data["clients"][key] = {
         "display_name": client_id.strip(),
         "enrolled_by": employee_username,
-        "image_references": image_refs,
+        "image_references": image_refs,          # kept for the View/Preview button
         "dynamic_references": dynamic_refs,
+        "spatial_embeddings": spatial_embeddings or [],  # base64 — what verify() actually scores against
         "enrolled_at": existing.get("enrolled_at", datetime.now().isoformat(timespec="seconds")),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }

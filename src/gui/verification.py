@@ -6,51 +6,10 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
     QVBoxLayout, QFileDialog
 )
+from src.gui.workers import VerifyWorker
 
-import storage
-import interfaces
-
-
-class SignatureService:
-    @staticmethod
-    def enroll(client_id: str, image_paths: list) -> tuple:
-        if not client_id:
-            return False, "Please enter a client ID"
-        if not image_paths:
-            return False, "Please add at least one reference image"
-
-        for image_path in image_paths:
-            image_tensor = interfaces.preprocess_image(image_path)
-            embedding = interfaces.get_spatial_embedding(image_tensor)
-            interfaces.store_embedding(client_id, embedding, modality="spatial")
-
-        return True, "References processed"
-
-    @staticmethod
-    def verify(client_id: str, probe_image_path: str, employee_username: str) -> tuple:
-        """Returns: (success, message, decision, confidence)"""
-        if not client_id:
-            return False, "Please enter a client ID", "", 0.0
-
-        if not storage.client_exists(client_id, employee_username):
-            return False, f"No enrolled record found for '{client_id}' under your account. Please enroll them first.", "", 0.0
-
-        if not probe_image_path:
-            return False, "Please select a probe image", "", 0.0
-
-        image_tensor = interfaces.preprocess_image(probe_image_path)
-        probe_embedding = interfaces.get_spatial_embedding(image_tensor)
-
-        references = interfaces.get_references(client_id, modality="spatial")
-        if not references:
-            return False, f"No reference embeddings found for '{client_id}'", "", 0.0
-
-        distances = [interfaces.compute_distance(probe_embedding, ref) for ref in references]
-        s_spatial = min(distances)
-        interfaces.fuse_scores(s_spatial, s_temporal=0.0, alpha=1.0)
-
-        decision, confidence = interfaces.mock_verify_decision()
-        return True, "", decision, confidence
+import src.gui.storage as storage
+import src.gui.interfaces as interfaces
 
 
 class VerificationPanel(QWidget):
@@ -110,6 +69,7 @@ class VerificationPanel(QWidget):
 
         self.resultDisplay = QLabel("Awaiting verification...")
         self.resultDisplay.setProperty("role", "result-idle")
+        self.resultDisplay.setWordWrap(True)
         layout.addWidget(self.resultDisplay)
 
         self.modalityStateLabel = QLabel("")
@@ -151,18 +111,51 @@ class VerificationPanel(QWidget):
     def run_verification(self):
         client_id = self.clientIdInput.text().strip()
 
-        success, message, decision, confidence = SignatureService.verify(
-            client_id, self.selected_image_path, self.current_employee_username
-        )
-
-        if not success:
-            self._show_idle_message(message)
+        if not client_id:
+            self._show_idle_message("Please enter a client ID")
             return
+
+        client = storage.get_client(client_id, employee_username=self.current_employee_username)
+        if client is None:
+            self._show_idle_message(
+                f"No enrolled record found for '{client_id}' under your account. Please enroll them first."
+            )
+            return
+
+        embeddings_b64 = client.get("spatial_embeddings", [])
+        if not embeddings_b64:
+            self._show_idle_message(
+                f"'{client_id}' has no stored embeddings — re-save their enrollment."
+            )
+            return
+
+        if not self.selected_image_path:
+            self._show_idle_message("Please select a probe image")
+            return
+
+        self.verifyButton.setEnabled(False)
+        self.verifyButton.setText("Verifying…")
+        self._show_idle_message("Processing…")
+
+        self._pending_client_id = client_id
+        self._verify_worker = VerifyWorker(embeddings_b64, self.selected_image_path)
+        self._verify_worker.finished.connect(self._on_verify_success)
+        self._verify_worker.failed.connect(self._on_verify_failure)
+        self._verify_worker.start()
+
+    def _on_verify_success(self, result: dict):
+        client_id = self._pending_client_id
+        decision = result["decision"]
+        confidence = round(result["confidence"], 1)
 
         self.resultDisplay.setText(f"[{decision}, {confidence}%]")
         role = "result-genuine" if decision == "Genuine" else "result-forged"
         self.resultDisplay.setProperty("role", role)
         self._refresh_result_style()
+
+        if result.get("degraded"):
+            reasons = "; ".join(result.get("reasons", [])) or "reduced evidence"
+            self.degradedModeIndicator.setText(f"⚠ Degraded: {reasons}")
 
         storage.append_verification_log(
             client_id=client_id,
@@ -172,6 +165,14 @@ class VerificationPanel(QWidget):
             employee_username=self.current_employee_username or "unknown"
         )
 
+        self.verifyButton.setEnabled(True)
+        self.verifyButton.setText("Verify")
+
+    def _on_verify_failure(self, error_message: str):
+        self._show_idle_message(error_message)
+        self.verifyButton.setEnabled(True)
+        self.verifyButton.setText("Verify")
+        
     def _show_idle_message(self, text):
         self.resultDisplay.setText(text)
         self.resultDisplay.setProperty("role", "result-idle")

@@ -1,101 +1,67 @@
 """
 interfaces.py — Signature Verification System
 
-Shared contract between the GUI layer and the ML / Database teams.
-Every function here is currently a MOCK (placeholder). Once teammates
-finish their real implementations, replace the function body with a
-real import — the function signature (name, inputs, outputs) should
-stay the same so the GUI code never needs to change.
+Thin GUI-facing wrapper around Omar's real integration facade
+(src/verification.py). This module does NOT reimplement any model or
+scoring logic — it only converts between the GUI's storage format
+(base64 strings in JSON) and the real SignatureService's format
+(raw bytes embeddings).
 
-REQUEST TO SEND TEAMMATES:
-Ask Omar and Abdullah to confirm/match these exact function names and
-shapes. If they already have different names, we just rename the
-import here — nothing else in the GUI changes.
+Dynamic (tablet) verification is not wired yet — pending src/capture/.
 """
 
-import random
-import numpy as np
+import os
+import base64
+import shutil
+import tempfile
+import uuid
+
+import torch  # noqa: E402 — must load before PyQt5 elsewhere; harmless here too
+import cv2    # noqa: E402
+
+from src.verification import SignatureService as RealSignatureService
+from src.gui.image_cleanup import crop_to_ink
+
+_service = None
 
 
-# ============================================================
-# ML PIPELINE — expected from Omar (temporal) & Abdullah (spatial)
-# ============================================================
+def _get_service() -> RealSignatureService:
+    global _service
+    if _service is None:
+        _service = RealSignatureService(device="cpu")
+    return _service
 
-def preprocess_image(image_path: str) -> np.ndarray:
+def _prepare_image(path: str) -> str:
     """
-    TODO (Abdullah): replace with real preprocessing.
-    Expected output shape: [1, 1, 256, 256] — 8-bit grayscale,
-    aspect-ratio-preserving pad, resize, normalize.
+    Full preparation pipeline for any image before it reaches the model:
+    1. Crop to ink + binarize (fixes phone-photo framing/lighting issues)
+    2. Copy to an ASCII-safe temp path (fixes cv2.imread failing silently
+       on non-ASCII paths, e.g. Arabic "Desktop" folder names)
     """
-    return np.zeros((1, 1, 256, 256), dtype=np.float32)
+    cleaned_path = crop_to_ink(path)
+
+    try:
+        cleaned_path.encode("ascii")
+        return cleaned_path
+    except UnicodeEncodeError:
+        ext = os.path.splitext(cleaned_path)[1] or ".png"
+        safe_path = os.path.join(tempfile.gettempdir(), f"sig_{uuid.uuid4().hex}{ext}")
+        shutil.copyfile(cleaned_path, safe_path)
+        return safe_path
+
+def enroll_client(image_paths: list) -> list:
+    safe_paths = [_prepare_image(p) for p in image_paths]
+    service = _get_service()
+    result = service.enroll_unimodal(safe_paths, modality="spatial")
+    return [base64.b64encode(b).decode("ascii") for b in result["embeddings"]]
 
 
-def preprocess_sequence(raw_sequence: list) -> np.ndarray:
-    """
-    TODO (Omar): replace with real preprocessing.
-    Expected output shape: [1, L, 3] — X, Y, Pressure.
-    If pressure is missing, pad with constant P=1.0 (rules.md §5).
-    """
-    return np.zeros((1, len(raw_sequence) if raw_sequence else 1, 3), dtype=np.float32)
-
-
-def get_spatial_embedding(image_tensor: np.ndarray) -> np.ndarray:
-    """
-    TODO (Abdullah): replace with real CNN forward pass.
-    Expected output shape: [512]
-    """
-    return np.random.randn(512).astype(np.float32)
-
-
-def get_temporal_embedding(sequence_tensor: np.ndarray) -> np.ndarray:
-    """
-    TODO (Omar): replace with real LSTM forward pass.
-    Expected output shape: [128]
-    """
-    return np.random.randn(128).astype(np.float32)
-
-
-def compute_distance(embedding_a: np.ndarray, embedding_b: np.ndarray) -> float:
-    """
-    L2 distance between two embeddings (per rules.md §6).
-    This one is simple math — likely doesn't need a teammate's version,
-    but keep it here for a single source of truth.
-    """
-    return float(np.linalg.norm(embedding_a - embedding_b))
-
-
-def fuse_scores(s_spatial: float, s_temporal: float, alpha: float = 0.5) -> float:
-    """
-    S_final = alpha * S_spatial + (1 - alpha) * S_temporal  (rules.md §6)
-    alpha is tuned later during calibration (currently default 0.5).
-    """
-    return alpha * s_spatial + (1 - alpha) * s_temporal
-
-
-# ============================================================
-# DATABASE LAYER — expected from Abdullah
-# ============================================================
-
-_mock_db = {}
-
-def _norm_key(user_id: str) -> str:
-    return user_id.strip().lower()
-
-def store_embedding(user_id: str, embedding: np.ndarray, modality: str) -> bool:
-    key = _norm_key(user_id)
-    _mock_db.setdefault(key, {}).setdefault(modality, []).append(embedding)
-    return True
-
-def get_references(user_id: str, modality: str) -> list:
-    key = _norm_key(user_id)
-    return _mock_db.get(key, {}).get(modality, [])
-
-# ============================================================
-# MOCK DECISION HELPER — used only until real model is connected
-# ============================================================
-
-def mock_verify_decision() -> tuple:
-    """Temporary random result generator, used only for GUI testing."""
-    decision = random.choice(["Genuine", "Forged"])
-    confidence = round(random.uniform(60, 99), 1)
-    return decision, confidence
+def verify_client(reference_embeddings_b64: list, probe_image_path: str) -> dict:
+    service = _get_service()
+    ref_bytes = [base64.b64decode(b) for b in reference_embeddings_b64]
+    safe_probe_path = _prepare_image(probe_image_path)
+    return service.verify(
+        mode="unimodal",
+        probe_image=safe_probe_path,
+        reference_spatial=ref_bytes,
+    )
