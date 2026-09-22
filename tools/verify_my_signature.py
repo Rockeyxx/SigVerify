@@ -24,8 +24,28 @@ from PIL import Image, ImageOps
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (MODEL_WEIGHTS_DIR, NUM_ENROLLMENT_REFERENCES,
-                             SPATIAL_DECISION_THRESHOLD)
-from src.verification import embed, load_model, similarity_from_distance, verify
+                             SPATIAL_DECISION_THRESHOLD, SPATIAL_INPUT_SIZE)
+from src.verification import (_as_spatial_input, embed, load_model,
+                              similarity_from_distance, verify)
+
+
+def dump_model_input(path, destination):
+    """
+    Write the exact array the model receives for `path`, as a viewable PNG.
+
+    `_as_spatial_input` is the same call `embed()` makes, so this is not a
+    reconstruction: it is the tensor, scaled from [0.0, 1.0] back to [0, 255].
+    It looks inverted compared with the file on disk because the contract is
+    background 0, ink high (SUMMARY.md Part 1), and it is 155x220 regardless of
+    the input's aspect ratio. A signature that vanishes, fills the frame, or
+    arrives upside down here explains a wrong decision better than any score.
+    """
+    array = _as_spatial_input(path)[0]
+    cv2.imwrite(destination, np.clip(array * 255.0, 0, 255).astype(np.uint8))
+    ink = float((array > 0.1).mean() * 100)
+    print(f"  model input {os.path.basename(path)}: {array.shape[1]}x{array.shape[0]} "
+          f"(WxH), ink covers {ink:.1f}% of the canvas -> {destination}")
+    return destination
 
 
 def crop_to_ink(path, destination):
@@ -127,6 +147,12 @@ def main():
                         help="Where to write cropped images (default: a temp dir). "
                              "Give a real path to inspect them — a bad crop is the "
                              "most common reason a genuine signature is rejected.")
+    parser.add_argument("--dump-model-input", metavar="DIR", default=None,
+                        help="Write what the model actually receives for every "
+                             f"reference and probe: {SPATIAL_INPUT_SIZE[1]}x{SPATIAL_INPUT_SIZE[0]} "
+                             "(HxW), inverted so ink is bright on black. This is the "
+                             "tensor, not a preview of it, and it is the fastest way "
+                             "to see a crop or rotation problem.")
     args = parser.parse_args()
 
     if args.crop:
@@ -141,6 +167,16 @@ def main():
 
         args.references = prepare(args.references)
         args.probes = prepare(args.probes)
+        print()
+
+    if args.dump_model_input:
+        os.makedirs(args.dump_model_input, exist_ok=True)
+        print(f"Model inputs written to {args.dump_model_input}")
+        for kind, paths in (("ref", args.references), ("probe", args.probes)):
+            for path in paths:
+                dump_model_input(path, os.path.join(
+                    args.dump_model_input,
+                    f"{kind}_{os.path.splitext(os.path.basename(path))[0]}.png"))
         print()
 
     model = load_model("spatial", args.weights, args.device)

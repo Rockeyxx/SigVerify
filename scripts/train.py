@@ -170,10 +170,11 @@ def parse_args(argv=None):
     parser.add_argument("--min-delta", type=float, default=EARLY_STOPPING_MIN_DELTA,
                         help="Early-stopping improvement threshold on validation loss")
     parser.add_argument("--pairs-per-writer", type=int, default=None,
-                        help="Spatial pairs drawn per writer per class for train, val "
-                             "and test alike (default PAIRS_*_PER_WRITER). A reduced "
-                             "budget for screening runs; the shipped recipe uses the "
-                             "config value.")
+                        help="Pairs drawn per writer per class for train, val and "
+                             "test alike, on whichever branch is training (default "
+                             "PAIRS_*_PER_WRITER for spatial, TEMPORAL_PAIRS_*_PER_WRITER "
+                             "for temporal). A reduced budget for screening runs; the "
+                             "shipped recipe uses the config value.")
     parser.add_argument("--grad-checkpoint", type=int, default=SPATIAL_GRAD_CHECKPOINT,
                         metavar="SEGMENTS",
                         help="Recompute the trunk in this many segments during the "
@@ -366,8 +367,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         collate = None
     else:
         pairs, labels = generate_skilled_pairs(
-            subset, TEMPORAL_PAIRS_GENUINE_PER_WRITER,
-            TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed,
+            subset, pairs_per_writer or TEMPORAL_PAIRS_GENUINE_PER_WRITER,
+            pairs_per_writer or TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed,
             random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, which is also the only
         # split that may be augmented.

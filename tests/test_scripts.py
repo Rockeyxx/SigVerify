@@ -152,6 +152,52 @@ class TestTrainMain:
                         "--epochs", "1", "--weights-dir", str(tmp_path / "w")])
 
 
+class TestPairBudget:
+    """
+    `--pairs-per-writer` overrides the pair budget for the branch being trained.
+    It existed for the spatial screen only, which left the temporal budget
+    (`TEMPORAL_PAIRS_*_PER_WRITER = 180`) untestable and therefore unmeasured.
+    Both branches must honour it, and the default must stay the config value.
+    """
+
+    def _writers(self, n_writers=4, n_samples=14, temporal=False):
+        rng = np.random.default_rng(0)
+        out = {}
+        for w in range(n_writers):
+            if temporal:
+                gen = [rng.random((30, 4)).astype(np.float32) for _ in range(n_samples)]
+                forg = [rng.random((30, 4)).astype(np.float32) for _ in range(n_samples)]
+            else:
+                gen = [rng.random((1, 155, 220)).astype(np.float32) for _ in range(n_samples)]
+                forg = [rng.random((1, 155, 220)).astype(np.float32) for _ in range(n_samples)]
+            out[f"w{w}"] = {"genuine": gen, "forged": forg}
+        return out
+
+    @pytest.mark.parametrize("branch,temporal", [("spatial", False), ("temporal", True)])
+    def test_budget_is_honoured_on_both_branches(self, branch, temporal):
+        from scripts.train import build_loader
+
+        writers = self._writers(temporal=temporal)
+        ids = sorted(writers)
+        _, small = build_loader(writers, ids, branch, 4, 0, False, 42, pairs_per_writer=3)
+        _, large = build_loader(writers, ids, branch, 4, 0, False, 42, pairs_per_writer=12)
+        # Positives and negatives are drawn per writer, so the total scales with
+        # the budget. 14 samples supply C(14,2)=91 genuine pairs, well above 12.
+        assert small == 3 * 2 * len(ids), f"{branch}: expected {3 * 2 * len(ids)} pairs, got {small}"
+        assert large == 12 * 2 * len(ids)
+
+    def test_default_uses_the_config_budget_for_the_temporal_branch(self):
+        from scripts.train import build_loader
+        from config.settings import TEMPORAL_PAIRS_GENUINE_PER_WRITER
+
+        writers = self._writers(n_writers=2, n_samples=6, temporal=True)
+        _, n = build_loader(writers, sorted(writers), "temporal", 4, 0, False, 42)
+        # 6 samples cap each writer at C(6,2)=15 pairs, below the 180 default,
+        # so this asserts the default is read rather than any number being passed.
+        assert TEMPORAL_PAIRS_GENUINE_PER_WRITER == 180
+        assert n == 15 * 2 * 2
+
+
 class TestEvaluationMetrics:
     """Metric correctness on constructed score distributions."""
 
