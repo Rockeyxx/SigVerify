@@ -71,6 +71,16 @@ class EarlyStopping:
         self.best_loss = None
         self.early_stop = False
 
+    def state_dict(self):
+        """The two fields a resume needs; patience and min_delta come from the flags."""
+        return {"counter": self.counter, "best_loss": self.best_loss}
+
+    def load_state(self, state):
+        """Restore a saved counter, or start fresh for a checkpoint predating the field."""
+        if state:
+            self.counter = state["counter"]
+            self.best_loss = state["best_loss"]
+
     def __call__(self, val_loss):
         if self.best_loss is None:
             self.best_loss = val_loss
@@ -464,7 +474,8 @@ def validate_one_epoch(model, dataloader, loss_fn, device, epoch=None, total_epo
     return total_loss / max(num_batches, 1)
 
 
-def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None):
+def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
+                    early_stopping=None):
     """
     Save full training checkpoint for resuming later.
 
@@ -482,6 +493,9 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None):
         "optimizer_state_dict": optimizer.state_dict(),
         "loss": loss,
         "best_val_loss": best_val_loss,
+        # Without this the counter restarts on resume and the run trains past
+        # the epoch it would have stopped at (2026-09-25, about five GPU-hours).
+        "early_stopping": early_stopping.state_dict() if early_stopping else None,
     }, path)
     tqdm.write(f"  Checkpoint saved: {path}")
 
@@ -495,7 +509,7 @@ def save_weights(model, path):
 
 def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         weights_path, checkpoint_path, start_epoch=0, early_stopping=None,
-        scheduler=None, resume_best=None):
+        scheduler=None, resume_best=None, resume_early_stopping=None):
     """
     Run the full training loop: per-epoch checkpoint, best-validation weight
     save, and early stopping.
@@ -510,6 +524,7 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
     if early_stopping is None:
         early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE,
                                        min_delta=EARLY_STOPPING_MIN_DELTA)
+    early_stopping.load_state(resume_early_stopping)
 
     history = {"train_loss": [], "val_loss": []}
     # Resuming must inherit the best validation loss reached so far. Starting
@@ -537,7 +552,8 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
                 tqdm.write(f"  LR decayed: {previous_lr:.2e} -> {current_lr:.2e}")
 
         save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path,
-                        best_val_loss=min(best_val_loss, val_loss))
+                        best_val_loss=min(best_val_loss, val_loss),
+                        early_stopping=early_stopping)
 
         # Only the best-validation weights ship — the final epoch is not
         # necessarily the best one once early stopping has been counting.
@@ -743,6 +759,7 @@ def main(argv=None):
         print(f"  Optimiser: {args.optimizer}, early-stopping min delta {args.min_delta:g}")
     start_epoch = 0
     resume_best = None
+    resume_early_stopping = None
 
     if args.resume:
         # Every line that reports a resume used to live inside an `os.path.exists`
@@ -766,6 +783,7 @@ def main(argv=None):
         resume_best = checkpoint.get("best_val_loss")
         if resume_best is None:
             resume_best = checkpoint.get("loss")
+        resume_early_stopping = checkpoint.get("early_stopping")
         print(f"Resumed training from epoch {start_epoch}"
               + (f", best val loss {resume_best:.4f}" if resume_best is not None else ""))
 

@@ -198,6 +198,49 @@ class TestPairBudget:
         assert n == 15 * 2 * 2
 
 
+class TestEarlyStoppingSurvivesResume:
+    """
+    A resumed run must not restart its patience. Found 2026-09-25 after a power
+    cut: `fit` restored `best_val_loss` for weight saving but built a fresh
+    `EarlyStopping`, so the counter went back to zero and the run trained five
+    epochs past where it would have stopped, about five GPU-hours.
+    """
+
+    def test_checkpoint_carries_the_counter_and_baseline(self, tmp_path):
+        import torch
+        import torch.optim as optim
+
+        from scripts.train import EarlyStopping, save_checkpoint
+
+        stopper = EarlyStopping(patience=5)
+        for loss in (0.30, 0.31, 0.32):        # one improvement then two stalls
+            stopper(loss)
+        assert (stopper.counter, stopper.best_loss) == (2, 0.30)
+
+        model = torch.nn.Linear(2, 2)
+        path = str(tmp_path / "ckpt.pth")
+        save_checkpoint(model, optim.Adam(model.parameters()), 3, 0.32, path,
+                        best_val_loss=0.30, early_stopping=stopper)
+        state = torch.load(path, map_location="cpu", weights_only=False)["early_stopping"]
+        assert state == {"counter": 2, "best_loss": 0.30}
+
+    def test_restored_stopper_continues_instead_of_restarting(self):
+        from scripts.train import EarlyStopping
+
+        stopper = EarlyStopping(patience=5)
+        stopper.load_state({"counter": 4, "best_loss": 0.30})
+        assert stopper.counter == 4 and stopper.best_loss == 0.30
+        # The fifth stall must stop the run, not the ninth.
+        assert stopper(0.31) is True
+
+    def test_a_record_without_the_field_starts_fresh(self):
+        from scripts.train import EarlyStopping
+
+        stopper = EarlyStopping(patience=5)
+        stopper.load_state(None)               # checkpoint predating the field
+        assert stopper.counter == 0 and stopper.best_loss is None
+
+
 class TestEvaluationMetrics:
     """Metric correctness on constructed score distributions."""
 
