@@ -202,7 +202,7 @@ SPATIAL_AUG_MAX_ROTATION_DEG = 6.0
 SPATIAL_AUG_MAX_SHEAR = 0.08
 SPATIAL_AUG_MAX_SCALE = 0.08
 SPATIAL_AUG_MAX_TRANSLATE = 0.04
-SPATIAL_AUG_STROKE_PROB = 0.3
+SPATIAL_AUG_STROKE_PROB = 0.0           # Measured 2026-09-26: stroke dilate/erode jitter costs 1.23 pooled EER points (report L9)
 TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
@@ -243,7 +243,7 @@ ALPHA_GRID_STEP = 0.05
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 # See AGENTS.md and SUMMARY.md.
-SPATIAL_DECISION_THRESHOLD = 0.7731     # Calibrated spatial branch threshold (EER on validation)
+SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
 # Fused tau: EER point of 0.5*s + 0.5*t on the 24 paired writers held out by
 # both branches (10 SigComp2011 + 14 SigComp2009/NFI), K=5, 10 draws, measured

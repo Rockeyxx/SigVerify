@@ -106,11 +106,17 @@ them, even if they appear in the literature review or older drafts:
   config points at whatever is being trained _now_, and scoring an archived
   checkpoint under the wrong architecture yields a plausible number that means
   nothing.
-- **Training-time augmentation is on** (`SPATIAL_AUGMENT`). Measured 2026-07-30:
-  every prior spatial run best-validated at **epoch 1**, which was image variety,
-  not pair supply — 301 writers seen pixel-identical every epoch. Small affine
-  warps plus stroke-width jitter moved the best epoch to 6 and pooled EER 11.78%
-  → 11.19%. Keep the ranges small; forgery detection keys on fine stroke geometry.
+- **Training-time augmentation is on, but the affine warps only**
+  (`SPATIAL_AUGMENT = True`, `SPATIAL_AUG_STROKE_PROB = 0.0`). Measured
+  2026-07-30: every prior spatial run best-validated at **epoch 1**, which was
+  image variety, not pair supply — 301 writers seen pixel-identical every epoch.
+  Warps plus stroke-width jitter moved the best epoch to 6 and pooled EER 11.78%
+  → 11.19%. That bundle was measured as one switch and hid a component pulling
+  the other way: measured 2026-09-26 at the full recipe, turning the stroke
+  dilate/erode jitter **off** takes pooled EER 8.69% → **7.46%** with no corpus
+  worse, because forgery detection keys on fine stroke geometry and that warp is
+  the one that erases stroke width. Keep the affine ranges small, keep the jitter
+  at zero, and never judge a group of augmentations by its sum again.
   Warp each side of a pair **independently**, or the distance between them is
   unchanged and the metric learns nothing.
 - **LR schedule: an option, not the shipped recipe.** `--lr-schedule plateau`
