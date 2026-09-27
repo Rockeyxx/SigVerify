@@ -343,7 +343,7 @@ Device support is architected in tiers based on hardware capability:
 
 ### Evaluation Figures & Benchmark Metrics
 
-Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5 --enroll-trials 10 --seed 42`:
+Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5 --enroll-trials 10 --seed 42`. To reproduce any release's published numbers, run `python tools/reproduce_release.py <tag>` (`--list` shows the releases):
 
 | Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d |
 | ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: |
