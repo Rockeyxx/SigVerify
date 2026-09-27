@@ -961,7 +961,6 @@ def supports_extra_channel(path, channel):
     return channel in EXTRA_CHANNEL_SUPPORT.get(name, frozenset())
 
 
-SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig", "sigcomp2011_offline")
 TEMPORAL_DATASETS = ("svc2004", "svc2004_task1", "svc2004_task2",
                      "mobisig", "sigcomp2011", "deepsigndb")
 

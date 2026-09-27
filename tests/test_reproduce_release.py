@@ -3,10 +3,12 @@ tools/reproduce_release.py: score (or retrain) a published release and compare
 with the numbers its notes published.
 """
 
+import os
+
 import pytest
 
 from config.settings import SPATIAL_TRAIN_DIRS, TEMPORAL_CHANNEL_WIDTHS, TEMPORAL_TRAIN_DIRS
-from tools.reproduce_release import (RELEASES, benchmark_command, benchmark_env, parse_benchmark,
+from tools.reproduce_release import (RELEASES, benchmark_command, benchmark_env, parse_benchmark, release_dir,
                                      train_command, verdict)
 
 # Trimmed from a real `benchmark.py --enroll 5` run on the v0.1.0 weight.
@@ -96,3 +98,11 @@ def test_scoring_runs_on_the_device_the_release_was_measured_on():
     cuda = next(w for w in RELEASES["v0.8.0"] if w.branch == "temporal")
     assert benchmark_env(cpu)["CUDA_VISIBLE_DEVICES"] == ""
     assert benchmark_env(cuda).get("CUDA_VISIBLE_DEVICES") != ""
+
+
+def test_only_a_known_release_tag_reaches_the_filesystem():
+    """The cache path is built from the tag, so an unknown or crafted tag is refused before any mkdir."""
+    assert release_dir("v0.10.0").endswith(os.path.join("releases", "v0.10.0"))
+    for bad in ("../../etc", "v9.9.9", ""):
+        with pytest.raises(ValueError, match="unknown release"):
+            release_dir(bad)

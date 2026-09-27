@@ -184,9 +184,16 @@ def _measured(result, key):
     return result["corpora"].get(key, {}).get("mean")
 
 
+def release_dir(tag, *parts):
+    """A release's cache folder. Only tags listed in RELEASES ever reach the filesystem."""
+    if tag not in RELEASES:
+        raise ValueError(f"unknown release {tag!r}; run with --list to see them")
+    return os.path.join(CACHE_DIR, tag, *parts)
+
+
 def _download(tag, weight):
-    folder = os.path.join(CACHE_DIR, tag)
-    os.makedirs(folder, exist_ok=True)
+    folder = release_dir(tag)
+    os.makedirs(folder, exist_ok=True)  # skylos: ignore[SKY-D215] tag checked against RELEASES by release_dir
     path = os.path.join(folder, weight.asset)
     if not os.path.exists(path):
         subprocess.run(["gh", "release", "download", tag, "-p", weight.asset, "-D", folder],
@@ -198,12 +205,12 @@ def _download(tag, weight):
 
 
 def _retrain(tag, weight):
-    out_dir = os.path.join(CACHE_DIR, tag, "retrained")
+    out_dir = release_dir(tag, "retrained")
     commit, argv = train_command(tag, weight, out_dir)
     tree = os.path.join(CACHE_DIR, "_src", commit)
     if not os.path.isdir(tree):
         subprocess.run(["git", "worktree", "add", "--detach", tree, commit], check=True, cwd=PROJECT_ROOT)
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)  # skylos: ignore[SKY-D215] tag checked against RELEASES by release_dir
     print(f"Retraining {tag} {weight.branch} at {commit}: {' '.join(argv)}", flush=True)
     subprocess.run([sys.executable, *argv], check=True, cwd=tree)
     return os.path.join(out_dir, weight.asset)

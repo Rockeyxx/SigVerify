@@ -55,8 +55,9 @@ DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
 # its split record instead, and tests/test_leakage.py fails when the two
-# disagree. Not src/data/parsers.SPATIAL_DATASETS: that lists every image corpus
-# the parsers can read, including the evaluation-only sigcomp2011_offline.
+# disagree. Not "every image corpus the parsers can read": that list includes the
+# evaluation-only sigcomp2011_offline, and a split built from it scored the shipped
+# spatial weight on 5 of its own training writers.
 SPATIAL_TRAIN_DIRS = (CEDAR_DIR, BHSIG260_DIR, UTSIG_DIR)
 TEMPORAL_TRAIN_DIRS = (SVC2004_TASK2_DIR, SIGCOMP2011_DIR)
 
