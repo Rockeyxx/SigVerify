@@ -98,6 +98,7 @@ them, even if they appear in the literature review or older drafts:
   301 writers the failure is data scarcity, not excess capacity, so regularizing
   removes capacity the model needs. **`wide` is what ships** (`SPATIAL_TRUNK =
   "wide"`); its dropout schedule and FC-1024 head are the parts that do not.
+- **A checkpoint carries its own writer split.** Since 2026-09-19 `scripts/train.py` writes `<weights>.split.json` beside the weights (`data_dirs`, `split_seed`, `holdout_writers`, and the `train` / `val` / `test` writer IDs), and `benchmark.py` and `evaluate.py` refuse to score a checkpoint on any writer in its stored `train` set, or on a held-out set that is not the stored one (`--writers` may narrow to a subset). This is the check that would have stopped the 2026-09-06 leak at the first benchmark: `exp_sc11` was trained against one 65-writer list and scored on another that overlapped its training set by 34 writers (SUMMARY.md Part 9 §27). Checkpoints without a record are scored with a printed warning, never silently. **Ship the `.split.json` next to every `.pth` in a release**, and never edit a record by hand to make a benchmark pass. The record also carries `input_size` for a spatial checkpoint: the image geometry is not recoverable from the weights (adaptive pooling makes the trunk size-agnostic), so a checkpoint trained under the sweep-only override `SIGVER_SPATIAL_INPUT_SIZE=WxH` is scored only under the same value, and `benchmark.py` refuses any other. The override exists for the input-size sweep and nothing else; shipped weights train and serve at `SPATIAL_INPUT_SIZE`.
 - **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
@@ -105,17 +106,26 @@ them, even if they appear in the literature review or older drafts:
   config points at whatever is being trained _now_, and scoring an archived
   checkpoint under the wrong architecture yields a plausible number that means
   nothing.
-- **Training-time augmentation is on** (`SPATIAL_AUGMENT`). Measured 2026-07-30:
-  every prior spatial run best-validated at **epoch 1**, which was image variety,
-  not pair supply — 301 writers seen pixel-identical every epoch. Small affine
-  warps plus stroke-width jitter moved the best epoch to 6 and pooled EER 11.78%
-  → 11.19%. Keep the ranges small; forgery detection keys on fine stroke geometry.
+- **Training-time augmentation is on, but the affine warps only**
+  (`SPATIAL_AUGMENT = True`, `SPATIAL_AUG_STROKE_PROB = 0.0`). Measured
+  2026-07-30: every prior spatial run best-validated at **epoch 1**, which was
+  image variety, not pair supply — 301 writers seen pixel-identical every epoch.
+  Warps plus stroke-width jitter moved the best epoch to 6 and pooled EER 11.78%
+  → 11.19%. That bundle was measured as one switch and hid a component pulling
+  the other way: measured 2026-09-26 at the full recipe, turning the stroke
+  dilate/erode jitter **off** takes pooled EER 8.69% → **7.46%** with no corpus
+  worse, because forgery detection keys on fine stroke geometry and that warp is
+  the one that erases stroke width. Keep the affine ranges small, keep the jitter
+  at zero, and never judge a group of augmentations by its sum again.
   Warp each side of a pair **independently**, or the distance between them is
   unchanged and the metric learns nothing.
-- **LR schedule: plateau** (`--lr-schedule plateau`, halve after 2 stalled
-  epochs). Fired twice to 2.5e-4 and reached the best validation loss of any
-  spatial run (0.1355). Pooled EER ties augmentation alone, but the draw spread
-  tightened 40% (±0.83 → ±0.47). It ships for the spread, not the mean.
+- **LR schedule: an option, not the shipped recipe.** `--lr-schedule plateau`
+  (halve after 2 stalled epochs) fired twice to 2.5e-4 on the 2026-07-30 run and
+  tightened the draw spread 40% (±0.83 → ±0.47) at the same pooled EER. The flag
+  defaults to `none`, and the shipped `exp_ctrl` weight was trained by
+  `train_ablation.sh` without it, so the plateau constants are not part of the
+  shipped model. On the temporal branch the scheduler never fires (SUMMARY.md
+  Part 9 §10). Pass the flag explicitly if a run is meant to use it.
 - Normalization: **GroupNorm or LayerNorm** — never BatchNorm (pair-sampled batches)
 - Quality gate: effective-resolution proxies (bounding-box pixel size +
   Laplacian-variance sharpness). Do **not** gate on the file's DPI tag
@@ -369,6 +379,8 @@ The verification engine provides three explicit operational modes:
 | --- | --- | --- |
 | **`"unimodal"`** | `probe_trajectory` + `reference_temporal`<br>*OR*<br>`probe_image` + `reference_spatial` | Runs single-branch verification (`spatial_only` or `temporal_only`). Flagged as `degraded: True` because it relies on one modality. |
 | **`"temporal-multi"`** | `probe_trajectory` + `reference_temporal` + `reference_spatial` | **Single-action digitizer verification.** The user signs once on the tablet. The engine extracts the temporal embedding, auto-renders the spatial stroke image ($1.8\text{ ms}$), extracts the spatial embedding, and evaluates late fusion. Routing: `multimodal`. |
+
+**A spatial probe is scored only against references of the same origin.** Measured 2026-09-18 on 20 paired SigComp2011 writers: rendered probe against rendered references 22.9% EER, scanned against scanned 24.5%, rendered probe against scanned references **57.4%**, scanned probe against rendered references **54.1%**, both worse than chance. A render sits about 3.6 times further from its own scan than two scans of one writer sit from each other, so across that gap the spatial score carries no identity. Enforced in `SignatureService.verify()` since 2026-09-19: every `enroll_*` helper returns `"spatial_origin"` (`"render"` from `enroll_from_tablet`, `"scan"` from `enroll_multimodal` and spatial `enroll_unimodal`), `verify()` requires `reference_spatial_origin` whenever spatial references are passed and raises rather than guessing, and on a mismatch it drops the spatial branch (routing `temporal_only`, `degraded: True`, a reason naming both origins); a unimodal spatial call with mismatched references raises. **The database therefore stores `spatial_origin` next to each spatial template, alongside `model_version`.** A user who must be verifiable both by tablet and by scan is enrolled through both paths and holds two spatial reference sets.
 | **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
 
 **Returns:**
@@ -391,13 +403,15 @@ Frontend and database developers should use these helper methods during enrollme
 
 - **`service.enroll_from_tablet(trajectories: list[np.ndarray]) -> dict`**
   - Input: List of $K=5$ normalized $[L, 4]$ trajectories from the tablet.
-  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`
-  - Automatically renders each trajectory to spatial images and computes both 512-d and 128-d embeddings.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...], "spatial_origin": "render"}`
+  - Automatically renders each trajectory to spatial images and computes both 512-d and 128-d embeddings. The spatial templates are renders and can only be verified against rendered probes (`temporal-multi`).
 - **`service.enroll_multimodal(images: list, trajectories: list) -> dict`**
   - Input: $K=5$ image paths/arrays and $K=5$ trajectories.
-  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}`.
+  - Output: `{"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...], "spatial_origin": "scan"}`.
 - **`service.enroll_unimodal(samples: list, modality: "spatial"|"temporal") -> dict`**
-  - Output: `{"embeddings": [bytes...], "modality": str}`.
+  - Output: `{"embeddings": [bytes...], "modality": str}`, plus `"spatial_origin": "scan"` when the modality is spatial.
+
+Store `spatial_origin` with the spatial templates and pass it back as `verify(..., reference_spatial_origin=...)`; `verify()` raises without it whenever `reference_spatial` is given.
 
 All reference templates accept either decrypted raw Python `bytes` (contiguous
 IEEE 754 float32 bytes directly from the database layer) or `np.ndarray` float32 embeddings.
@@ -549,11 +563,18 @@ Two further corrections to the table above:
 - **sigcomp_Dutch is much noisier than 3.48.** A 6-seed control spans **6.90
   points** there (3.42% to 10.32%). Treat any Dutch-only claim under ~5 points as
   unmeasurable.
-- **Individual seeds are not reproducible across sessions,** though the
-  distribution is. Seed 42 of the identical config scored 9.61% on 2026-08-10 and
-  10.62% on 2026-08-19; the 6-seed mean (10.45%) matches the recorded 3-seed mean
-  (10.88%) fine. **Never compare a new arm against numbers recorded in an earlier
-  session** — re-run the control.
+- **A seed is reproducible under identical code and data; a different number
+  means something else changed.** Seed 42 scored 9.61% on 2026-08-10 and 10.62%
+  on 2026-08-19 because the recipe moved between those sessions, not because the
+  GPU did: on 2026-09-20 the shipped temporal seeds retrained a month later
+  matched their weights tensor for tensor. The spatial branch did not reproduce
+  until 2026-09-21 (the adaptive avg/max pool CUDA backward used atomic adds;
+  replaced by sliced pools in `src/models/siamese.py`), and `scripts/train.py`
+  now sets `torch.use_deterministic_algorithms(True)` so any future
+  non-deterministic kernel raises instead of drifting. The rule stands for the
+  original reason: **never compare a new arm against numbers recorded in an
+  earlier session**; re-run the control under current code, because the seed
+  spread (about 0.7 points) is real even when each seed is a fixed point.
 
 Runs cost ~12 minutes each with early stopping, so six seeds is ~75 minutes.
 There is no longer a cost argument for three.

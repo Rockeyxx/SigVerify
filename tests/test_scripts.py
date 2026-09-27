@@ -152,6 +152,95 @@ class TestTrainMain:
                         "--epochs", "1", "--weights-dir", str(tmp_path / "w")])
 
 
+class TestPairBudget:
+    """
+    `--pairs-per-writer` overrides the pair budget for the branch being trained.
+    It existed for the spatial screen only, which left the temporal budget
+    (`TEMPORAL_PAIRS_*_PER_WRITER = 180`) untestable and therefore unmeasured.
+    Both branches must honour it, and the default must stay the config value.
+    """
+
+    def _writers(self, n_writers=4, n_samples=14, temporal=False):
+        rng = np.random.default_rng(0)
+        out = {}
+        for w in range(n_writers):
+            if temporal:
+                gen = [rng.random((30, 4)).astype(np.float32) for _ in range(n_samples)]
+                forg = [rng.random((30, 4)).astype(np.float32) for _ in range(n_samples)]
+            else:
+                gen = [rng.random((1, 155, 220)).astype(np.float32) for _ in range(n_samples)]
+                forg = [rng.random((1, 155, 220)).astype(np.float32) for _ in range(n_samples)]
+            out[f"w{w}"] = {"genuine": gen, "forged": forg}
+        return out
+
+    @pytest.mark.parametrize("branch,temporal", [("spatial", False), ("temporal", True)])
+    def test_budget_is_honoured_on_both_branches(self, branch, temporal):
+        from scripts.train import build_loader
+
+        writers = self._writers(temporal=temporal)
+        ids = sorted(writers)
+        _, small = build_loader(writers, ids, branch, 4, 0, False, 42, pairs_per_writer=3)
+        _, large = build_loader(writers, ids, branch, 4, 0, False, 42, pairs_per_writer=12)
+        # Positives and negatives are drawn per writer, so the total scales with
+        # the budget. 14 samples supply C(14,2)=91 genuine pairs, well above 12.
+        assert small == 3 * 2 * len(ids), f"{branch}: expected {3 * 2 * len(ids)} pairs, got {small}"
+        assert large == 12 * 2 * len(ids)
+
+    def test_default_uses_the_config_budget_for_the_temporal_branch(self):
+        from scripts.train import build_loader
+        from config.settings import TEMPORAL_PAIRS_GENUINE_PER_WRITER
+
+        writers = self._writers(n_writers=2, n_samples=6, temporal=True)
+        _, n = build_loader(writers, sorted(writers), "temporal", 4, 0, False, 42)
+        # 6 samples cap each writer at C(6,2)=15 pairs, below the 180 default,
+        # so this asserts the default is read rather than any number being passed.
+        assert TEMPORAL_PAIRS_GENUINE_PER_WRITER == 180
+        assert n == 15 * 2 * 2
+
+
+class TestEarlyStoppingSurvivesResume:
+    """
+    A resumed run must not restart its patience. Found 2026-09-25 after a power
+    cut: `fit` restored `best_val_loss` for weight saving but built a fresh
+    `EarlyStopping`, so the counter went back to zero and the run trained five
+    epochs past where it would have stopped, about five GPU-hours.
+    """
+
+    def test_checkpoint_carries_the_counter_and_baseline(self, tmp_path):
+        import torch
+        import torch.optim as optim
+
+        from scripts.train import EarlyStopping, save_checkpoint
+
+        stopper = EarlyStopping(patience=5)
+        for loss in (0.30, 0.31, 0.32):        # one improvement then two stalls
+            stopper(loss)
+        assert (stopper.counter, stopper.best_loss) == (2, 0.30)
+
+        model = torch.nn.Linear(2, 2)
+        path = str(tmp_path / "ckpt.pth")
+        save_checkpoint(model, optim.Adam(model.parameters()), 3, 0.32, path,
+                        best_val_loss=0.30, early_stopping=stopper)
+        state = torch.load(path, map_location="cpu", weights_only=False)["early_stopping"]
+        assert state == {"counter": 2, "best_loss": 0.30}
+
+    def test_restored_stopper_continues_instead_of_restarting(self):
+        from scripts.train import EarlyStopping
+
+        stopper = EarlyStopping(patience=5)
+        stopper.load_state({"counter": 4, "best_loss": 0.30})
+        assert stopper.counter == 4 and stopper.best_loss == 0.30
+        # The fifth stall must stop the run, not the ninth.
+        assert stopper(0.31) is True
+
+    def test_a_record_without_the_field_starts_fresh(self):
+        from scripts.train import EarlyStopping
+
+        stopper = EarlyStopping(patience=5)
+        stopper.load_state(None)               # checkpoint predating the field
+        assert stopper.counter == 0 and stopper.best_loss is None
+
+
 class TestEvaluationMetrics:
     """Metric correctness on constructed score distributions."""
 
@@ -227,6 +316,28 @@ class TestEvaluateMain:
         # Same weights, same argv, so this needs no second train+evaluate cycle.
         assert report["threshold_tuned_on"] == "validation"
         assert report["reported_on"] == "test"
+
+    def test_evaluating_on_a_split_the_checkpoint_did_not_train_under_raises(self, tmp_path):
+        """
+        The 2026-09-06 leak: a checkpoint scored on writers it trained on because
+        the scorer recomputed a different partition than training used. Training
+        now records its split beside the weights and evaluation refuses a
+        partition that disagrees with it.
+        """
+        from src.data.dataset import load_split_record
+        data = _make_cedar_fixture(str(tmp_path / "cedar"))
+        weights_dir = str(tmp_path / "weights")
+        weights = os.path.join(weights_dir, "spatial_cnn.pth")
+
+        history = train_main(["--branch", "spatial", "--data-dir", data,
+                              "--epochs", "1", "--batch-size", "8", "--split-seed", "42",
+                              "--weights-dir", weights_dir, "--num-workers", "0"])
+        record = load_split_record(weights)
+        assert record is not None and set(record["test"]) == set(history["split"]["test"])
+
+        with pytest.raises(ValueError, match="trained on|held-out"):
+            evaluate_main(["--branch", "spatial", "--weights", weights, "--data-dir", data,
+                           "--split-seed", "7", "--output-dir", str(tmp_path / "r"), "--num-workers", "0"])
 
 
 class TestFusedChannelDispatch:

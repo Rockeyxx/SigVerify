@@ -63,6 +63,7 @@ class TestSignatureService:
             probe_trajectory=probe,
             reference_spatial=enrollment["spatial_embeddings"],
             reference_temporal=enrollment["temporal_embeddings"],
+            reference_spatial_origin=enrollment["spatial_origin"],
         )
 
         assert result["routing"] == "multimodal"
@@ -105,15 +106,119 @@ class TestSignatureService:
         probe_traj = self._sample_trajectory(95)
         probe_img = render_trajectory_to_image(probe_traj)
 
+        # enroll_multimodal labels its images as scans; these are renders, so the
+        # test declares the truth and checks the guard lets a matched pair through.
         result = service.verify(
             mode="multimodal",
             probe_image=probe_img,
             probe_trajectory=probe_traj,
             reference_spatial=enrollment["spatial_embeddings"],
             reference_temporal=enrollment["temporal_embeddings"],
+            reference_spatial_origin=enrollment["spatial_origin"],
         )
         assert result["routing"] == "multimodal"
+        assert not result["degraded"]
         assert result["decision"] in ("Genuine", "Forged")
+
+    # ── spatial reference origin ──────────────────────────────────────────
+    # Measured 2026-09-18 on 20 paired SigComp2011 writers, shipped weights:
+    # render/render 22.9% EER, scan/scan 24.5%, render probe vs scan refs 57.4%,
+    # scan probe vs render refs 54.1%. A render sits ~3.6x further from its own
+    # scan than two scans of one writer sit apart, so a mixed pair carries no
+    # identity and fusion would average noise into the verdict. Every enrolment
+    # therefore declares how its spatial references were made, and verify()
+    # refuses to score a spatial probe against references of the other origin.
+
+    def test_enrolments_declare_spatial_origin(self, service):
+        from src.data.renderer import render_trajectory_to_image
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        imgs = [render_trajectory_to_image(t) for t in trajs]
+
+        assert service.enroll_from_tablet(trajs)["spatial_origin"] == "render"
+        assert service.enroll_multimodal(images=imgs, trajectories=trajs)["spatial_origin"] == "scan"
+        assert service.enroll_unimodal(samples=imgs, modality="spatial")["spatial_origin"] == "scan"
+        assert "spatial_origin" not in service.enroll_unimodal(samples=trajs, modality="temporal")
+
+    def test_temporal_multi_drops_spatial_when_references_are_scans(self, service):
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        enrollment = service.enroll_from_tablet(trajs)
+
+        result = service.verify(
+            mode="temporal-multi",
+            probe_trajectory=self._sample_trajectory(95),
+            reference_spatial=enrollment["spatial_embeddings"],
+            reference_temporal=enrollment["temporal_embeddings"],
+            reference_spatial_origin="scan",
+        )
+        assert result["routing"] == "temporal_only"
+        assert result["degraded"]
+        assert any("render" in r and "scan" in r for r in result["reasons"])
+
+    def test_multimodal_drops_spatial_when_references_are_renders(self, service):
+        from src.data.renderer import render_trajectory_to_image
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        enrollment = service.enroll_from_tablet(trajs)
+        probe_traj = self._sample_trajectory(95)
+
+        result = service.verify(
+            mode="multimodal",
+            probe_image=render_trajectory_to_image(probe_traj),
+            probe_trajectory=probe_traj,
+            reference_spatial=enrollment["spatial_embeddings"],
+            reference_temporal=enrollment["temporal_embeddings"],
+            reference_spatial_origin=enrollment["spatial_origin"],
+        )
+        assert result["routing"] == "temporal_only"
+        assert result["degraded"]
+        assert any("render" in r and "scan" in r for r in result["reasons"])
+
+    def test_unimodal_spatial_refuses_rendered_references(self, service):
+        from src.data.renderer import render_trajectory_to_image
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        enrollment = service.enroll_from_tablet(trajs)
+
+        with pytest.raises(ValueError, match="render"):
+            service.verify(
+                mode="unimodal",
+                probe_image=render_trajectory_to_image(self._sample_trajectory(95)),
+                reference_spatial=enrollment["spatial_embeddings"],
+                reference_spatial_origin=enrollment["spatial_origin"],
+            )
+
+    def test_spatial_references_without_an_origin_are_refused(self, service):
+        """
+        An undeclared origin must not be guessed: guessing 'scan' would fuse a
+        scan probe with rendered references, guessing 'render' the reverse, and
+        both measured worse than chance. The error names the enrolment key.
+        """
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        enrollment = service.enroll_from_tablet(trajs)
+
+        with pytest.raises(ValueError, match="spatial_origin"):
+            service.verify(
+                mode="temporal-multi",
+                probe_trajectory=self._sample_trajectory(95),
+                reference_spatial=enrollment["spatial_embeddings"],
+                reference_temporal=enrollment["temporal_embeddings"],
+            )
+        with pytest.raises(ValueError, match="spatial_origin"):
+            service.verify(
+                mode="temporal-multi",
+                probe_trajectory=self._sample_trajectory(95),
+                reference_spatial=enrollment["spatial_embeddings"],
+                reference_temporal=enrollment["temporal_embeddings"],
+                reference_spatial_origin="photo",
+            )
+
+    def test_temporal_references_need_no_origin(self, service):
+        trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
+        enrollment = service.enroll_unimodal(samples=trajs, modality="temporal")
+        result = service.verify(
+            mode="unimodal",
+            probe_trajectory=self._sample_trajectory(95),
+            reference_temporal=enrollment["embeddings"],
+        )
+        assert result["routing"] == "temporal_only"
 
     def test_enroll_unimodal(self, service):
         trajs = [self._sample_trajectory(90 + i * 2) for i in range(5)]
@@ -139,6 +244,7 @@ class TestSignatureService:
             probe_trajectory=probe,
             reference_spatial=enrollment["spatial_embeddings"],
             reference_temporal=enrollment["temporal_embeddings"],
+            reference_spatial_origin=enrollment["spatial_origin"],
         )
         assert result["routing"] == "multimodal"
         assert result["decision"] in ("Genuine", "Forged")

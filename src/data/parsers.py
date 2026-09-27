@@ -43,7 +43,26 @@ SVC_PRESSURE_MAX = 1023.0
 SVC_AZIMUTH_MAX = 3600.0
 SVC_ALTITUDE_MAX = 900.0
 # Maximum gap threshold in milliseconds applied to inter-sample duration deltas.
-MAX_GAP_MS = 100.0
+def max_gap_ms_from_env(value, default):
+    """
+    Parse `SIGVER_MAX_GAP_MS`, the sweep-only override for the dt clip.
+
+    The clip is a data contract: a checkpoint trained with one value must be
+    scored and served with the same one, so train.py records it in the split
+    record and benchmark.py refuses a mismatch. A malformed value raises.
+    """
+    if value is None:
+        return default
+    try:
+        gap = float(value)
+    except ValueError:
+        gap = -1.0
+    if not gap > 0:
+        raise ValueError(f"SIGVER_MAX_GAP_MS must be a positive number of milliseconds; got {value!r}")
+    return gap
+
+
+MAX_GAP_MS = max_gap_ms_from_env(os.environ.get("SIGVER_MAX_GAP_MS"), 100.0)
 
 # Pressure scaling constant for SigComp2011 datasets (WACOM Intuos3 force resolution).
 SIGCOMP_PRESSURE_MAX = 1023.0

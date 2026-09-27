@@ -25,6 +25,7 @@ Supported Datasets:
 """
 
 import itertools
+import json
 import os
 import random
 
@@ -391,12 +392,110 @@ def writer_independent_split(writer_ids, train_ratio=SPATIAL_SPLIT_RATIOS[0],
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
     rng = random.Random(seed)
-    ids = list(writer_ids)
+    # Sorted first, so the partition depends on the seed and the SET of IDs,
+    # never on the order the caller happened to pass. Every in-repo caller
+    # already passed sorted(...), but a holdout list built from dict-key order
+    # on 2026-09-04 differed from theirs by 40 of 65 writers and let a
+    # checkpoint be scored on writers it had trained on (SUMMARY.md Part 9 §27).
+    ids = sorted(writer_ids)
     rng.shuffle(ids)
     n = len(ids)
     t1 = int(n * train_ratio)
     t2 = t1 + int(n * val_ratio)
     return ids[:t1], ids[t1:t2], ids[t2:]
+
+
+def split_record_path(weights_path):
+    """`models/weights/spatial_cnn.pth` -> `models/weights/spatial_cnn.split.json`."""
+    root, _ = os.path.splitext(weights_path)
+    return root + ".split.json"
+
+
+def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, split_seed,
+                      holdout_writers=None, input_size=None, max_gap_ms=None):
+    """
+    Write the writer partition a checkpoint was trained under, next to the weights.
+
+    A checkpoint that does not say which writers it trained on cannot be scored
+    honestly: on 2026-09-06 one was benchmarked on 34 writers from its own
+    training set because the scorer recomputed a different partition than
+    training had used, and nothing on disk could say so (SUMMARY.md Part 9 §27).
+    The record is the provenance that experiment had to reconstruct by scoring
+    seen and unseen writers separately.
+    """
+    record = {
+        "data_dirs": [str(d) for d in data_dirs],
+        "split_seed": split_seed,
+        "holdout_writers": sorted(holdout_writers) if holdout_writers else None,
+        "train": list(train_ids), "val": list(val_ids), "test": list(test_ids),
+        # The image size is not recoverable from the weights (adaptive pooling
+        # makes the trunk size-agnostic), so a checkpoint trained under
+        # SIGVER_SPATIAL_INPUT_SIZE says so here and is scored only at that size.
+        "input_size": list(input_size) if input_size else None,
+        # The dt clip (parsers.MAX_GAP_MS) is a data contract the same way.
+        "max_gap_ms": float(max_gap_ms) if max_gap_ms else None,
+    }
+    with open(split_record_path(weights_path), "w") as fh:
+        json.dump(record, fh, indent=1)
+    return record
+
+
+def load_split_record(weights_path):
+    """The stored partition, or None for a checkpoint that predates the record."""
+    path = split_record_path(weights_path)
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True,
+                               input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None):
+    """
+    Refuse to score a checkpoint on a partition that disagrees with its record.
+
+    Two failures, both hard errors: a writer about to be scored sits in the
+    checkpoint's stored training set (a leak, whatever else matches), or the
+    set about to be scored is not the stored held-out set (a different, and so
+    incomparable, partition: corpus list, split seed or pinned holdout changed
+    since training). `require_same_test=False` is for an explicit `--writers`
+    narrowing, where a subset of the held-out writers is the intention; the
+    leak check still applies. Returns the record, or None when there is none.
+    """
+    record = load_split_record(weights_path)
+    if record is None:
+        return None
+    recorded_size = record.get("input_size")
+    if recorded_size and tuple(recorded_size) != tuple(input_size):
+        raise ValueError(
+            f"Refusing to score {weights_path} at input size "
+            f"{input_size[0]}x{input_size[1]}: it was trained at "
+            f"{recorded_size[0]}x{recorded_size[1]}. Set "
+            f"SIGVER_SPATIAL_INPUT_SIZE={recorded_size[0]}x{recorded_size[1]} to score it.")
+    recorded_gap = record.get("max_gap_ms")
+    if recorded_gap and max_gap_ms is not None and float(recorded_gap) != float(max_gap_ms):
+        raise ValueError(
+            f"Refusing to score {weights_path} with MAX_GAP_MS={max_gap_ms:g}: it was "
+            f"trained with {recorded_gap:g}. Set SIGVER_MAX_GAP_MS={recorded_gap:g} to score it.")
+    scoring = set(test_ids)
+    leaked = sorted(scoring & set(record["train"]))
+    if leaked:
+        raise ValueError(
+            f"Refusing to score {len(leaked)} writers the checkpoint trained on "
+            f"(e.g. {leaked[:5]}). {weights_path} was trained with split seed "
+            f"{record['split_seed']} on {record['data_dirs']}"
+            + (f" with {len(record['holdout_writers'])} pinned holdout writers" if record["holdout_writers"] else "")
+            + "; the partition recomputed here does not match it. Pass the same "
+            "--data-dir, --split-seed and --holdout-writers as training, or use "
+            "--writers with writers held out by every model compared.")
+    if require_same_test and scoring != set(record["test"]):
+        raise ValueError(
+            f"The recomputed held-out set ({len(scoring)} writers) is not the one "
+            f"{weights_path} was trained against ({len(record['test'])} writers, "
+            f"{len(scoring - set(record['test']))} differ). No writer leaked, but the "
+            "number would describe a different partition than the documented one. "
+            f"Training used split seed {record['split_seed']} on {record['data_dirs']}.")
+    return record
 
 
 def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
@@ -427,7 +526,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
 
-    ids = list(writer_ids)
+    ids = sorted(writer_ids)  # same order-independence guarantee as writer_independent_split
     unknown = sorted(set(pinned) - set(ids))
     if unknown:
         raise ValueError(
@@ -662,11 +761,16 @@ class SpatialSignatureDataset(Dataset):
         - label: float tensor (1.0 for genuine, 0.0 for forgery)
     """
 
-    def __init__(self, pairs, labels, transform=None, augment=False, seed=None):
+    def __init__(self, pairs, labels, transform=None, augment=False, seed=None,
+                 augment_params=None):
         self.pairs = pairs
         self.labels = labels
         self.transform = transform
         self.augment = augment
+        # Overrides for augment_image's ranges (max_rotation_deg, max_shear,
+        # max_scale, max_translate, stroke_prob). Held on the instance so they
+        # reach DataLoader workers, which re-import the module defaults.
+        self.augment_params = dict(augment_params or {})
         # Seeded so an augmented run reproduces from --seed. An unseeded
         # default_rng() draws OS entropy, which silently made augmented training
         # irreproducible even though every other RNG in the pipeline was seeded.
@@ -692,8 +796,8 @@ class SpatialSignatureDataset(Dataset):
             # Each side is warped independently. Warping a pair identically would
             # move both embeddings the same way and leave the distance between
             # them unchanged, which teaches the metric nothing.
-            img1 = augment_image(img1, self._rng)
-            img2 = augment_image(img2, self._rng)
+            img1 = augment_image(img1, self._rng, **self.augment_params)
+            img2 = augment_image(img2, self._rng, **self.augment_params)
 
         if self.transform:
             img1 = self.transform(img1)
