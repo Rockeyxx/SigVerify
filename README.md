@@ -311,7 +311,7 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 - **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion is not unconditionally better.** Late fusion helps when the two branches are of comparable strength, and *hurts* when one pulls ahead. Measured on writers neither branch trained on: fusion improves the single temporal model (3.96% → 3.62% in §15; 4.41% → 3.50% on the second paired corpus, SigComp2009 / NFI, §25) and degrades the six-seed ensemble (2.61% → 4.63%, losing 22 of 25 draws). For the pen-tablet tier the ensemble is served **unimodally**; fusion is used where the spatial branch is competitive. See `SUMMARY.md` Part 9 §15.
+- **Fusion is not unconditionally better.** Late fusion helps when the two branches are of comparable strength, and *hurts* when one pulls ahead. Measured on writers neither branch trained on: fusion improves the single temporal model (3.96% → 3.62% in §15; on the second paired corpus, SigComp2009 / NFI, 3.90% → 3.62% with the spatial weight shipped until 2026-09-26, and 3.90% → 4.09% with the current one, which is no gain, see §33) and degrades the six-seed ensemble (2.61% → 4.63%, losing 22 of 25 draws). For the pen-tablet tier the ensemble is served **unimodally**; fusion is used where the spatial branch is competitive. See `SUMMARY.md` Part 9 §15.
 - **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number.
 
 ---
@@ -335,7 +335,7 @@ Device support is architected in tiers based on hardware capability:
 
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **3.50% $\pm$ 0.70%** fused; 4.11% $\pm$ 1.03% pen alone |
+| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **4.09% $\pm$ 1.11%** fused on NFI, 3.09% $\pm$ 0.37% on SigComp2011; 4.11% $\pm$ 1.03% pen alone |
 | **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **7.46% $\pm$ 0.46%** |
 | **Tertiary**  | Mobile / Touchscreen     | MOBISIG               | Capacitive Finger Touch | $\le 20.0\%$ |        21.26%         |
 
@@ -356,7 +356,7 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 | Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   |
 | Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   |
 | Temporal     | SVC2004 Task 2      |   10    |  13.58% $\pm$ 2.21%   |   14.00%   |   1.504   |
-| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **3.50% $\pm$ 0.70%** | n/a ‡ | n/a ‡ |
+| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ |
 | Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.03% $\pm$ 0.55%   |   n/a ‡    |   n/a ‡   |
 
 ‡ Fused rows: shipped weights on both modalities of the same signing events, the 14 NFI writers clean of every training corpus, 10 enrolment draws; pooled EER and Cohen's d were not computed for this run. Protocol and the SigComp2011 paired result in `SUMMARY.md` Part 9 §25.
