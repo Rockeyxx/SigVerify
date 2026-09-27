@@ -17,11 +17,12 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (
-    MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
     SIGCOMP2011_DIR,
+    SPATIAL_WEIGHTS_PATH,
     SVC2004_TASK2_DIR,
     TEMPORAL_CHANNELS,
+    TEMPORAL_WEIGHTS_PATH,
     TEMPORAL_SPLIT_RATIOS,
 )
 from scripts.evaluate import compute_eer, compute_far_frr
@@ -147,9 +148,9 @@ def evaluate_paired_corpus(
 def main():
     parser = argparse.ArgumentParser(description="Calibrate multimodal fusion parameters")
     parser.add_argument("--spatial-weights",
-                        default=os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+                        default=SPATIAL_WEIGHTS_PATH)
     parser.add_argument("--temporal-weights",
-                        default=os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth"))
+                        default=TEMPORAL_WEIGHTS_PATH)
     parser.add_argument("--data-dirs", nargs="+",
                         default=[SVC2004_TASK2_DIR, SIGCOMP2011_DIR])
     parser.add_argument("--seed", type=int, default=42)

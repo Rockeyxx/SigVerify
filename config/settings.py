@@ -14,6 +14,10 @@ import os
 # ─── Paths ────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "models", "weights")
+# The shipped weights (GitHub Releases), each with a <name>.split.json record
+# of the corpora and writer partition it was trained on.
+SPATIAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
+TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 
 # Root data directories. `data/` is gitignored — local download is required; no datasets are checked into git.
@@ -47,6 +51,14 @@ SIGCOMP2009_DIR = os.path.join(DATA_DIR, "sigcomp2009_dl", "extracted")
 # DeepSignDB (BiDA Lab, UAM): Aggregates MCYT, BiosecurID, BiosecureDS2, and e-BioSign. The stylus partition supplies 498 Development signers (compared to 124 in baseline sets).
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
+
+# The corpora each branch trains on, which are the ones the shipped weights
+# trained on. Scoring a shipped checkpoint takes its corpora and partition from
+# its split record instead, and tests/test_leakage.py fails when the two
+# disagree. Not src/data/parsers.SPATIAL_DATASETS: that lists every image corpus
+# the parsers can read, including the evaluation-only sigcomp2011_offline.
+SPATIAL_TRAIN_DIRS = (CEDAR_DIR, BHSIG260_DIR, UTSIG_DIR)
+TEMPORAL_TRAIN_DIRS = (SVC2004_TASK2_DIR, SIGCOMP2011_DIR)
 
 # ─── DataLoader ───────────────────────────────────────────────────────
 NUM_WORKERS = 4                         # Set to 0 if worker process hanging occurs on Windows
@@ -173,6 +185,9 @@ SPATIAL_FC_HIDDEN = 0
 
 # Gradient checkpointing segments to reduce peak memory usage. Set 0 to disable. Wide trunk uses 4 segments to fit mini-batches in 4 GB VRAM.
 SPATIAL_GRAD_CHECKPOINT = 4
+
+# Seed for the writer split, pair sampling and training. Every published number uses 42.
+SEED = 42
 
 # Writer-independent partition ratios (train, val, test).
 SPATIAL_SPLIT_RATIOS = (0.7, 0.15, 0.15)

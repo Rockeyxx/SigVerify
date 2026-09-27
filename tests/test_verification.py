@@ -528,8 +528,8 @@ class TestSpatialArrayInputsAreCanonicalized:
     """
 
     def _model(self):
-        from config.settings import MODEL_WEIGHTS_DIR
-        return load_model("spatial", os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+        from config.settings import SPATIAL_WEIGHTS_PATH
+        return load_model("spatial", SPATIAL_WEIGHTS_PATH)
 
     def test_raw_scan_array_matches_the_same_scan_on_disk(self):
         """

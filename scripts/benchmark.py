@@ -28,6 +28,7 @@ from torch.utils.data import Subset, DataLoader
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    SEED,
     TEMPORAL_CHANNELS,
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
@@ -158,7 +159,7 @@ def parse_args(argv=None):
                         help="Dataset directories — must match the training run")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=SEED,
                         help="Must match the training seed to reproduce the same writer "
                              "split and pairing; also seeds --limit-pairs subsampling")
     parser.add_argument("--margin", type=float, default=CONTRASTIVE_MARGIN,

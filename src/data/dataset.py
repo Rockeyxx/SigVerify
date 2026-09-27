@@ -46,7 +46,6 @@ from config.settings import (
     MIN_LAPLACIAN_VARIANCE,
     PAIRS_GENUINE_PER_WRITER,
     PAIRS_IMPOSTOR_PER_WRITER,
-    RANDOM_IMPOSTOR_RATIO,
     TEMPORAL_CHANNEL_WIDTHS,
     TEMPORAL_INPUT_FEATURES,
     SPATIAL_AUG_MAX_ROTATION_DEG, SPATIAL_AUG_MAX_SHEAR, SPATIAL_AUG_MAX_SCALE,
@@ -552,7 +551,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
                            num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
-                           random_impostor_ratio=RANDOM_IMPOSTOR_RATIO):
+                           random_impostor_ratio=0.0):
     """
     Generate pairs under the **skilled-forgery** scenario (AGENTS.md eval protocol).
 
@@ -564,7 +563,11 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
     and nothing here changes it**: leave `random_impostor_ratio` at 0 for every
     evaluation loader.
 
-    `random_impostor_ratio` exists for *training* only. Supervising exclusively
+    `random_impostor_ratio` exists for *training* only, and training passes
+    RANDOM_IMPOSTOR_RATIO explicitly (scripts/train.py::build_loader). The
+    default stays 0: it was once the training constant itself, so when that
+    moved to 0.5 on 2026-08-09 every caller relying on the default, evaluation
+    included, silently got 50% random-impostor negatives. Supervising exclusively
     on same-writer forgeries never tells the encoder that two different people
     should be far apart, and measurement showed it does not infer that on its
     own: on CEDAR the shipped model placed a stranger's genuine signature at mean

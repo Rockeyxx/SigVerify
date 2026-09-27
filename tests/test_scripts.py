@@ -15,6 +15,7 @@ import pytest
 from scripts.train import main as train_main
 from scripts.evaluate import (
     alpha_grid_search,
+    build_eval_loader,
     compute_eer,
     compute_far_frr,
     main as evaluate_main,
@@ -285,6 +286,22 @@ class TestEvaluationMetrics:
         plot_det(genuine, impostor, "DET", det)
         assert os.path.getsize(roc) > 0
         assert os.path.getsize(det) > 0
+
+    def test_eval_loader_negatives_are_same_writer_forgeries(self):
+        """
+        benchmark.py without --enroll scores these pairs. Its negatives must be
+        the same writer's skilled forgeries: from 2026-08-09 half of them were
+        other writers' genuines, an easier attack that flatters the EER.
+        """
+        writers = {f"w{w}": {"genuine": [f"w{w}_g{i}" for i in range(6)],
+                             "forged": [f"w{w}_f{i}" for i in range(6)]}
+                   for w in range(4)}
+        loader = build_eval_loader(writers, sorted(writers), "spatial",
+                                   batch_size=4, num_workers=0, seed=42)
+        dataset = loader.dataset
+        cross = [(s1, s2) for (s1, s2), y in zip(dataset.pairs, dataset.labels)
+                 if y == 0 and s1.split("_")[0] != s2.split("_")[0]]
+        assert cross == [], f"{len(cross)} cross-writer negatives, e.g. {cross[0]}"
 
 
 class TestEvaluateMain:

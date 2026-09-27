@@ -27,6 +27,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    SEED,
     TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS, TEMPORAL_INPUT_FEATURES,
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     CONTRASTIVE_MARGIN, LEARNING_RATE, BATCH_SIZE,
@@ -142,7 +143,7 @@ def parse_args(argv=None):
                         help="Early-stopping patience. Small datasets give a noisy "
                              "validation curve, so a low value can halt a run whose "
                              "training loss is still descending")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=SEED)
 
     # Spatial architecture overrides. These exist as flags rather than config
     # edits so an ablation series runs back-to-back from one shell, and so the

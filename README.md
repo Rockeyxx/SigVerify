@@ -379,7 +379,7 @@ Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_T
 | Modality     | True Reject | False Accept | True Accept | False Reject |    FAR     |    FRR     |
 | ------------ | ----------: | -----------: | ----------: | -----------: | :--------: | :--------: |
 | **Spatial**  |       1,360 |          110 |       1,181 |          108 | **7.48%**  | **8.38%**  |
-| **Temporal** |         564 |           63 |         540 |           32 | **10.05%** | **5.59%**  |
+| **Temporal** |         556 |           71 |         548 |           24 | **11.32%** | **4.20%**  |
 
 _Error Complementarity:_ Spatial and temporal modalities exhibit complementary error distributions ($\phi < 0$). Spatial models tend toward false rejections (rejecting genuine variations), while temporal models tend toward false acceptances. Multimodal late fusion effectively balances both operating regimes.
 

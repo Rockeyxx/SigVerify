@@ -280,6 +280,20 @@ class TestGenerateSkilledPairs:
             assert writer1 == writer2, f"cross-writer impostor leaked in: {s1} vs {s2}"
             assert kind1.startswith("g") and kind2.startswith("f")
 
+    def test_default_negatives_are_same_writer_forgeries(self):
+        """
+        A caller that passes no ratio gets skilled forgeries only. The default
+        was bound to the training constant RANDOM_IMPOSTOR_RATIO, so when
+        training moved to 0.5 on 2026-08-09 every caller relying on it (the
+        notebook's "Skilled Forgery" preview, benchmark.py without --enroll)
+        silently got 50% cross-writer negatives. Every other test here passes
+        the ratio explicitly, which is why none of them noticed.
+        """
+        pairs, labels = generate_skilled_pairs(self._writers())
+        cross = [(s1, s2) for (s1, s2), y in zip(pairs, labels)
+                 if y == 0 and s1.split("_")[0] != s2.split("_")[0]]
+        assert cross == [], f"{len(cross)} cross-writer negatives, e.g. {cross[0]}"
+
     def test_genuine_pairs_are_same_writer_genuines(self):
         """Every label-1 pair must be two genuine samples from one writer."""
         pairs, labels = generate_skilled_pairs(self._writers(), random_impostor_ratio=0.0)

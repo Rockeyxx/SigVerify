@@ -23,8 +23,9 @@ import os
 import pytest
 
 from config.settings import (
-    BHSIG260_DIR, CEDAR_DIR, SIGCOMP2009_DIR, SIGCOMP2011_DIR, SIGCOMP2011_OFFLINE_DIR,
-    SPATIAL_SPLIT_RATIOS, SVC2004_TASK2_DIR, TEMPORAL_SPLIT_RATIOS, UTSIG_DIR,
+    PROJECT_ROOT, SIGCOMP2009_DIR, SIGCOMP2011_OFFLINE_DIR, SPATIAL_SPLIT_RATIOS,
+    SPATIAL_TRAIN_DIRS, SPATIAL_WEIGHTS_PATH, TEMPORAL_SPLIT_RATIOS, TEMPORAL_TRAIN_DIRS,
+    TEMPORAL_WEIGHTS_PATH,
 )
 from config.settings import spatial_input_size_from_env
 from src.data.parsers import max_gap_ms_from_env
@@ -250,8 +251,27 @@ class TestInputSizeOverride:
 
 # ─── The corpora on disk (skipped when not downloaded) ───────────────────
 
-_IMAGE_CORPORA = (CEDAR_DIR, BHSIG260_DIR, UTSIG_DIR)
-_PEN_CORPORA = (SVC2004_TASK2_DIR, SIGCOMP2011_DIR)
+_IMAGE_CORPORA = SPATIAL_TRAIN_DIRS
+_PEN_CORPORA = TEMPORAL_TRAIN_DIRS
+
+
+@pytest.mark.parametrize("weights, train_dirs", [(SPATIAL_WEIGHTS_PATH, SPATIAL_TRAIN_DIRS),
+                                                 (TEMPORAL_WEIGHTS_PATH, TEMPORAL_TRAIN_DIRS)])
+def test_settings_training_corpora_match_the_shipped_split_record(weights, train_dirs):
+    """
+    The settings name the corpora a run trains on; the record next to the
+    shipped weights names the ones it did. Anything that builds a split from
+    settings while they differ scores a partition the checkpoint never trained
+    under. The notebook did exactly that with the parser registry's 4-corpus
+    list: 5 of its 68 "held-out" spatial writers were training writers
+    (2026-09-27). Update the settings when a weight trained on other corpora
+    ships.
+    """
+    record = load_split_record(weights)
+    if record is None:
+        pytest.skip(f"no split record next to {weights}")
+    recorded = {os.path.normpath(os.path.join(PROJECT_ROOT, d)) for d in record["data_dirs"]}
+    assert recorded == {os.path.normpath(d) for d in train_dirs}
 
 
 @pytest.mark.skipif(not _have(*_IMAGE_CORPORA), reason="CEDAR, BHSig260 and UTSig not all downloaded")
