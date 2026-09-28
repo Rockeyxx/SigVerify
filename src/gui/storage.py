@@ -8,6 +8,10 @@ allow sharing client access between employees — not implemented yet.
 
 All record access uses .get() with safe fallbacks so older/partial
 data files never crash the app.
+
+Path safety: files are addressed by a fixed logical name ("employees",
+"enrollments", "log"), never by a caller-supplied path, so no external
+input can ever reach open().
 """
 
 import os
@@ -26,36 +30,36 @@ def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
-def _safe_resolve(filepath):
-    """Reject symlinks and any path that escapes DATA_DIR."""
-    real_data_dir = os.path.realpath(DATA_DIR)
-    real_path = os.path.realpath(filepath)
-
-    if os.path.islink(filepath):
-        raise ValueError(f"Refusing to follow symlink: {filepath}")
-
-    if os.path.commonpath([real_data_dir, real_path]) != real_data_dir:
-        raise ValueError(f"Path escapes data directory: {filepath}")
-
-    return real_path
-
-
-def _load_json(filepath, default):
+def _load_json(which, default):
     _ensure_data_dir()
-    safe_path = _safe_resolve(filepath)
-    if not os.path.exists(safe_path):
+    if which == "employees":
+        path = EMPLOYEES_FILE
+    elif which == "enrollments":
+        path = ENROLLMENTS_FILE
+    elif which == "log":
+        path = LOG_FILE
+    else:
+        raise ValueError(f"Unknown data file: {which}")
+    if not os.path.exists(path):
         return default
     try:
-        with open(safe_path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return default
 
 
-def _save_json(filepath, data):
+def _save_json(which, data):
     _ensure_data_dir()
-    safe_path = _safe_resolve(filepath)
-    with open(safe_path, "w", encoding="utf-8") as f:
+    if which == "employees":
+        path = EMPLOYEES_FILE
+    elif which == "enrollments":
+        path = ENROLLMENTS_FILE
+    elif which == "log":
+        path = LOG_FILE
+    else:
+        raise ValueError(f"Unknown data file: {which}")
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
@@ -68,7 +72,7 @@ def _norm(client_id: str) -> str:
 # ============================================================
 
 def load_employees() -> dict:
-    return _load_json(EMPLOYEES_FILE, {"employees": []})
+    return _load_json("employees", {"employees": []})
 
 
 def find_employee(username: str):
@@ -89,7 +93,7 @@ def register_employee(full_name: str, username: str, password: str) -> tuple:
         "username": username,
         "password": password,  # NOTE: plain text mock only
     })
-    _save_json(EMPLOYEES_FILE, data)
+    _save_json("employees", data)
     return True, "Account created successfully"
 
 
@@ -116,7 +120,7 @@ def update_employee_profile(old_username: str, new_full_name: str,
             emp["username"] = new_username
             if new_password:
                 emp["password"] = new_password
-            _save_json(EMPLOYEES_FILE, data)
+            _save_json("employees", data)
             return True, "Profile updated successfully", emp
 
     return False, "Employee not found", None
@@ -127,7 +131,7 @@ def update_employee_profile(old_username: str, new_full_name: str,
 # ============================================================
 
 def load_enrollments() -> dict:
-    return _load_json(ENROLLMENTS_FILE, {"clients": {}})
+    return _load_json("enrollments", {"clients": {}})
 
 
 def client_exists(client_id: str, employee_username: str = None) -> bool:
@@ -177,7 +181,7 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
         "enrolled_at": existing.get("enrolled_at", datetime.now().isoformat(timespec="seconds")),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    _save_json(ENROLLMENTS_FILE, data)
+    _save_json("enrollments", data)
 
 
 def delete_client(client_id: str):
@@ -185,7 +189,7 @@ def delete_client(client_id: str):
     key = _norm(client_id)
     if key in data["clients"]:
         del data["clients"][key]
-        _save_json(ENROLLMENTS_FILE, data)
+        _save_json("enrollments", data)
 
 
 def count_clients_enrolled_this_month(employee_username: str = None) -> int:
@@ -207,7 +211,7 @@ def count_clients_enrolled_this_month(employee_username: str = None) -> int:
 
 def append_verification_log(client_id: str, decision: str, confidence: float,
                               modality_state: str, employee_username: str):
-    data = _load_json(LOG_FILE, {"events": []})
+    data = _load_json("log", {"events": []})
     data["events"].append({
         "client_key": _norm(client_id),
         "client_display_name": client_id.strip(),
@@ -217,11 +221,11 @@ def append_verification_log(client_id: str, decision: str, confidence: float,
         "employee": employee_username,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     })
-    _save_json(LOG_FILE, data)
+    _save_json("log", data)
 
 
 def get_verification_log(employee_username: str = None) -> list:
-    data = _load_json(LOG_FILE, {"events": []})
+    data = _load_json("log", {"events": []})
     events = data.get("events", [])
     if employee_username is not None:
         events = [e for e in events if e.get("employee", "").lower() == employee_username.lower()]
