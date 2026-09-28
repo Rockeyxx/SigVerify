@@ -34,6 +34,9 @@ This document covers installation, quickstart, project structure, evaluation ben
   - [Evaluation Figures & Benchmark Metrics](#evaluation-figures--benchmark-metrics)
   - [Operating Point & Confusion Matrices](#operating-point--confusion-matrices)
   - [ROC and DET Curves](#roc-and-det-curves)
+- [Database & Capture Layer](#database--capture-layer)
+  - [Database](#database)
+  - [Signature Capture](#signature-capture)  
 - [Standards & Compliance](#standards--compliance)
 - [Hardware](#hardware)
 - [References](#references)
@@ -393,6 +396,40 @@ _Error Complementarity:_ Spatial and temporal modalities exhibit complementary e
 | **Temporal** | ![ROC temporal](results/roc_temporal.png) | ![DET temporal](results/det_temporal.png) |
 
 ---
+## Database & Capture Layer 
+
+### Database
+
+Encrypted embedding storage tested end-to-end — AES-256-GCM encryption,
+decryption, and audit logging all verified successfully via
+`backend/database.py`.
+
+![Database test result](assets/screenshots/Database_test_success.png)
+![Database encryption](assets/screenshots/Database_encryption.png)
+
+
+Test confirms: encrypted spatial and temporal embeddings match their
+decrypted values, and verification events are correctly recorded in
+the audit log.
+
+### Signature Capture
+
+Full pen-down to pen-up signature capture implemented via
+`backend/tablet.py`, using PyQt5 Tablet Events on the XPPen Deco 640.
+
+![Screen before signature](assets/screenshots/Screen_before_sign.png)
+![Screen After signature](assets/screenshots/Screen_after_sign.png)
+![Tablet capture result](assets/screenshots/Tablet_capture_result.png)
+
+
+The captured trajectory passes both quality gates (pre- and
+post-normalization) and produces the final `[L, 4]` array —
+X, Y, Pressure, dt — matching the capture contract defined in
+`AGENTS.md`.
+
+**Status:** Windows path complete and tested. Linux (Arch) path is
+pending. Both files currently live under `backend/` and are pending
+migration to their official locations (`src/database/`, `src/capture/`).
 
 ## Standards & Compliance
 
