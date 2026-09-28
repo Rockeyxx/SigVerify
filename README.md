@@ -403,8 +403,7 @@ _Error Complementarity:_ Spatial and temporal modalities exhibit complementary e
 Encrypted embedding storage tested end-to-end — AES-256-GCM encryption,
 decryption, and audit logging all verified successfully via
 `backend/database.py`.
-
-![Database test result](assets/screenshots/Database_test_success.png)
+<img src="assets/screenshots/Database_test_success.png" width="500" alt="Database test result">
 ![Database encryption](assets/screenshots/Database_encryption.png)
 
 
