@@ -26,12 +26,27 @@ def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
+def _safe_resolve(filepath):
+    """Reject symlinks and any path that escapes DATA_DIR."""
+    real_data_dir = os.path.realpath(DATA_DIR)
+    real_path = os.path.realpath(filepath)
+
+    if os.path.islink(filepath):
+        raise ValueError(f"Refusing to follow symlink: {filepath}")
+
+    if os.path.commonpath([real_data_dir, real_path]) != real_data_dir:
+        raise ValueError(f"Path escapes data directory: {filepath}")
+
+    return real_path
+
+
 def _load_json(filepath, default):
     _ensure_data_dir()
-    if not os.path.exists(filepath):
+    safe_path = _safe_resolve(filepath)
+    if not os.path.exists(safe_path):
         return default
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(safe_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return default
@@ -39,7 +54,8 @@ def _load_json(filepath, default):
 
 def _save_json(filepath, data):
     _ensure_data_dir()
-    with open(filepath, "w", encoding="utf-8") as f:
+    safe_path = _safe_resolve(filepath)
+    with open(safe_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
