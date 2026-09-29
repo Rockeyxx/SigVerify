@@ -22,33 +22,6 @@ class ProgressRing(QWidget):
         self.percentage = max(0, min(100, value))
         self.update()  # يطلب إعادة الرسم
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        rect = QRectF(10, 10, self.width() - 20, self.height() - 20)
-
-        # الحلقة الخلفية (رمادية خفيفة)
-        bg_pen = QPen(QColor(BORDER))
-        bg_pen.setWidth(10)
-        bg_pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(bg_pen)
-        painter.drawArc(rect, 0, 360 * 16)
-
-        # الحلقة الملوّنة (النسبة الفعلية)
-        fg_pen = QPen(QColor(ACCENT))
-        fg_pen.setWidth(10)
-        fg_pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(fg_pen)
-        span = int(360 * (self.percentage / 100) * 16)
-        painter.drawArc(rect, 90 * 16, -span)
-
-        # النص بالمنتصف
-        painter.setPen(QColor(TEXT_LIGHT))
-        painter.setFont(QFont("Segoe UI", 18, QFont.Bold))
-        painter.drawText(rect, Qt.AlignCenter, f"{int(self.percentage)}%")
-
-
 class StatTile(QFrame):
     """بلاطة إحصائية صغيرة (Bento tile)"""
     def __init__(self, title: str, icon_text: str = ""):
