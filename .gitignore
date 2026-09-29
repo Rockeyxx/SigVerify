@@ -80,3 +80,5 @@ skylos-report.json
 src/gui/data/
 src/gui/ui/
 src/gui/test_verification_ui.py
+cropped_test/
+docs/screenshots/desktop.ini
