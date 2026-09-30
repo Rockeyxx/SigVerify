@@ -180,7 +180,7 @@ def load_corpus(branch, corpus="default"):
                                "clean_writers.txt")) as handle:
             allowed = {line.strip() for line in handle if line.strip()}
         writers = parse_nfi2009(
-            os.path.join(base, "data", "sigcomp2009_dl", "extracted"), allowed)
+            SIGCOMP2009_DIR, allowed)
     elif corpus == "sign_data":
         listing = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "data", "sign_data_clean", "clean_writers.txt")

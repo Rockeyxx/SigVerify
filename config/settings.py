@@ -39,6 +39,11 @@ SIGCOMP2011_DIR = os.path.join(DATA_DIR, "sigcomp2011")
 # no constant existed, which only resolved when cwd happened to be the repo root.
 SIGCOMP2011_OFFLINE_DIR = os.path.join(DATA_DIR, "sigcomp2011_offline")
 
+# SigComp2009 / NFI: paired online (.hwr) and offline (.png) of the same signing
+# events, used only as an evaluation corpus (fusion replication, cross-corpus
+# spatial checks). Not a training corpus for any shipped weight.
+SIGCOMP2009_DIR = os.path.join(DATA_DIR, "sigcomp2009_dl", "extracted")
+
 # DeepSignDB (BiDA Lab, UAM): Aggregates MCYT, BiosecurID, BiosecureDS2, and e-BioSign. The stylus partition supplies 498 Development signers (compared to 124 in baseline sets).
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
@@ -48,7 +53,27 @@ NUM_WORKERS = 4                         # Set to 0 if worker process hanging occ
 PIN_MEMORY = False                      # CPU-bound execution — memory pinning provides no benefit
 
 # ─── Spatial Branch (Offline — Siamese CNN) ───────────────────────────
-SPATIAL_INPUT_SIZE = (220, 155)          # cv2 (width, height) → [1, 1, 155, 220] tensor
+def spatial_input_size_from_env(value, default):
+    """
+    Parse `SIGVER_SPATIAL_INPUT_SIZE=WxH`, the one override for the image size.
+
+    It exists for the input-size sweep only: the size has to reach DataLoader
+    workers (which re-import this module under forkserver) and the benchmark
+    alike, and the environment is the only channel both inherit. A checkpoint
+    trained under it records the size in its split record, and benchmark.py
+    refuses to score it at any other size. A malformed value raises rather than
+    falling back, so a typo cannot silently train at the default.
+    """
+    if value is None or value == "":
+        return default
+    parts = value.lower().split("x")
+    if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+        raise ValueError(f"SIGVER_SPATIAL_INPUT_SIZE must be WxH in pixels, e.g. 220x155; got {value!r}")
+    return (int(parts[0]), int(parts[1]))
+
+
+SPATIAL_INPUT_SIZE = spatial_input_size_from_env(
+    os.environ.get("SIGVER_SPATIAL_INPUT_SIZE"), (220, 155))   # cv2 (width, height) → [1, 1, 155, 220] tensor
 SPATIAL_EMBEDDING_DIM = 512
 
 # Image spatial mapping behavior.
@@ -69,7 +94,9 @@ MIN_LAPLACIAN_VARIANCE = 50.0           # Minimum Laplacian sharpness threshold
 # SPATIAL_INPUT_SIZE the moment either moved, which is the same failure a
 # hardcoded channel count already caused on the temporal side.
 RENDER_MARGIN_RATIO = 0.12              # Fraction of each edge left blank, so strokes never clip
-RENDER_BASE_THICKNESS = 2.0             # Stroke width in pixels at full pressure
+RENDER_BASE_THICKNESS = 3.0             # Stroke width in pixels at full pressure; 3 px measured
+                                        # 4.8 points better than 2 px on 20 SigComp2011 writers
+                                        # (rendered-only EER, 10/10 draws), 0.6 better on NFI
 RENDER_MIN_THICKNESS = 1                # Thinnest drawable stroke; cv2.line needs >= 1
 # A sample is pen-up when pressure vanishes OR the clock jumps. SigComp2011
 # records pen-up travel as force = 0, but SVC2004 and DeepSignDB mark a lift by
@@ -175,7 +202,7 @@ SPATIAL_AUG_MAX_ROTATION_DEG = 6.0
 SPATIAL_AUG_MAX_SHEAR = 0.08
 SPATIAL_AUG_MAX_SCALE = 0.08
 SPATIAL_AUG_MAX_TRANSLATE = 0.04
-SPATIAL_AUG_STROKE_PROB = 0.3
+SPATIAL_AUG_STROKE_PROB = 0.0           # Measured 2026-09-26: stroke dilate/erode jitter costs 1.23 pooled EER points (report L9)
 TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
@@ -203,19 +230,26 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# ALPHA_DEFAULT = 0.5 is equal branch weighting per AGENTS.md. It stays
-# provisional because alpha has not been re-derived, NOT because paired data is
-# missing: SUMMARY.md Part 7 retracts that premise — SigComp2011's training set
-# is already fully paired across modalities.
-ALPHA_DEFAULT = 0.5                     # PROVISIONAL — equal branch weighting
+# ALPHA_DEFAULT = 0.5 was measured, not assumed. On paired SigComp2011 writers
+# (25 writer-disjoint splits, alpha fitted on 10 writers and scored on the other
+# 10) the fixed 0.5 scored 13.85% against 14.57% for a per-split grid search;
+# the fitted value was 0.548 +/- 0.122, statistically the default. Cascade, AND,
+# likelihood-ratio and band rules all measured worse than the plain average
+# (SUMMARY.md Part 9, sections 7 and 25). Do not grid-search alpha on small
+# calibration sets; it overfits.
+ALPHA_DEFAULT = 0.5                     # Measured: equal weighting is the optimum
 ALPHA_GRID_STEP = 0.05
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 # See AGENTS.md and SUMMARY.md.
-SPATIAL_DECISION_THRESHOLD = 0.7711     # Calibrated spatial branch threshold (EER on validation)
+SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-DECISION_THRESHOLD = 0.8196             # Calibrated threshold tau for late-fused model evaluation
+# Fused tau: EER point of 0.5*s + 0.5*t on the 24 paired writers held out by
+# both branches (10 SigComp2011 + 14 SigComp2009/NFI), K=5, 10 draws, measured
+# 2026-09-18 (SUMMARY.md Part 9 section 28). The previous 0.8196 was the midpoint
+# of the two branch thresholds and refused 15% of genuine users on those writers.
+DECISION_THRESHOLD = 0.7751             # Measured fused threshold (EER point on clean paired writers)
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
 # These were documented in AGENTS.md as hard constraints but existed nowhere in

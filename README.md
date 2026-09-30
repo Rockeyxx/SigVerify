@@ -35,6 +35,9 @@ This document covers installation, quickstart, project structure, evaluation ben
   - [Evaluation Figures & Benchmark Metrics](#evaluation-figures--benchmark-metrics)
   - [Operating Point & Confusion Matrices](#operating-point--confusion-matrices)
   - [ROC and DET Curves](#roc-and-det-curves)
+- [Database & Capture Layer](#database--capture-layer)
+  - [Database](#database)
+  - [Signature Capture](#signature-capture)  
 - [Standards & Compliance](#standards--compliance)
 - [Hardware](#hardware)
 - [References](#references)
@@ -268,9 +271,9 @@ Verification evaluates a probe against an enrolled gallery using nearest-referen
 | References per user ($K$) | **5**                                                                | `NUM_ENROLLMENT_REFERENCES = 5`                             |
 | Matching Rule             | Nearest Reference: $d_{min} = \min_{i} \|e_{probe} - e_{ref, i}\|_2$ | `_nearest_reference_score`                                  |
 | Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
-| Decision Threshold        | Spatial $\tau = 0.7711$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
+| Decision Threshold        | Spatial $\tau = 0.7637$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
 
-Increasing enrolled references improves verification accuracy without retraining. The $K = 10$ figures cited in an earlier pass (BHSig260 Hindi 4.05% EER, SigComp2011 Dutch 4.93% EER) predate the current $K = 5$ headline above (Hindi 1.92%, Dutch 4.11%) and are now worse than it; they are stale and a re-measurement via `benchmark.py --enroll 10` is owed before citing a $K = 10$ number again.
+Increasing enrolled references improves accuracy without retraining, with diminishing returns. Swept with `benchmark.py --enroll K`, K = 1 to 15, 10 draws each, on the spatial weight shipped before 2026-09-26 and the current temporal one: spatial pooled EER 11.71% at $K=1$, 8.72% at $K=5$, 7.86% at $K=10$, 7.82% at $K=15$; temporal 13.72%, 7.81%, 6.99%, 6.31%. Both curves are flat past $K \approx 10$ (Hindi 4.65%, SigComp2011 Dutch 3.53% at $K=10$). $K=5$ ships; see SUMMARY.md for why.
 
 ---
 
@@ -349,12 +352,12 @@ The table below benchmarks this project against published state-of-the-art resul
 | ----------------------- | :-----------------: | -------------------------------------------------------- | :----: | :--------------------------: |
 | **CEDAR**               |    **0.00%** EER    | Writer-Independent Siamese CNN (50 train / 5 test)       |  [1]   |    **0.00% $\pm$ 0.00%**     |
 | **CEDAR**               |      4.63% EER      | Writer-Dependent SVM on CNN features ($K=12$)            |  [2]   |    **0.00% $\pm$ 0.00%**     |
-| **BHSig260 Bengali**    |   **13.89%** EER    | Writer-Independent Siamese CNN (50 train / 50 test)      |  [1]   |    **1.48% $\pm$ 0.36%**     |
-| **BHSig260 Hindi**      |     15.36% EER      | Writer-Independent Siamese CNN (100 train / 60 test)     |  [1]   |    **1.92% $\pm$ 0.29%**     |
-| **UTSig (Persian)**     |    **9.80%** EER    | Writer-Dependent SVM, Persian transfer learning ($K=10$) |  [3]   |      30.77% $\pm$ 1.65%      |
-| **UTSig (Persian)**     |     11.16% EER      | Writer-Dependent SVM, Persian transfer learning ($K=5$)  |  [3]   |      30.77% $\pm$ 1.65%      |
-| **UTSig (Persian)**     |     17.45% EER      | Writer-Dependent DMML on HOG features ($K=12$)           |  [4]   |      30.77% $\pm$ 1.65%      |
-| **UTSig (Persian)**     |     29.71% EER      | Writer-Dependent SVM on geometric features ($K=12$)      |  [5]   |      30.77% $\pm$ 1.65%      |
+| **BHSig260 Bengali**    |   **13.89%** EER    | Writer-Independent Siamese CNN (50 train / 50 test)      |  [1]   |    **6.82% $\pm$ 1.10%**     |
+| **BHSig260 Hindi**      |     15.36% EER      | Writer-Independent Siamese CNN (100 train / 60 test)     |  [1]   |    **3.47% $\pm$ 0.90%**     |
+| **UTSig (Persian)**     |    **9.80%** EER    | Writer-Dependent SVM, Persian transfer learning ($K=10$) |  [3]   |      26.34% $\pm$ 2.17%      |
+| **UTSig (Persian)**     |     11.16% EER      | Writer-Dependent SVM, Persian transfer learning ($K=5$)  |  [3]   |      26.34% $\pm$ 2.17%      |
+| **UTSig (Persian)**     |     17.45% EER      | Writer-Dependent DMML on HOG features ($K=12$)           |  [4]   |      26.34% $\pm$ 2.17%      |
+| **UTSig (Persian)**     |     29.71% EER      | Writer-Dependent SVM on geometric features ($K=12$)      |  [5]   |      26.34% $\pm$ 2.17%      |
 | **SVC2004 Task 2**      |    **2.89%** EER    | Competition winner, user-specific thresholds ($K=5$)     |  [6]   |      13.58% $\pm$ 2.21%      |
 | **SVC2004 Task 2**      |     77.00% Acc      | Writer-Independent Siamese CNN (35 train / 5 test)       |  [7]   |      13.58% $\pm$ 2.21%      |
 | **SigComp2011 Dutch**   |    _Competition_    | Multi-system reference benchmark                         |  [8]   |    **4.11% $\pm$ 1.03%**     |
@@ -366,10 +369,10 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 
 #### Analysis of Protocol Differences & Accuracy Gaps
 
-- **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 30.77% EER.
+- **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion is not unconditionally better.** Late fusion helps when the two branches are of comparable strength, and *hurts* when one pulls ahead. Measured on writers neither branch trained on: fusion improves the single temporal model (3.96% → 3.62% in §15; 4.41% → 3.50% on the second paired corpus, SigComp2009 / NFI, §25) and degrades the six-seed ensemble (2.61% → 4.63%, losing 22 of 25 draws). For the pen-tablet tier the ensemble is served **unimodally**; fusion is used where the spatial branch is competitive. See `SUMMARY.md` Part 9 §15.
+- **Fusion is not unconditionally better.** Late fusion helps when the two branches are of comparable strength, and *hurts* when one pulls ahead. Measured on writers neither branch trained on: fusion improves the single temporal model (3.96% → 3.62% in §15; on the second paired corpus, SigComp2009 / NFI, 3.90% → 3.62% with the spatial weight shipped until 2026-09-26, and 3.90% → 4.09% with the current one, which is no gain, see §33) and degrades the six-seed ensemble (2.61% → 4.63%, losing 22 of 25 draws). For the pen-tablet tier the ensemble is served **unimodally**; fusion is used where the spatial branch is competitive. See `SUMMARY.md` Part 9 §15.
 - **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number.
 
 ---
@@ -393,8 +396,8 @@ Device support is architected in tiers based on hardware capability:
 
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 Dutch     | Online Pen Trajectory   | $\le 5.0\%$  | **4.11% $\pm$ 1.03%** |
-| **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **5.44% $\pm$ 0.34%** |
+| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **4.09% $\pm$ 1.11%** fused on NFI, 3.09% $\pm$ 0.37% on SigComp2011; 4.11% $\pm$ 1.03% pen alone |
+| **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **7.46% $\pm$ 0.46%** |
 | **Tertiary**  | Mobile / Touchscreen     | MOBISIG               | Capacitive Finger Touch | $\le 20.0\%$ |        21.26%         |
 
 ---
@@ -405,16 +408,16 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 
 | Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d |
 | ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: |
-| **Spatial**  | **All Combined**    | **65**  | **5.44% $\pm$ 0.34%** | **5.52%**  | **2.316** |
-| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   7.805   |
-| Spatial      | BHSig260 Hindi      |   23    |   1.92% $\pm$ 0.29%   |   1.93%    |   3.064   |
-| Spatial      | BHSig260 Bengali    |   16    |   1.48% $\pm$ 0.36%   |   1.55%    |   3.333   |
-| Spatial      | UTSig               |   18    |  30.77% $\pm$ 1.65%   |   30.43%   |   1.084   |
+| **Spatial**  | **All Combined**    | **65**  | **7.46% $\pm$ 0.46%** | **7.72%**  | **2.195** |
+| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   8.941   |
+| Spatial      | BHSig260 Hindi      |   23    |   3.47% $\pm$ 0.90%   |   3.34%    |   2.575   |
+| Spatial      | BHSig260 Bengali    |   16    |   6.82% $\pm$ 1.10%   |   6.89%    |   2.185   |
+| Spatial      | UTSig               |   18    |  26.34% $\pm$ 2.17%   |   27.65%   |   1.277   |
 | **Temporal** | **All Combined**    | **31**  | **7.77% $\pm$ 0.67%** | **7.67%**  | **1.710** |
 | Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   |
 | Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   |
 | Temporal     | SVC2004 Task 2      |   10    |  13.58% $\pm$ 2.21%   |   14.00%   |   1.504   |
-| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **3.50% $\pm$ 0.70%** | n/a ‡ | n/a ‡ |
+| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ |
 | Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.03% $\pm$ 0.55%   |   n/a ‡    |   n/a ‡   |
 
 ‡ Fused rows: shipped weights on both modalities of the same signing events, the 14 NFI writers clean of every training corpus, 10 enrolment draws; pooled EER and Cohen's d were not computed for this run. Protocol and the SigComp2011 paired result in `SUMMARY.md` Part 9 §25.
@@ -423,7 +426,7 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 
 ### Operating Point & Confusion Matrices
 
-Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_THRESHOLD = 0.7711`, `TEMPORAL_DECISION_THRESHOLD = 0.7900`):
+Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_THRESHOLD = 0.7637`, `TEMPORAL_DECISION_THRESHOLD = 0.7900`):
 
 > The notebook is committed **without stored cell outputs**. They were 88% of a
 > 843 KB file and made every re-run an unreadable diff. The figures it produces
@@ -436,7 +439,7 @@ Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_T
 
 | Modality     | True Reject | False Accept | True Accept | False Reject |    FAR     |    FRR     |
 | ------------ | ----------: | -----------: | ----------: | -----------: | :--------: | :--------: |
-| **Spatial**  |       1,397 |           73 |       1,209 |           80 | **4.97%**  | **6.21%**  |
+| **Spatial**  |       1,360 |          110 |       1,181 |          108 | **7.48%**  | **8.38%**  |
 | **Temporal** |         564 |           63 |         540 |           32 | **10.05%** | **5.59%**  |
 
 _Error Complementarity:_ Spatial and temporal modalities exhibit complementary error distributions ($\phi < 0$). Spatial models tend toward false rejections (rejecting genuine variations), while temporal models tend toward false acceptances. Multimodal late fusion effectively balances both operating regimes.
@@ -451,6 +454,40 @@ _Error Complementarity:_ Spatial and temporal modalities exhibit complementary e
 | **Temporal** | ![ROC temporal](results/roc_temporal.png) | ![DET temporal](results/det_temporal.png) |
 
 ---
+## Database & Capture Layer 
+
+### Database
+
+Encrypted embedding storage tested end-to-end — AES-256-GCM encryption,
+decryption, and audit logging all verified successfully via
+`backend/database.py`.
+
+![Database test result](assets/screenshots/Database_test_success.png)
+![Database encryption](assets/screenshots/Database_encryption.png)
+
+
+Test confirms: encrypted spatial and temporal embeddings match their
+decrypted values, and verification events are correctly recorded in
+the audit log.
+
+### Signature Capture
+
+Full pen-down to pen-up signature capture implemented via
+`backend/tablet.py`, using PyQt5 Tablet Events on the XPPen Deco 640.
+
+![Screen before signature](assets/screenshots/Screen_before_sign.png)
+![Screen After signature](assets/screenshots/Screen_after_sign.png)
+![Tablet capture result](assets/screenshots/Tablet_capture_result.png)
+
+
+The captured trajectory passes both quality gates (pre- and
+post-normalization) and produces the final `[L, 4]` array —
+X, Y, Pressure, dt — matching the capture contract defined in
+`AGENTS.md`.
+
+**Status:** Windows path complete and tested. Linux (Arch) path is
+pending. Both files currently live under `backend/` and are pending
+migration to their official locations (`src/database/`, `src/capture/`).
 
 ## Standards & Compliance
 

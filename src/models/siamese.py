@@ -74,6 +74,46 @@ def _group_norm(channels):
     return nn.GroupNorm(groups, channels)
 
 
+def _adaptive_windows(length, grid):
+    """The windows nn.AdaptiveAvgPool2d / AdaptiveMaxPool2d use along one axis:
+    start = floor(i*L/N), end = ceil((i+1)*L/N); they overlap when L % N != 0."""
+    return [(i * length // grid, -(-(i + 1) * length // grid)) for i in range(grid)]
+
+
+def _pool_windows(x, grid, reduce):
+    rows, cols = _adaptive_windows(x.shape[-2], grid), _adaptive_windows(x.shape[-1], grid)
+    return torch.stack([torch.stack([reduce(x[..., r0:r1, c0:c1]) for c0, c1 in cols], dim=-1)
+                        for r0, r1 in rows], dim=-2)
+
+
+def adaptive_max_pool2d_deterministic(x, grid):
+    """
+    nn.AdaptiveMaxPool2d((grid, grid)) with a deterministic backward; the
+    forward matches the library bit for bit.
+
+    The library's CUDA backward scatters gradients with atomic adds, so the
+    same seed gives different weights run to run. On 2026-09-21 this and the
+    average pool below were the only non-deterministic kernels in either
+    branch: a spatial seed retrained a day apart differed in 17 of 18 tensors
+    while the temporal branch reproduced exactly. Slicing plus `amax` has no
+    atomics, so a run reproduces and `train.py` can enforce
+    `torch.use_deterministic_algorithms(True)`. No parameters: every existing
+    checkpoint loads unchanged.
+    """
+    return _pool_windows(x, grid, lambda win: win.amax(dim=(-2, -1)))
+
+
+def adaptive_avg_pool2d_deterministic(x, grid):
+    """
+    nn.AdaptiveAvgPool2d((grid, grid)) with a deterministic backward.
+
+    Same windows as the library; the forward differs only by float32
+    summation order (about 1e-7, measured), far below anything a benchmark
+    prints. See adaptive_max_pool2d_deterministic for why.
+    """
+    return _pool_windows(x, grid, lambda win: win.mean(dim=(-2, -1)))
+
+
 class SpatialSiamese(nn.Module):
     """
     Siamese CNN for offline signature verification.
@@ -289,7 +329,8 @@ class SpatialSiamese(nn.Module):
         if self.pool_channels is not None:
             x = self.reduce(x)
         pooled = torch.cat(
-            [torch.flatten(self.pool_avg(x), 1), torch.flatten(self.pool_max(x), 1)],
+            [torch.flatten(adaptive_avg_pool2d_deterministic(x, self.pool_grid), 1),
+             torch.flatten(adaptive_max_pool2d_deterministic(x, self.pool_grid), 1)],
             dim=1,
         )
         return self.embedding(pooled)
@@ -311,9 +352,13 @@ class TemporalSiamese(nn.Module):
 
     def __init__(self, input_features=TEMPORAL_INPUT_FEATURES, hidden_size=TEMPORAL_HIDDEN_SIZE,
                  num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
-                 pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True):
+                 pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True,
+                 bidirectional=True):
         super().__init__()
         self.embedding_dim = embedding_dim
+        # Forward-only is the arm that could score a live stream incrementally;
+        # it was never compared with the bidirectional default until 2026-09-20.
+        self.bidirectional = bool(bidirectional)
         self.pressure_dropout = pressure_dropout
         self.derive_deltas = derive_deltas
 
@@ -347,7 +392,7 @@ class TemporalSiamese(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=0.3 if num_layers > 1 else 0.0,
-            bidirectional=True,
+            bidirectional=self.bidirectional,
         )
 
         # Concatenated final hidden states (2 * hidden_size) projected to 128-d
@@ -359,7 +404,7 @@ class TemporalSiamese(nn.Module):
         # random floor under the genuine-pair distance the loss is trying to
         # drive to zero. A ReLU would also trap every embedding in one convex
         # cone, pushing discrimination into magnitude rather than direction.
-        self.embedding = nn.Linear(hidden_size * 2, embedding_dim)
+        self.embedding = nn.Linear(hidden_size * (2 if self.bidirectional else 1), embedding_dim)
 
     @classmethod
     def from_state_dict(cls, state_dict, **overrides):
@@ -400,6 +445,8 @@ class TemporalSiamese(nn.Module):
             "num_layers": layers,
             "embedding_dim": state_dict["embedding.weight"].shape[0],
             "derive_deltas": derive_deltas,
+            # A forward-only checkpoint has no reverse weights and a half-width head.
+            "bidirectional": "lstm.weight_ih_l0_reverse" in state_dict,
         }
         params.update(overrides)
 
@@ -472,9 +519,10 @@ class TemporalSiamese(nn.Module):
             _, (h_n, _) = self.lstm(x)
 
         # Extract last layer forward state (h_n[-2]) and backward state (h_n[-1])
-        h_forward = h_n[-2]
-        h_backward = h_n[-1]
-        h_combined = torch.cat([h_forward, h_backward], dim=1)
+        if self.bidirectional:
+            h_combined = torch.cat([h_n[-2], h_n[-1]], dim=1)   # last layer, both directions
+        else:
+            h_combined = h_n[-1]
         return self.embedding(h_combined)
 
     def forward(self, x1, x2, lengths1=None, lengths2=None):

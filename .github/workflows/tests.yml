@@ -60,8 +60,12 @@ jobs:
           # whatever release is newest, so cutting a release silently changed
           # what CI was testing with no commit to point at. Bumping weights is
           # now a deliberate edit to this line.
+          # Each weight travels with its writer-split record (<name>.split.json);
+          # benchmark.py and evaluate.py use it to refuse scoring a checkpoint on
+          # writers it trained on. Without the record they only warn.
           gh release download "$WEIGHTS_TAG" --dir models/weights \
-            -p "spatial_cnn.pth" -p "temporal_lstm.pth" --clobber
+            -p "spatial_cnn.pth" -p "temporal_lstm.pth" \
+            -p "spatial_cnn.split.json" -p "temporal_lstm.split.json" --clobber
 
       - name: Download ensemble weights (optional)
         env:
@@ -76,7 +80,7 @@ jobs:
           # skipped on every run. They stay optional: a release without them, or
           # a fork without release access, must not fail the build.
           gh release download "$WEIGHTS_TAG" --dir models/weights \
-            -p "temporal_dt_s4*.pth" --clobber
+            -p "temporal_dt_s4*.pth" -p "temporal_dt_s4*.split.json" --clobber
 
       - name: Run pytest
         run: |
