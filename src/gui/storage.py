@@ -169,7 +169,7 @@ def list_clients(employee_username: str = None) -> list:
 
 def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
                              employee_username: str, spatial_embeddings: list = None,
-                             spatial_origin: str = "scan"):
+                             spatial_origin: str = "scan") -> tuple:
     """
     spatial_origin ("scan" or "render") records how the stored spatial
     embeddings were produced. It is required by verify() on main — a
@@ -177,10 +177,27 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
     passed through, never guessed. Defaults to "scan" because every
     enrollment path in the GUI today is image-based; this default must
     be revisited once tablet-rendered enrollment (src/capture/) exists.
+
+    Ownership check (PR review point 2): if a client with this name
+    already exists under a DIFFERENT employee, the save is refused —
+    otherwise employee B typing an ID employee A already enrolled would
+    silently overwrite A's record, including A's stored embeddings.
+
+    Returns (success: bool, message: str). Callers must check the
+    return value; a False result means nothing was written.
     """
     data = load_enrollments()
     key = _norm(client_id)
-    existing = data["clients"].get(key, {})
+    existing = data["clients"].get(key)
+
+    if existing is not None:
+        existing_owner = existing.get("enrolled_by", "")
+        if existing_owner.lower() != employee_username.lower():
+            return False, (
+                f"A client named '{client_id}' is already enrolled by another "
+                f"employee. Choose a different ID."
+            )
+
     data["clients"][key] = {
         "display_name": client_id.strip(),
         "enrolled_by": employee_username,
@@ -188,10 +205,11 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
         "dynamic_references": dynamic_refs,
         "spatial_embeddings": spatial_embeddings or [],  # base64 — what verify() actually scores against
         "spatial_origin": spatial_origin,                # "scan" or "render" — required by verify()
-        "enrolled_at": existing.get("enrolled_at", datetime.now().isoformat(timespec="seconds")),
+        "enrolled_at": (existing or {}).get("enrolled_at", datetime.now().isoformat(timespec="seconds")),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
     _save_json("enrollments", data)
+    return True, "Saved"
 
 
 def delete_client(client_id: str):

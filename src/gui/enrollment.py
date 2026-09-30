@@ -268,12 +268,19 @@ class EnrollmentPanel(QWidget):
         embeddings_b64 = result["embeddings"]
         spatial_origin = result["spatial_origin"]
 
-        storage.save_client_enrollment(
+        success, message = storage.save_client_enrollment(
             client_id, self.image_references, self.dynamic_references,
             self.current_employee_username or "unknown",
             spatial_embeddings=embeddings_b64,
             spatial_origin=spatial_origin,
         )
+
+        self.enrollButton.setEnabled(True)
+        self.enrollButton.setText("Save Enrollment")
+
+        if not success:
+            self._set_status_error(message)
+            return
 
         self._set_status_success(f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} embeddings)")
         self.client_list_changed.emit()
@@ -281,9 +288,6 @@ class EnrollmentPanel(QWidget):
         self.image_references = []
         self._refresh_image_list()
         self._update_counts()
-
-        self.enrollButton.setEnabled(True)
-        self.enrollButton.setText("Save Enrollment")
 
     def _on_enroll_failure(self, error_message: str):
         self._set_status_error(error_message)
