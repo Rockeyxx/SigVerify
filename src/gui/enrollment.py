@@ -9,9 +9,11 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QHBoxLayout, QFileDialog, QListWidget, QMessageBox, QDialog
+    QVBoxLayout, QHBoxLayout, QFileDialog, QListWidget, QMessageBox, QDialog,
+    QDialogButtonBox
 )
 from src.gui.workers import EnrollWorker
+from src.gui.image_cleanup import crop_to_ink, SignatureNotFoundError
 
 import src.gui.storage as storage
 import src.gui.interfaces as interfaces
@@ -32,6 +34,43 @@ class ImagePreviewDialog(QDialog):
         else:
             label.setText("Unable to load image")
         layout.addWidget(label)
+        self.setLayout(layout)
+
+
+class CropConfirmDialog(QDialog):
+    """
+    Shows the cropped/cleaned version of a signature photo and asks the
+    employee to confirm it before it's added to the reference list.
+
+    This is the human check the automatic cleanup can't replace: a bad
+    crop (e.g. a blank strip from uneven lighting) is obvious to a
+    person at a glance, even though it passes the automated quality
+    gate (PR review point 3).
+    """
+    def __init__(self, cropped_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Reference")
+
+        layout = QVBoxLayout()
+
+        instructions = QLabel("Does this look like a clean signature? Confirm or retake.")
+        layout.addWidget(instructions)
+
+        preview = QLabel()
+        pixmap = QPixmap(cropped_path)
+        if not pixmap.isNull():
+            preview.setPixmap(pixmap.scaledToWidth(350))
+        else:
+            preview.setText("Unable to preview this image")
+        layout.addWidget(preview)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No)
+        buttons.button(QDialogButtonBox.Yes).setText("Looks Good — Add It")
+        buttons.button(QDialogButtonBox.No).setText("Discard — Try Another")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
         self.setLayout(layout)
 
 
@@ -199,6 +238,23 @@ class EnrollmentPanel(QWidget):
 
         if len(self.image_references) >= REQUIRED_IMAGE_REFERENCES:
             self._set_status_error(f"Already have {REQUIRED_IMAGE_REFERENCES} references — remove one first")
+            return
+
+        # Run the same cleanup pipeline the model will see (crop_to_ink),
+        # but here purely so the employee can confirm the result before
+        # committing to it. This runs again later, inside interfaces.py's
+        # enroll_client(), as part of the real processing pipeline —
+        # that duplication is intentional, not a bug: it keeps preview
+        # and processing independent and simple.
+        try:
+            cropped_preview = crop_to_ink(self._selected_new_image_path)
+        except SignatureNotFoundError as e:
+            self._set_status_error(str(e))
+            return
+
+        dialog = CropConfirmDialog(cropped_preview, parent=self)
+        if dialog.exec_() != QDialog.Accepted:
+            self.statusLabel.setText("Discarded — select another image")
             return
 
         self.image_references.append(self._selected_new_image_path)
