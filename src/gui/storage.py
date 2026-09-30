@@ -168,7 +168,16 @@ def list_clients(employee_username: str = None) -> list:
 
 
 def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
-                             employee_username: str, spatial_embeddings: list = None):
+                             employee_username: str, spatial_embeddings: list = None,
+                             spatial_origin: str = "scan"):
+    """
+    spatial_origin ("scan" or "render") records how the stored spatial
+    embeddings were produced. It is required by verify() on main — a
+    client enrolled from photos/scans must be verified with "scan"
+    passed through, never guessed. Defaults to "scan" because every
+    enrollment path in the GUI today is image-based; this default must
+    be revisited once tablet-rendered enrollment (src/capture/) exists.
+    """
     data = load_enrollments()
     key = _norm(client_id)
     existing = data["clients"].get(key, {})
@@ -178,6 +187,7 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs: list,
         "image_references": image_refs,          # kept for the View/Preview button
         "dynamic_references": dynamic_refs,
         "spatial_embeddings": spatial_embeddings or [],  # base64 — what verify() actually scores against
+        "spatial_origin": spatial_origin,                # "scan" or "render" — required by verify()
         "enrolled_at": existing.get("enrolled_at", datetime.now().isoformat(timespec="seconds")),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }

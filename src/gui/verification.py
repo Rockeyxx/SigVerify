@@ -129,6 +129,12 @@ class VerificationPanel(QWidget):
             )
             return
 
+        # spatial_origin ("scan" or "render") was recorded at enrollment time
+        # (storage.py, default "scan"). main's verify() requires it — it
+        # refuses to guess whether these embeddings came from a scanned
+        # image or a tablet-rendered stroke.
+        spatial_origin = client.get("spatial_origin", "scan")
+
         if not self.selected_image_path:
             self._show_idle_message("Please select a probe image")
             return
@@ -138,7 +144,7 @@ class VerificationPanel(QWidget):
         self._show_idle_message("Processing…")
 
         self._pending_client_id = client_id
-        self._verify_worker = VerifyWorker(embeddings_b64, self.selected_image_path)
+        self._verify_worker = VerifyWorker(embeddings_b64, spatial_origin, self.selected_image_path)
         self._verify_worker.finished.connect(self._on_verify_success)
         self._verify_worker.failed.connect(self._on_verify_failure)
         self._verify_worker.start()
@@ -172,7 +178,7 @@ class VerificationPanel(QWidget):
         self._show_idle_message(error_message)
         self.verifyButton.setEnabled(True)
         self.verifyButton.setText("Verify")
-        
+
     def _show_idle_message(self, text):
         self.resultDisplay.setText(text)
         self.resultDisplay.setProperty("role", "result-idle")

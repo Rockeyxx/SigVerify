@@ -49,14 +49,36 @@ def _prepare_image(path: str) -> str:
         shutil.copyfile(cleaned_path, safe_path)
         return safe_path
 
-def enroll_client(image_paths: list) -> list:
+
+def enroll_client(image_paths: list) -> dict:
+    """
+    Runs each reference image through the real spatial model.
+
+    Returns a dict (NOT a bare list anymore):
+        {
+            "embeddings": [base64 str, ...],
+            "spatial_origin": "scan",   # these are real scanned/photographed images
+        }
+    The caller (enrollment.py) must save spatial_origin alongside the
+    embeddings — verify_client() requires it later.
+    """
     safe_paths = [_prepare_image(p) for p in image_paths]
     service = _get_service()
     result = service.enroll_unimodal(safe_paths, modality="spatial")
-    return [base64.b64encode(b).decode("ascii") for b in result["embeddings"]]
+    return {
+        "embeddings": [base64.b64encode(b).decode("ascii") for b in result["embeddings"]],
+        "spatial_origin": result["spatial_origin"],
+    }
 
 
-def verify_client(reference_embeddings_b64: list, probe_image_path: str) -> dict:
+def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_image_path: str) -> dict:
+    """
+    Verifies a probe image against a client's stored reference embeddings.
+
+    spatial_origin ("scan" or "render") must match how those references
+    were originally enrolled — main's verify() refuses to guess this.
+    Read it from the client's stored enrollment record (storage.py).
+    """
     service = _get_service()
     ref_bytes = [base64.b64decode(b) for b in reference_embeddings_b64]
     safe_probe_path = _prepare_image(probe_image_path)
@@ -64,4 +86,5 @@ def verify_client(reference_embeddings_b64: list, probe_image_path: str) -> dict
         mode="unimodal",
         probe_image=safe_probe_path,
         reference_spatial=ref_bytes,
+        reference_spatial_origin=spatial_origin,
     )

@@ -258,13 +258,21 @@ class EnrollmentPanel(QWidget):
         self._enroll_worker.failed.connect(self._on_enroll_failure)
         self._enroll_worker.start()
 
-    def _on_enroll_success(self, embeddings_b64: list):
+    def _on_enroll_success(self, result: dict):
+        """
+        result = {"embeddings": [base64 str, ...], "spatial_origin": "scan"}
+        — the shape interfaces.enroll_client() returns since main added
+        the spatial_origin requirement.
+        """
         client_id = self._pending_client_id
+        embeddings_b64 = result["embeddings"]
+        spatial_origin = result["spatial_origin"]
 
         storage.save_client_enrollment(
             client_id, self.image_references, self.dynamic_references,
             self.current_employee_username or "unknown",
             spatial_embeddings=embeddings_b64,
+            spatial_origin=spatial_origin,
         )
 
         self._set_status_success(f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} embeddings)")
