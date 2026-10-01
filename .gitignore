@@ -76,3 +76,9 @@ graphify-out/
 # The config in .skylos/ IS tracked; the generated report is not.
 skylos-report.json
 .skylos/cache/
+
+src/gui/data/
+src/gui/ui/
+src/gui/test_verification_ui.py
+cropped_test/
+docs/screenshots/desktop.ini
