@@ -36,11 +36,12 @@ from config.settings import (
     INFERENCE_NUM_THREADS,
     INFERENCE_RAM_CEILING_GB,
     LATENCY_SLA_SECONDS,
-    MODEL_WEIGHTS_DIR,
+    SPATIAL_WEIGHTS_PATH,
+    TEMPORAL_WEIGHTS_PATH,
 )
 
-SPATIAL_WEIGHTS = os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
-TEMPORAL_WEIGHTS = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
+SPATIAL_WEIGHTS = SPATIAL_WEIGHTS_PATH
+TEMPORAL_WEIGHTS = TEMPORAL_WEIGHTS_PATH
 
 needs_spatial = pytest.mark.skipif(not os.path.exists(SPATIAL_WEIGHTS),
                                    reason="spatial weights not present (gitignored)")

@@ -25,6 +25,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    SEED,
     ALPHA_GRID_STEP, TARGET_ACCURACY, TARGET_FAR, TARGET_FRR,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
@@ -650,7 +651,7 @@ def parse_args(argv=None):
                         help="Output directory for plots")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=SEED,
                         help="Must match the training seed to reproduce the same split")
     parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
                         metavar=("TRAIN", "VAL", "TEST"),

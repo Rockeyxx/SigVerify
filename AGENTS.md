@@ -237,8 +237,13 @@ Prevention. Deriving further features from them inside the model is not.
 worth 1.49 pooled EER points at t = 3.25 over six paired seeds, and because a
 timestamp is channel 3 of the standard 7 that every digitizer already reports —
 the Drift Prevention ban exists for channels the hardware cannot deliver, which
-this is not. `src/capture/` is still unimplemented; whatever driver lands there
-must emit `[L, 4]`, and a 3-channel capture path will not feed a shipped model.
+this is not. `src/capture/tablet.py` (Windows, PyQt5 tablet events) emits
+`[L, 4]`, but nothing calls it yet and it cannot feed the model as written: it
+normalises with a local placeholder instead of `parsers.normalize_trajectory()`,
+does not decimate to 100 Hz, and stops recording at the first pen lift, so a
+multi-stroke signature keeps only its first stroke. Fix all three before wiring it
+to `verify()`. Any driver must emit `[L, 4]`; a 3-channel capture path will not
+feed a shipped model.
 
 | Device channel          | Fate                                                                     |
 | ----------------------- | ------------------------------------------------------------------------ |
@@ -495,6 +500,8 @@ cryptography, matplotlib, scikit-learn, Pillow, sqlite3 (stdlib)
 | `src/gui/`      | PyQt5 application UI, user interaction                  | Direct model training, database schema  |
 | `scripts/`      | Training and evaluation entry points                    | Core library logic (import from `src/`) |
 | `config/`       | Centralized hyperparameters and constants               | Runtime logic                           |
+| `assets/screenshots/` | Hand-made screenshots shown in the README, for every team | Generated figures. Never put screenshots in `docs/` (gitignored) |
+| `results/`      | Figures written by code through `RESULTS_DIR`           | Hand-made images                        |
 
 ---
 

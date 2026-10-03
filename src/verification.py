@@ -434,10 +434,10 @@ class SignatureService:
         device: str = "cpu",
         use_temporal_ensemble: bool = False,
     ):
-        from config.settings import MODEL_WEIGHTS_DIR
+        from config.settings import SPATIAL_WEIGHTS_PATH, TEMPORAL_WEIGHTS_PATH
         self.device = device
-        self.spatial_weights = spatial_weights or os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
-        self.temporal_weights = temporal_weights or os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
+        self.spatial_weights = spatial_weights or SPATIAL_WEIGHTS_PATH
+        self.temporal_weights = temporal_weights or TEMPORAL_WEIGHTS_PATH
         self.use_temporal_ensemble = use_temporal_ensemble
         self._spatial_model = None
         self._temporal_model = None
