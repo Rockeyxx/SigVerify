@@ -234,17 +234,17 @@ functions are currently mocked; wiring them to the real `src/models/` and
 
 |                             Login                                  |                           Dashboard                                  |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-|         ![Login screen](docs/screenshots/login.png)                | ![Dashboard with per-employee stats](docs/screenshots/dashboard.png) |
+|         ![Login screen](assets/screenshots/login.png)                | ![Dashboard with per-employee stats](assets/screenshots/dashboard.png) |
 
 
 |                           Enrollment                               |                            Verification                              |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Enrollment panel](docs/screenshots/enrollment.png)               | ![Verification result display](docs/screenshots/verification.png)    |
+| ![Enrollment panel](assets/screenshots/enrollment.png)               | ![Verification result display](assets/screenshots/verification.png)    |
 
 
 |                       Clients                                      |                          Profile                                     |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Enrolled clients table](docs/screenshots/clients.png)            | ![Employee profile editing](docs/screenshots/profile.png)            |
+| ![Enrolled clients table](assets/screenshots/clients.png)            | ![Employee profile editing](assets/screenshots/profile.png)            |
 
 **Running the GUI:**
 
@@ -460,7 +460,7 @@ _Error Complementarity:_ Spatial and temporal modalities exhibit complementary e
 
 Encrypted embedding storage tested end-to-end — AES-256-GCM encryption,
 decryption, and audit logging all verified successfully via
-`backend/database.py`.
+`src/database/db_manager.py`.
 
 ![Database test result](assets/screenshots/Database_test_success.png)
 ![Database encryption](assets/screenshots/Database_encryption.png)
@@ -473,7 +473,7 @@ the audit log.
 ### Signature Capture
 
 Full pen-down to pen-up signature capture implemented via
-`backend/tablet.py`, using PyQt5 Tablet Events on the XPPen Deco 640.
+`src/capture/tablet.py`, using PyQt5 Tablet Events on the XPPen Deco 640.
 
 ![Screen before signature](assets/screenshots/Screen_before_sign.png)
 ![Screen After signature](assets/screenshots/Screen_after_sign.png)
@@ -486,8 +486,7 @@ X, Y, Pressure, dt — matching the capture contract defined in
 `AGENTS.md`.
 
 **Status:** Windows path complete and tested. Linux (Arch) path is
-pending. Both files currently live under `backend/` and are pending
-migration to their official locations (`src/database/`, `src/capture/`).
+pending.
 
 ## Standards & Compliance
 

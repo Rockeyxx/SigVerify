@@ -42,8 +42,6 @@ models/weights/
 
 # Planning docs (local only, not repo content)
 docs/*
-!docs/screenshots/
-!docs/screenshots/**
 
 # Local diagnostics — instruments for answering "why is this number bad",
 # not project code. Nothing imports them and nothing ships with them, so they
@@ -81,4 +79,4 @@ src/gui/data/
 src/gui/ui/
 src/gui/test_verification_ui.py
 cropped_test/
-docs/screenshots/desktop.ini
+desktop.ini
