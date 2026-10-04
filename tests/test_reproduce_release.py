@@ -4,12 +4,13 @@ with the numbers its notes published.
 """
 
 import os
+import subprocess
 
 import pytest
 
-from config.settings import SPATIAL_TRAIN_DIRS, TEMPORAL_CHANNEL_WIDTHS, TEMPORAL_TRAIN_DIRS
-from tools.reproduce_release import (RELEASES, benchmark_command, benchmark_env, parse_benchmark, release_dir,
-                                     train_command, verdict)
+from config.settings import PROJECT_ROOT, SEED, SPATIAL_TRAIN_DIRS, TEMPORAL_CHANNEL_WIDTHS, TEMPORAL_TRAIN_DIRS
+from tools.reproduce_release import (RELEASES, Weight, benchmark_command, benchmark_env, parse_benchmark,
+                                     release_dir, train_command, verdict)
 
 # Trimmed from a real `benchmark.py --enroll 5` run on the v0.1.0 weight.
 SAMPLE = """\
@@ -72,9 +73,55 @@ def test_benchmark_command_takes_corpora_and_channels_from_settings():
     assert all(d in cmd for d in TEMPORAL_TRAIN_DIRS)
 
 
-def test_retrain_refuses_a_release_that_recorded_no_recipe():
+def test_retrain_refuses_a_weight_with_no_recipe():
     with pytest.raises(ValueError, match="no training command"):
-        train_command("v0.1.0", RELEASES["v0.1.0"][0], "/out")
+        train_command("v0.1.0", Weight("spatial", "x.pth", {"mean": 1.0}, "cuda"), "/out")
+
+
+def test_every_release_weight_records_how_it_was_trained():
+    """Recovered 2026-10-04 from the training logs in logs/ and the experiment record (docs/RELEASE_PLAN.md)."""
+    missing = [(tag, w.branch) for tag, weights in RELEASES.items() for w in weights if w.train is None]
+    assert not missing
+
+
+def _split_seed(args):
+    """The writer-split seed a recipe trains on: train.py uses --split-seed, else --seed, else 42."""
+    for flag in ("--split-seed", "--seed"):
+        if flag in args:
+            return int(args[args.index(flag) + 1])
+    return 42
+
+
+def test_every_recipe_trains_on_the_partition_the_benchmark_scores():
+    """
+    benchmark.py scores the split-seed SEED partition. Seed 45 without --split-seed
+    trains on another partition, and code older than the split records cannot
+    refuse to score it on its own training writers.
+    """
+    for tag, weights in RELEASES.items():
+        for w in weights:
+            if w.train:
+                assert _split_seed(w.train.args) == SEED, (tag, w.branch, w.train.args)
+
+
+def _train_py_at(commit):
+    show = subprocess.run(["git", "show", f"{commit}:scripts/train.py"],
+                          capture_output=True, text=True, cwd=PROJECT_ROOT)
+    if show.returncode:
+        pytest.skip(f"{commit} is not in this clone (CI checks out one commit)")
+    return show.stdout
+
+
+def test_every_recipe_flag_exists_at_its_commit():
+    """A flag the recipe's commit does not define makes train.py exit before training."""
+    for tag, weights in RELEASES.items():
+        for w in weights:
+            if not w.train:
+                continue
+            commit, argv = train_command(tag, w, "/out")
+            source = _train_py_at(commit)
+            for flag in (a for a in argv if a.startswith("--")):
+                assert f'"{flag}"' in source, (tag, w.branch, commit, flag)
 
 
 def test_retrain_runs_the_recorded_recipe_at_its_commit():
