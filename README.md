@@ -94,7 +94,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 - **Late-Fusion Engine** — Weighted score fusion with automatic single-modality fallback (`src/models/siamese.py`).
 - **Few-Shot Enrollment Scoring** — Probes matched against the nearest of $K=5$ stored reference embeddings (`src/verification.py`).
 - **Writer-Independent Evaluation** — Strict held-out-writer partitioning per ISO/IEC 23053:2022 with comprehensive EER, FAR, FRR, and DET metrics (`scripts/benchmark.py`, `scripts/evaluate.py`).
-- **Ultra-Low Latency Inference** Fast CPU execution (0.07 s warm, 0.94 s cold) and light memory footprint (~0.45 GB RAM), well within embedded budgets (< 3.0 s, ≤ 4 GB).
+- **Ultra-Low Latency Inference** Fast CPU execution (1.9 s from pressing Enter to the fused result with 5 scan and 5 pen references, 0.08 s per check once the app is running) and light memory footprint (~0.39 GB RAM), well within embedded budgets (< 3.0 s, ≤ 4 GB).
 - **Cross-Platform Compatibility** Runs natively on Windows and Linux (x86_64 and ARM64) without native build toolchains.
 
 **Application Layer — Planned, Not Yet Implemented:**

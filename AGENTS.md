@@ -59,10 +59,19 @@ them, even if they appear in the literature review or older drafts:
 | Constraint                      | Value                                             |
 | ------------------------------- | ------------------------------------------------- |
 | Inference RAM ceiling           | ≤ 4 GB                                            |
-| End-to-end verification latency | < 3.0 seconds                                     |
+| End-to-end verification latency | < 3.0 s, Enter to fused result (see below)        |
 | Execution                       | Local only — no cloud, no dedicated GPU           |
 | Platform support                | Windows + Arch Linux (x86_64 and ARM64)           |
 | Native build steps              | None — all dependencies must have prebuilt wheels |
+
+The latency budget is timed from pressing Enter, with `NUM_ENROLLMENT_REFERENCES`
+scans and as many pen signings as references plus one probe of each, to the fused
+result: a fresh process on CPU that imports, loads both models, enrols and runs one
+`multimodal` verify. It must stay well under 3.0 s, because the front end needs time
+too. `tools/profile_latency.py` reports it on its first row and
+`tests/test_latency.py` asserts it off CI. Measured 2026-10-06: 1.9 s (1.2 s of it
+`import torch`). A warm `verify()` against stored references (0.08 s) is what one
+click costs once the app is running; never quote it as the budget.
 
 ---
 

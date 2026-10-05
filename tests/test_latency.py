@@ -36,6 +36,7 @@ from config.settings import (
     INFERENCE_NUM_THREADS,
     INFERENCE_RAM_CEILING_GB,
     LATENCY_SLA_SECONDS,
+    NUM_ENROLLMENT_REFERENCES,
     SPATIAL_WEIGHTS_PATH,
     TEMPORAL_WEIGHTS_PATH,
 )
@@ -91,6 +92,26 @@ def assert_inside_sla(branch, median, worst, reference=None):
 
 
 class TestLatencyBudget:
+
+    @needs_spatial
+    @needs_temporal
+    def test_fused_decision_from_raw_references_is_inside_the_sla(self, tmp_path):
+        """The budget as the team defines it (2026-10-06): a fresh run with
+        NUM_ENROLLMENT_REFERENCES scans and as many pen signings as references plus
+        one probe of each, from pressing Enter to the fused result. The warm tests
+        below time only the last 0.1 s of that. On CI the absolute time is the
+        runner's disk and CPU, so there only the path itself is checked."""
+        from tools.profile_latency import measure_cold
+
+        run = measure_cold(str(tmp_path))
+        assert run["decision"] in ("Genuine", "Forged")
+        assert run["references"] == {"spatial": NUM_ENROLLMENT_REFERENCES,
+                                     "temporal": NUM_ENROLLMENT_REFERENCES}
+        assert run["routing"] == "multimodal"
+        if not ON_CI:
+            assert run["total"] < LATENCY_SLA_SECONDS, (
+                f"Enter to fused result took {run['total']:.2f}s, over the "
+                f"{LATENCY_SLA_SECONDS}s budget: {run}")
 
     @needs_spatial
     def test_warm_spatial_verification_is_inside_the_sla(self, tmp_path):

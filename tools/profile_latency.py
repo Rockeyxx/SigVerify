@@ -8,15 +8,14 @@ wall-clock time. The constraint was documented and unenforced.
 
 Two numbers matter, and they answer different questions:
 
-  * **cold** — a fresh process: interpreter start, `import torch`, weight load,
-    then one verification. This is what a subprocess-per-call deployment pays on
-    every single decision, and it is dominated by the torch import, not by the
-    model.
-  * **warm** — one verification with the models already resident. This is what
-    the persistent PyQt5 application pays per decision once it has started.
-
-Both are reported because the gap between them is large, and which one the SLA
-must be measured against is a deployment decision, not a measurement detail.
+  * **cold** — the budget as the team defines it (2026-10-06): press Enter with
+    NUM_ENROLLMENT_REFERENCES scans and as many pen signings as references plus one
+    probe of each, and the fused result must appear inside 3.0 s, by a wide margin
+    because the front end needs time too. A fresh process: interpreter start,
+    imports, both weight loads, enrolment, one multimodal verification. It is
+    dominated by the torch import, not by the model.
+  * **warm** — one verification with the models already resident and the
+    references already enrolled. This is what the running app pays per click.
 
     python tools/profile_latency.py
     python tools/profile_latency.py --repeats 20 --branch fused
@@ -66,24 +65,45 @@ def _synthetic_trajectory(length=200):
     return np.hstack(columns).astype(np.float32)
 
 
-def measure_cold():
-    """Wall-clock for a fresh interpreter that imports torch and loads a model.
+def measure_cold(tmpdir):
+    """Enter to fused result in a fresh process: the 3.0 s budget as the team defines it.
+
+    The run imports what an app imports, builds `SignatureService`, enrols
+    NUM_ENROLLMENT_REFERENCES scans and as many pen signings, and verifies one probe
+    of each in `multimodal` mode. It is timed from launching the process to printing
+    the result, so interpreter start and every import count and the teardown after
+    the result does not. Until 2026-10-06 this function imported torch and loaded the
+    spatial model only, with no pen model and no verification, under a label that
+    said "load + verify".
 
     Measured in a subprocess because an already-warm import cannot be un-imported,
     so timing it in-process would report a number no real cold start ever sees.
     """
+    import json
+
+    probe = _synthetic_probe(tmpdir)
     script = (
-        "import time;t=time.perf_counter();"
-        "import torch;"
-        "import sys;sys.path.insert(0,%r);"
-        "from src.verification import load_model;"
-        "load_model('spatial', %r, 'cpu');"
-        "print(time.perf_counter()-t)"
-    ) % (os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-         os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+        "import json,sys,time;t0=time.perf_counter();"
+        "sys.path.insert(0,%(root)r);"
+        "from src.verification import SignatureService;"
+        "from tools.profile_latency import _synthetic_trajectory as pen;"
+        "t1=time.perf_counter();s=SignatureService();"
+        "e=s.enroll_multimodal([%(probe)r]*%(k)d,[pen() for _ in range(%(k)d)]);"
+        "t2=time.perf_counter();"
+        "r=s.verify(mode='multimodal',probe_image=%(probe)r,probe_trajectory=pen(),"
+        "reference_spatial=e['spatial_embeddings'],reference_temporal=e['temporal_embeddings'],"
+        "reference_spatial_origin=e.get('spatial_origin','scan'));t3=time.perf_counter();"
+        "print(json.dumps({'decision':r['decision'],'routing':r['routing'],"
+        "'references':{'spatial':len(e['spatial_embeddings']),'temporal':len(e['temporal_embeddings'])},"
+        "'imports':t1-t0,'load_and_enrol':t2-t1,'verify':t3-t2,'shown_at':time.time()}),flush=True)"
+    ) % {"root": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+         "probe": probe, "k": NUM_ENROLLMENT_REFERENCES}
+    start = time.time()
     out = subprocess.run([sys.executable, "-c", script],
                          capture_output=True, text=True, check=True)
-    return float(out.stdout.strip().splitlines()[-1])
+    run = json.loads(out.stdout.strip().splitlines()[-1])
+    run["total"] = run.pop("shown_at") - start
+    return run
 
 
 def measure_warm(branch, repeats, tmpdir):
@@ -131,7 +151,7 @@ def main(argv=None):
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        cold = None if args.skip_cold else measure_cold()
+        cold = None if args.skip_cold else measure_cold(tmpdir)
         median, worst, threads = measure_warm(args.branch, args.repeats, tmpdir)
 
     peak_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
@@ -143,8 +163,11 @@ def main(argv=None):
           f"torch threads={threads} (cap {INFERENCE_NUM_THREADS})")
     print("-" * 62)
     if cold is not None:
-        print(f"  cold start (import torch + load + verify) "
-              f"{cold:7.3f} s   {verdict(cold, LATENCY_SLA_SECONDS)}")
+        k = NUM_ENROLLMENT_REFERENCES
+        print(f"  Enter to fused result, {k}+{k} references  "
+              f"{cold['total']:7.3f} s   {verdict(cold['total'], LATENCY_SLA_SECONDS)}")
+        print(f"    imports {cold['imports']:.2f} s, load both models + enrol "
+              f"{cold['load_and_enrol']:.2f} s, verify {cold['verify']:.2f} s")
     print(f"  warm verify(), median                     {median:7.3f} s   "
           f"{verdict(median, LATENCY_SLA_SECONDS)}")
     print(f"  warm verify(), worst of {args.repeats:<3d}               {worst:7.3f} s   "
@@ -155,7 +178,8 @@ def main(argv=None):
     print(f"  SLA {LATENCY_SLA_SECONDS} s / {INFERENCE_RAM_CEILING_GB} GB "
           f"(config/settings.py)")
 
-    breached = [v for v in (cold, median, worst) if v is not None and v >= LATENCY_SLA_SECONDS]
+    breached = [v for v in (cold and cold["total"], median, worst)
+                if v is not None and v >= LATENCY_SLA_SECONDS]
     return 1 if breached or peak_gb >= INFERENCE_RAM_CEILING_GB else 0
 
 
