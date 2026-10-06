@@ -63,14 +63,19 @@ them, even if they appear in the literature review or older drafts:
 | Platform support                | Windows + Arch Linux (x86_64 and ARM64)           |
 | Native build steps              | None — all dependencies must have prebuilt wheels |
 
-The latency budget is timed from pressing Enter, with `NUM_ENROLLMENT_REFERENCES`
-scans and as many pen signings as references plus one probe of each, to the fused
-result: a fresh process on CPU that imports, loads both models, enrols and runs one
-`multimodal` verify. It must stay well under 3.0 s, because the front end needs time
-too. `tools/profile_latency.py` reports it on its first row and
-`tests/test_latency.py` asserts it off CI. Typical cold-start latency is ~1.9 s
-(~1.2 s spent importing PyTorch). A warm `verify()` call against stored
-references takes ~0.08 s once the app is loaded; never quote that warm time as the full budget.
+The latency budget starts when the user presses Enter after submitting
+`NUM_ENROLLMENT_REFERENCES` scans, as many pen signings and one probe of each, and
+ends at the fused result. It covers enrolling those references and one `multimodal`
+verify on CPU. Starting the app is outside it: the app must call
+`SignatureService.warm_up()` once when it opens, on a background thread, so the
+imports, the model loads and the first forward pass happen before Enter. Keep one
+`SignatureService` for the whole session, because a second instance loads the models
+again. The budget must stay well under 3.0 s, because the front end needs time too.
+`tools/profile_latency.py` reports it on its first row and `tests/test_latency.py`
+asserts it off CI. Measured on an 8-core laptop CPU: 0.5 s from Enter (0.8 s on 2
+cores, 1.7 s on one), and 1.35 s to start the app, 1.0 s of it importing PyTorch,
+reported but not budgeted (1.9 s on the first launch after a reboot). A `verify()` against
+stored references takes 0.08 s (0.28 s on one core); never quote it as the budget.
 
 ---
 

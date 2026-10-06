@@ -21,6 +21,8 @@ from config.settings import (
     TEMPORAL_DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
     INFERENCE_NUM_THREADS,
+    SPATIAL_INPUT_SIZE,
+    TEMPORAL_INPUT_FEATURES,
 )
 from src.data.dataset import as_spatial_input, quality_gate, trajectory_gate
 from src.data.renderer import render_trajectory_to_image
@@ -327,6 +329,20 @@ class SignatureService:
             else:
                 self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
         return self._temporal_model
+
+    def warm_up(self) -> None:
+        """
+        Load both models and run a blank sample through each.
+
+        Call it once when the app opens, on a background thread, so the first Enter
+        pays neither the model load nor the first forward pass's kernel setup.
+        Calling it again does not reload the models.
+        """
+        width, height = SPATIAL_INPUT_SIZE
+        embed(self.spatial_model, np.zeros((1, height, width), dtype=np.float32),
+              "spatial", self.device)
+        embed(self.temporal_model, np.zeros((64, TEMPORAL_INPUT_FEATURES), dtype=np.float32),
+              "temporal", self.device)
 
     def _load_temporal_ensemble(self):
         """Load all temporal ensemble checkpoints or raise an error if any are missing."""

@@ -70,19 +70,48 @@ class TestLatencyBudget:
 
     @needs_spatial
     @needs_temporal
-    def test_fused_decision_from_raw_references_is_inside_the_sla(self, tmp_path):
-        """Verify cold-start verification runs within latency limits."""
-        from tools.profile_latency import measure_cold
+    def test_first_enter_after_warm_up_is_inside_the_sla(self, tmp_path):
+        """
+        The budget starts when the user presses Enter after submitting the references,
+        in an app that called warm_up() when it opened. App start is reported, not budgeted.
+        """
+        from tools.profile_latency import measure_first_enter
 
-        run = measure_cold(str(tmp_path))
+        run = measure_first_enter(str(tmp_path))
         assert run["decision"] in ("Genuine", "Forged")
         assert run["references"] == {"spatial": NUM_ENROLLMENT_REFERENCES,
                                      "temporal": NUM_ENROLLMENT_REFERENCES}
         assert run["routing"] == "multimodal"
         if not ON_CI:
-            assert run["total"] < LATENCY_SLA_SECONDS, (
-                f"Enter to fused result took {run['total']:.2f}s, over the "
+            assert run["enter_to_result"] < LATENCY_SLA_SECONDS, (
+                f"Enter to fused result took {run['enter_to_result']:.2f}s, over the "
                 f"{LATENCY_SLA_SECONDS}s budget: {run}")
+
+    @needs_spatial
+    @needs_temporal
+    def test_warm_up_runs_both_models_and_keeps_them_loaded(self, monkeypatch):
+        """
+        Loading is not enough: the first forward pass also sets up kernels (0.1 to 0.27 s
+        measured), so warm_up() must run each model. A second call must not reload them.
+        """
+        import src.verification as verification
+
+        runs = []
+        for branch, model_class in (("spatial", verification.SpatialSiamese),
+                                    ("temporal", verification.TemporalSiamese)):
+            real = model_class.encode
+            monkeypatch.setattr(model_class, "encode",
+                                lambda self, *a, _real=real, _branch=branch, **k:
+                                (runs.append(_branch), _real(self, *a, **k))[1])
+        service = verification.SignatureService()
+        service.warm_up()
+        assert sorted(runs) == ["spatial", "temporal"], (
+            f"warm_up() ran {runs}; each model must run once so the first Enter does not pay for it")
+
+        spatial, temporal = service.spatial_model, service.temporal_model
+        service.warm_up()
+        assert service.spatial_model is spatial and service.temporal_model is temporal, (
+            "a second warm_up() rebuilt the models; they must stay loaded")
 
     @needs_spatial
     def test_warm_spatial_verification_is_inside_the_sla(self, tmp_path):
