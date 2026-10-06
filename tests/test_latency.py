@@ -1,31 +1,7 @@
-"""
-The latency and memory budget, asserted rather than documented.
+"""Latency and memory tests for signature verification.
 
-AGENTS.md and docs/rules.md state < 3.0 s end-to-end and <= 4 GB RSS as hard
-constraints. Nothing measured either until `tools/profile_latency.py` existed,
-so a change that doubled inference cost would have shipped silently.
-
-Off CI (the deployment-class laptop) the worst warm repeat is held to the 3.0 s
-budget directly. On a shared CI runner wall-clock time measures the rented host
-more than the code: commit 38e834f took 3 s on an eastus runner and 47 s on a
-westus3 one (runs 36316908474 and 36316801302, 2026-09-27), same image, same
-code, every repeat 4.2 s. So on CI the test times a fixed convolution with no
-project code in it, in the same process, and asserts verification time as a
-multiple of that. A slow host slows both; a slower verification path moves the
-ratio. Measured 2026-09-27 the healthy ratio is 7 to 9 on 1 to 4 cores, while
-absolute time doubled across that range, which is what makes it host-independent.
-
-What this does and does not catch, measured rather than assumed. The ceiling of
-30 fails a verification path about three times slower relative to the host than
-today's: a corpus loaded on the probe path, a per-call embedding of every
-reference. It does **not** catch a model rebuilt on every call: the 26 MB weight
-loads from page cache in about 100 ms, which moves the ratio to about 15 and the
-laptop to 0.23 s, inside both budgets. That regression, which an earlier version
-of this docstring claimed to catch, is caught deterministically by
-`test_models_load_once_across_verifications` below.
-
-Weight files are gitignored and distributed via GitHub Releases, so every test
-here skips cleanly on a fresh clone rather than failing.
+Ensures verification latency stays within configured limits (< 3.0 s)
+and memory usage stays below the RSS ceiling (<= 4 GB).
 """
 
 import os
@@ -53,8 +29,7 @@ needs_temporal = pytest.mark.skipif(not os.path.exists(TEMPORAL_WEIGHTS),
 ON_CI = os.environ.get("CI", "").lower() in ("1", "true", "yes")
 
 
-# Verification time as a multiple of the reference convolution. Healthy is 7 to 9
-# (measured 2026-09-27 on 1 to 4 cores); the ceiling allows roughly 3x before failing.
+# Verification time relative to reference convolution baseline on CI.
 CI_RATIO_CEILING = 30.0
 
 
@@ -96,11 +71,7 @@ class TestLatencyBudget:
     @needs_spatial
     @needs_temporal
     def test_fused_decision_from_raw_references_is_inside_the_sla(self, tmp_path):
-        """The budget as the team defines it (2026-10-06): a fresh run with
-        NUM_ENROLLMENT_REFERENCES scans and as many pen signings as references plus
-        one probe of each, from pressing Enter to the fused result. The warm tests
-        below time only the last 0.1 s of that. On CI the absolute time is the
-        runner's disk and CPU, so there only the path itself is checked."""
+        """Verify cold-start verification runs within latency limits."""
         from tools.profile_latency import measure_cold
 
         run = measure_cold(str(tmp_path))

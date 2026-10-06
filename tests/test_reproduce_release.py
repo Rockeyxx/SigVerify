@@ -79,7 +79,7 @@ def test_retrain_refuses_a_weight_with_no_recipe():
 
 
 def test_every_release_weight_records_how_it_was_trained():
-    """Recovered 2026-10-04 from the training logs in logs/ and the experiment record (docs/RELEASE_PLAN.md)."""
+    """Verify that every release weight has a recorded training command."""
     missing = [(tag, w.branch) for tag, weights in RELEASES.items() for w in weights if w.train is None]
     assert not missing
 

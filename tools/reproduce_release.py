@@ -1,21 +1,9 @@
-"""Score, or retrain, a published release and compare with the numbers its notes published.
+"""Score or retrain a published release and compare with published metrics.
 
+Examples:
     python tools/reproduce_release.py --list
-    python tools/reproduce_release.py v0.6.0                    # score its weights
-    python tools/reproduce_release.py v0.10.0 --branch spatial
-    python tools/reproduce_release.py v0.6.0 --retrain           # hours to days: run it detached
-
-Weights download once into models/weights/releases/<tag>/ (gitignored), with their
-split records where the release has them. Scoring runs the current
-scripts/benchmark.py under the enrolment protocol in config/settings.py, on the
-corpora in SPATIAL_TRAIN_DIRS / TEMPORAL_TRAIN_DIRS, on the device each release
-was measured on (CPU-measured ones run with the GPU hidden). Run it with the
-CUDA venv so both kinds are available.
-
---retrain checks out the commit that ran the release's recorded training
-command into a git worktree under the cache, trains there, and scores the
-result the same way. Releases whose notes recorded no command are refused: a
-guessed recipe would reproduce nothing.
+    python tools/reproduce_release.py v0.8.0
+    python tools/reproduce_release.py v0.8.0 --branch spatial
 """
 import argparse
 import os
@@ -42,14 +30,7 @@ class Train:
 
 @dataclass(frozen=True)
 class Weight:
-    """
-    One release asset. `published` holds the notes' figures by kind: "mean" and
-    "sd" are the mean and spread over the ten enrolment draws, "pooled" is the EER
-    of the representative draw, and a corpus name maps to that corpus's mean.
-    `device` is where those figures were measured: the same file differs in the
-    second decimal between CPU and CUDA, and each figure reproduces exactly only
-    on its own device (checked for every release on 2026-09-27, ENG_REPORT M10).
-    """
+    """Represents a release asset and its published evaluation metrics."""
     branch: str
     asset: str
     published: dict
@@ -99,7 +80,7 @@ RELEASES = {
     ),
     "v0.7.0": (
         Weight("spatial", "spatial_cnn.pth", {"pooled": 8.45}, "cuda", train=_M20_RECIPE),
-        # The 2026-08-19 control arm ran exactly this and scored 9.40 (logs/ctrl_s43.log).
+        # Temporal baseline run on split seed 42.
         Weight("temporal", "temporal_lstm.pth", {"mean": 9.41}, "cuda", channels="xyp",
                train=Train("4a9f6ed", ("--branch", "temporal", "--temporal-channels", "xyp", "--seed", "43",
                                        "--split-seed", "42", "--epochs", "100"))),

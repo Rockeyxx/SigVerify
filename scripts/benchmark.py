@@ -1,19 +1,7 @@
-"""
-Benchmark Suite — Signature Verification System
+"""Benchmark suite for signature verification models.
 
-Evaluates representation quality and threshold-independent separation (EER, Cohen's d, margin statistics)
-across held-out test writer partitions.
-
-CLI Examples:
-    python scripts/benchmark.py --branch spatial \
-        --weights models/weights/spatial_cnn.pth \
-        --data-dir data/cedar data/bhsig260 data/utsig --seed 42
-
-    # Fast evaluation run over a designated pair sample count:
-    python scripts/benchmark.py --branch spatial \
-        --weights models/weights/spatial_cnn.pth \
-        --data-dir data/cedar data/bhsig260 data/utsig \
-        --seed 42 --limit-pairs 800
+Evaluates embedding representation quality and discrimination metrics
+(EER, Cohen's d, separation margin) across held-out test writer partitions.
 """
 
 
@@ -316,9 +304,7 @@ def main(argv=None):
         test_ids = select_test_writers(args.writers, train_ids, val_ids, test_ids)
         print(f"Restricted to {len(test_ids)} explicitly requested held-out writers")
 
-    # A checkpoint trained since 2026-09-19 carries its partition; refuse to score
-    # it on a writer it trained on, or on a held-out set that is not the one it
-    # was trained against (Part 9 §27). Older checkpoints have no record.
+    # Ensure evaluation partition matches the checkpoint's split record.
     record = check_split_against_record(args.weights, train_ids, test_ids,
                                         require_same_test=not args.writers,
                                         max_gap_ms=MAX_GAP_MS)

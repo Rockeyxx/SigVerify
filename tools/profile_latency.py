@@ -1,24 +1,8 @@
-"""Profile the end-to-end verification decision against the latency SLA.
+"""Profile the end-to-end verification decision against latency constraints.
 
-AGENTS.md and docs/rules.md both state a hard constraint — an end-to-end
-verification decision in **< 3.0 s** on consumer hardware, inside a **4 GB** RSS
-ceiling, on CPU only. Until this script existed, nothing in the repository
-measured either one: `scripts/benchmark.py` reports EER and Cohen's d, never
-wall-clock time. The constraint was documented and unenforced.
-
-Two numbers matter, and they answer different questions:
-
-  * **cold** — the budget as the team defines it (2026-10-06): press Enter with
-    NUM_ENROLLMENT_REFERENCES scans and as many pen signings as references plus one
-    probe of each, and the fused result must appear inside 3.0 s, by a wide margin
-    because the front end needs time too. A fresh process: interpreter start,
-    imports, both weight loads, enrolment, one multimodal verification. It is
-    dominated by the torch import, not by the model.
-  * **warm** — one verification with the models already resident and the
-    references already enrolled. This is what the running app pays per click.
-
-    python tools/profile_latency.py
-    python tools/profile_latency.py --repeats 20 --branch fused
+Evaluates performance under two conditions:
+  * cold: fresh process start, model initialization, enrollment, and verification.
+  * warm: verification latency when models are already loaded in memory.
 """
 
 import argparse
@@ -66,19 +50,7 @@ def _synthetic_trajectory(length=200):
 
 
 def measure_cold(tmpdir):
-    """Enter to fused result in a fresh process: the 3.0 s budget as the team defines it.
-
-    The run imports what an app imports, builds `SignatureService`, enrols
-    NUM_ENROLLMENT_REFERENCES scans and as many pen signings, and verifies one probe
-    of each in `multimodal` mode. It is timed from launching the process to printing
-    the result, so interpreter start and every import count and the teardown after
-    the result does not. Until 2026-10-06 this function imported torch and loaded the
-    spatial model only, with no pen model and no verification, under a label that
-    said "load + verify".
-
-    Measured in a subprocess because an already-warm import cannot be un-imported,
-    so timing it in-process would report a number no real cold start ever sees.
-    """
+    """Measure total cold-start latency from process startup to verification result."""
     import json
 
     probe = _synthetic_probe(tmpdir)

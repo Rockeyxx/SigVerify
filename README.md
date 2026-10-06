@@ -9,7 +9,7 @@
 
 A multimodal signature verification system built with dual Siamese deep neural networks. It verifies signatures using both **offline** (scanned images) and **online** (dynamic tablet pen strokes) inputs, combining their scores via late fusion to detect genuine signatures and skilled forgeries.
 
-This document covers installation, quickstart, project structure, evaluation benchmarks, and architectural comparisons. Comprehensive experiment logs, protocol derivations, and ablation histories are maintained in [SUMMARY.md](SUMMARY.md).
+This document covers installation, quickstart, project structure, evaluation benchmarks, and architectural comparisons.
 
 ---
 
@@ -111,7 +111,6 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 ```
 ├── AGENTS.md                    # Contributor & AI agent directives (hard architectural rules)
-├── SUMMARY.md                   # System walkthrough, protocol derivations & negative results
 ├── DATASET_LICENSES.md          # Dataset licenses, redistribution terms, and restrictions
 ├── LICENSE                      # MIT License
 ├── README.md                    # Project documentation, quickstart & benchmark summary
@@ -255,7 +254,7 @@ python app.py
 
 #### The `dt` Channel
 
-`dt` represents the time delta between sampled points (admitted 2026-08-19, widening the input tensor from 3 to 4 channels).
+`dt` represents the time interval between consecutive sampled points, providing a 4-channel input tensor `[X, Y, Pressure, dt]`.
 
 Without timing deltas, uniform-rate models lose visibility into pen pauses and air-travel hesitations. Genuine signers execute signatures with continuous motor memory rhythm, whereas forgers hesitate and trace strokes slowly. `dt` remains ~10 ms during continuous pen-down contact and jumps significantly at pen lifts. Across six paired random seeds, adding `dt` improved pooled temporal EER from **10.45% to 8.97%** ($t = 3.25$).
 
@@ -273,7 +272,7 @@ Verification evaluates a probe against an enrolled gallery using nearest-referen
 | Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
 | Decision Threshold        | Spatial $\tau = 0.7637$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
 
-Increasing enrolled references improves accuracy without retraining, with diminishing returns. Swept with `benchmark.py --enroll K`, K = 1 to 15, 10 draws each, on the spatial weight shipped before 2026-09-26 and the current temporal one: spatial pooled EER 11.71% at $K=1$, 8.72% at $K=5$, 7.86% at $K=10$, 7.82% at $K=15$; temporal 13.72%, 7.81%, 6.99%, 6.31%. Both curves are flat past $K \approx 10$ (Hindi 4.65%, SigComp2011 Dutch 3.53% at $K=10$). $K=5$ ships; see SUMMARY.md for why.
+More enrolled references give better accuracy without retraining, but the gain gets small after $K=5$. We swept $K$ from 1 to 15 with `benchmark.py --enroll K`, 10 draws each. Spatial pooled EER goes from 11.71% ($K=1$) to 8.72% ($K=5$), 7.86% ($K=10$) and 7.82% ($K=15$). These spatial numbers come from the previous spatial weight, not the one shipped now. Temporal EER goes from 13.72% ($K=1$) to 7.81% ($K=5$), 6.99% ($K=10$) and 6.31% ($K=15$). Both curves are almost flat after $K=10$. The app uses $K=5$.
 
 ---
 
@@ -372,7 +371,7 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 - **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion is not unconditionally better.** Late fusion helps when the two branches are of comparable strength, and *hurts* when one pulls ahead. Measured on writers neither branch trained on: fusion improves the single temporal model (3.96% → 3.62% in §15; on the second paired corpus, SigComp2009 / NFI, 3.90% → 3.62% with the spatial weight shipped until 2026-09-26, and 3.90% → 4.09% with the current one, which is no gain, see §33) and degrades the six-seed ensemble (2.61% → 4.63%, losing 22 of 25 draws). For the pen-tablet tier the ensemble is served **unimodally**; fusion is used where the spatial branch is competitive. See `SUMMARY.md` Part 9 §15.
+- **Fusion does not always help.** It helps when the two branches are about equally strong, and it hurts when one branch is much stronger. On writers that neither branch trained on, fusion improves the single temporal model (3.96% → 3.62%). On the second paired corpus (SigComp2009 / NFI) it went from 3.90% to 3.62% with the previous spatial weight, but from 3.90% to 4.09% with the current one, so there is no gain there now. Fusion makes the six-seed temporal ensemble worse (2.61% → 4.63%, worse on 22 of 25 draws). So for the pen-tablet tier the ensemble is used **alone**, and fusion is used only where the spatial branch is competitive.
 - **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number.
 
 ---
@@ -420,7 +419,7 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 | **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ |
 | Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.03% $\pm$ 0.55%   |   n/a ‡    |   n/a ‡   |
 
-‡ Fused rows: shipped weights on both modalities of the same signing events, the 14 NFI writers clean of every training corpus, 10 enrolment draws; pooled EER and Cohen's d were not computed for this run. Protocol and the SigComp2011 paired result in `SUMMARY.md` Part 9 §25.
+‡ Fused rows: shipped weights on both modalities of the same signing events, 14 NFI writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run.
 
 ---
 

@@ -200,12 +200,7 @@ class TestPairBudget:
 
 
 class TestEarlyStoppingSurvivesResume:
-    """
-    A resumed run must not restart its patience. Found 2026-09-25 after a power
-    cut: `fit` restored `best_val_loss` for weight saving but built a fresh
-    `EarlyStopping`, so the counter went back to zero and the run trained five
-    epochs past where it would have stopped, about five GPU-hours.
-    """
+    """Verifies that early stopping patience state is preserved when resuming training."""
 
     def test_checkpoint_carries_the_counter_and_baseline(self, tmp_path):
         import torch
@@ -288,11 +283,7 @@ class TestEvaluationMetrics:
         assert os.path.getsize(det) > 0
 
     def test_eval_loader_negatives_are_same_writer_forgeries(self):
-        """
-        benchmark.py without --enroll scores these pairs. Its negatives must be
-        the same writer's skilled forgeries: from 2026-08-09 half of them were
-        other writers' genuines, an easier attack that flatters the EER.
-        """
+        """Verify that evaluation loader negatives are skilled forgeries from the same writer."""
         writers = {f"w{w}": {"genuine": [f"w{w}_g{i}" for i in range(6)],
                              "forged": [f"w{w}_f{i}" for i in range(6)]}
                    for w in range(4)}
@@ -335,12 +326,7 @@ class TestEvaluateMain:
         assert report["reported_on"] == "test"
 
     def test_evaluating_on_a_split_the_checkpoint_did_not_train_under_raises(self, tmp_path):
-        """
-        The 2026-09-06 leak: a checkpoint scored on writers it trained on because
-        the scorer recomputed a different partition than training used. Training
-        now records its split beside the weights and evaluation refuses a
-        partition that disagrees with it.
-        """
+        """Verify that evaluation fails if the partition differs from the training split record."""
         from src.data.dataset import load_split_record
         data = _make_cedar_fixture(str(tmp_path / "cedar"))
         weights_dir = str(tmp_path / "weights")

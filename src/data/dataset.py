@@ -1,23 +1,16 @@
-"""
-Dataset Pipeline Operations — Signature Verification System
+"""Dataset processing for the signature verification system.
 
-Manages data ingestion, spatial preprocessing, augmentation strategies, quality verification gating,
-and writer-independent split partition generation across offline image and online dynamic signature datasets.
+This module handles data loading, spatial preprocessing, data augmentation,
+quality checks, and writer-independent dataset splits for offline images
+and online dynamic signatures.
 
-Directory Layout Conventions (`./data`):
---------------------------------------------
+Directory structure in `./data`:
+--------------------------------
 data/
 ├── cedar/                  # Offline CEDAR dataset (55 writers)
-│   ├── full_org/           # original_{writer}_{sample}.png    (Genuine)
-│   └── full_forg/          # forgeries_{writer}_{sample}.png   (Skilled Forgeries)
 ├── bhsig260/               # Offline BHSig260 dataset (260 writers)
-│   ├── Bengali/            # 100 writers: {writer}/B-S-{w}-{G|F}-{n}.tif
-│   └── Hindi/              # 160 writers: {writer}/H-S-{w}-{G|F}-{n}.tif
 ├── utsig/                  # Offline UTSig dataset (115 writers)
-│   ├── Genuine/            # {writer}/{n}.tif
-│   └── Forgery/            # {Skilled,Simple,Opposite Hand}/{writer}/{n}.tif
 └── svc2004/                # Online SVC2004 dataset (40 writers)
-    └── U{user}S{sample}.TXT     # Task1 files are 4-column (X, Y, T, Button) — no pressure. Task2 files are 7-column (X, Y, T, Button, Azimuth, Altitude, Pressure).
 
 Supported Datasets:
   Spatial:  CEDAR, BHSig260, UTSig
@@ -55,9 +48,7 @@ from config.settings import (
 )
 from src.data.renderer import render_trajectory_to_image
 
-# Channel names for gate errors, keyed off the shipped capture contract so the
-# message names the columns the gate is actually enforcing rather than a literal
-# that drifts the next time the contract widens.
+# Channel names used in gate error messages, based on configured temporal features.
 _CHANNEL_NAMES = {
     3: "X, Y, P",
     4: "X, Y, P, dt",
@@ -66,23 +57,21 @@ _CHANNEL_NAMES = {
 
 
 def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
-    """
-    Preprocess signature image sample for Spatial Siamese CNN processing.
+    """Preprocess a signature image for the Spatial Siamese CNN.
 
     Steps:
-      1. Ingest image in 8-bit single-channel grayscale format.
-      2. Apply background padding or direct bilinear scaling based on configuration.
-      3. Interpolate onto standard canvas dimensions (INTER_AREA).
-      4. Invert pixel values to map background to 0.0 and stroke ink to positive values [0.0, 1.0].
-      5. Add channel tensor dimension [1, H, W] for PyTorch layer ingestion.
+      1. Load image in 8-bit grayscale format.
+      2. Apply square padding or direct scaling based on settings.
+      3. Resize to target dimensions using INTER_AREA interpolation.
+      4. Invert pixel values (background 0.0, stroke ink positive [0.0, 1.0]).
+      5. Add channel dimension [1, H, W] for PyTorch.
 
     Returns:
-        float32 numpy array of shape (1, H, W).
+        float32 numpy array with shape (1, H, W).
     """
     if isinstance(image_path, np.ndarray):
-        # A raw scan handed over as an array rather than a path. Same contract as
-        # a file: paper bright, ink dark, any size. It still gets resized and
-        # inverted below, so an array and a path reach the model identically.
+        # Handle array input (paper bright, ink dark).
+        # It is resized and inverted below to match file loading.
         img = image_path[0] if image_path.ndim == 3 else image_path
         if img.dtype != np.uint8:
             img = np.clip(img, 0, 255).astype(np.uint8)
@@ -92,7 +81,7 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
         raise FileNotFoundError(f"Cannot load image: {image_path}")
 
     if SPATIAL_SQUARE_PAD:
-        # Pre-pad image onto square canvas while maintaining original aspect ratio
+        # Pad image onto a square canvas to keep original aspect ratio.
         h, w = img.shape
         max_dim = max(h, w)
         padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
@@ -100,95 +89,36 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
         x_off = (max_dim - w) // 2
         padded[y_off:y_off + h, x_off:x_off + w] = img
     else:
-        # Scale directly to target input geometry (155x220) matching Dey et al. Siamese baseline
+        # Scale directly to target input dimensions (155x220).
         padded = img
 
-    # Resize to spatial tensor dimensions and invert polarity (background 0, ink high).
-    # Inverting polarity is critical: ink covers ~1% of the canvas surface, so an
-    # un-inverted image feeds convolutions a large constant background offset carrying
-    # zero identity signal. Inverting polarity dropped CEDAR error from 4.86% to 0.00%.
+    # Resize to spatial dimensions and invert polarity (background 0, ink high).
+    # Inversion ensures convolutions focus on signature strokes instead of blank paper.
     resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
     normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
 
 
-# ─── Spatial sample kinds ─────────────────────────────────────────────
-# `as_spatial_input` below decides what an incoming array *is*. The two ranges
-# it separates are deliberately far apart and are both read from config:
-#
-#   * a trajectory is [L, C] with C drawn from TEMPORAL_CHANNEL_WIDTHS — 3 (xyp),
-#     4 (dt, shipped) or 5 (tilt). Widening the captured contract past that table
-#     is banned outright under AGENTS.md Drift Prevention, so 5 is a hard ceiling
-#     rather than today's value. Sourcing it here keeps `TEMPORAL_CHANNELS` the
-#     single knob: a literal 4 in a gate is what once made the shipped 4-channel
-#     model unreachable through `verify()`.
-#   * a scan is at least MIN_BBOX_PIXELS across. The ink bounding box cannot
-#     exceed the canvas, so an image narrower or shorter than that floor already
-#     fails `quality_gate` and is not a signature this project accepts.
+# Column boundaries for trajectories based on configuration.
 _TRAJECTORY_MIN_COLUMNS = min(TEMPORAL_CHANNEL_WIDTHS.values())
 _TRAJECTORY_MAX_COLUMNS = max(TEMPORAL_CHANNEL_WIDTHS.values())
 
 
 def as_spatial_input(sample, allow_trajectory=False):
-    """
-    Bring one spatial sample to the model's [1, H, W] contract, or refuse it.
+    """Convert a sample into the standard [1, H, W] spatial tensor format.
 
-    This is the single resolver for "which kind of thing is this" — `verify()`
-    reaches it through `src.verification._as_spatial_input` and the training
-    loader through `SpatialSignatureDataset`. Two copies of this rule would drift
-    against each other, and a training/serving disagreement about what an array
-    means is invisible in every number either side reports.
+    Handles four kinds of inputs:
+    * A file path: loaded and inverted by preprocess_image.
+    * A 2-D scan array: resized and inverted by preprocess_image.
+    * A canonical [1, H, W] float array in [0, 1]: verified and passed through.
+    * A trajectory [L, C]: rendered into an image if allow_trajectory is True.
 
-    Four kinds are legitimate:
-
-    * a **path** — read, resized and inverted by `preprocess_image`;
-    * a **raw scan array** (paper bright, ink dark, any size) — same treatment,
-      so an array and the file it came from reach the model identically;
-    * a **canonical [1, H, W] float array in [0, 1]**, which the renderer already
-      emits — passed straight through. Sending it through `preprocess_image`
-      would invert it a second time and hand the model a photographic negative;
-    * a **pen trajectory [L, C]**, rasterized by `render_trajectory_to_image`,
-      which lets one dataset hold scans and tablet captures at once. Training
-      only (`allow_trajectory=True`): `verify()` renders explicitly before it
-      reaches this point, and silently accepting a raw trajectory as an image
-      probe there would widen the serving contract AGENTS.md pins.
-
-    **The hard case is that a trajectory and a scan are both 2-D float arrays.**
-    Nothing in the type says which. The fork keys on the **column count**,
-    because it is the one property whose two admissible ranges cannot overlap:
-    a trajectory has at most `_TRAJECTORY_MAX_COLUMNS` (5) of them and a scan at
-    least `MIN_BBOX_PIXELS` (64), and the gap between is refused rather than
-    guessed at. A row floor closes the transposed `[C, L]` case, whose column
-    count would otherwise read as a scan.
-
-    Value range and dtype were **rejected** as the discriminator and must not be
-    reintroduced: a float array in [0, 1] is the legitimate canonical kind, a
-    trajectory's pressure and `dt` columns are also in [0, 1], and a trajectory
-    still in raw device units is indistinguishable from a scan by magnitude.
-    Only the shape carries the answer.
-
-    Anything else raises. Accepting it quietly is the defect this function
-    exists to close: `SpatialSiamese` pools adaptively, so a wrong-sized or
-    un-inverted array yields a perfectly plausible 512-d embedding with no
-    exception — enrolment then writes that template to the database, and
-    training would fit it. The inversion alone is worth 4.86% to 0.00% EER on
-    CEDAR, so a silent miss here is not cosmetic (SUMMARY.md Part 9 §12).
+    Raises ValueError if the input format is invalid.
     """
     if not isinstance(sample, np.ndarray):
         return preprocess_image(sample)
 
-    # Non-finiteness is checked here, before the fork, because neither branch
-    # below can catch it. The canonical branch's range test is blind to NaN —
-    # every comparison against NaN is False, so `low < -1e-6 or high > 1.0`
-    # passed a poisoned array through untouched and `embed()` returned a 512-d
-    # embedding of NaN, which enrolment stores as a template whose distance to
-    # every probe is NaN. The scan branch destroys the evidence instead of
-    # propagating it: `preprocess_image` casts through
-    # `np.clip(...).astype(np.uint8)`, which turns NaN into an arbitrary byte and
-    # infinity into 255, so the poisoned pixel disappears into a perfectly
-    # ordinary-looking embedding. `trajectory_gate` has always refused a
-    # non-finite trajectory explicitly; this is the spatial counterpart.
-    # Integer arrays cannot represent either value, so only floats are scanned.
+    # Check for NaN or infinite values early.
     if np.issubdtype(sample.dtype, np.floating) and not np.all(np.isfinite(sample)):
         raise ValueError(
             f"Spatial array of shape {sample.shape} contains NaN or infinity. A "
@@ -209,8 +139,7 @@ def as_spatial_input(sample, allow_trajectory=False):
         return np.ascontiguousarray(sample, dtype=np.float32)
 
     if sample.ndim == 3 and sample.shape[0] == 1:
-        # A raw scan carrying an explicit channel axis: preprocess_image resizes
-        # and inverts it exactly as it would the same scan on disk.
+        # A raw scan with an explicit channel dimension: preprocess normally.
         return preprocess_image(sample)
 
     if sample.ndim == 2:
@@ -227,9 +156,7 @@ def as_spatial_input(sample, allow_trajectory=False):
                        "trajectories are not accepted here — render it with "
                        "render_trajectory_to_image() first."))
             if rows < MIN_TRAJECTORY_POINTS:
-                # The renderer returns a near-blank canvas for a stub rather than
-                # raising, and a blank "signature" is a valid-looking training
-                # sample carrying no identity at all.
+                # Trajectory has too few points to render reliably.
                 raise ValueError(
                     f"Trajectory has {rows} points, need {MIN_TRAJECTORY_POINTS} "
                     f"to render a signature.")
@@ -253,21 +180,21 @@ def as_spatial_input(sample, allow_trajectory=False):
 
 
 def quality_gate(image_path):
-    """
-    Assess spatial signature image quality via resolution and sharpness metrics.
+    """Assess signature image quality using bounding-box size and sharpness metrics.
 
     Calculates:
-      - Stroke bounding-box dimensions.
-      - Laplacian variance focus sharpness score.
+      - Stroke bounding-box dimensions (must be >= MIN_BBOX_PIXELS).
+      - Laplacian variance sharpness score (must be >= MIN_LAPLACIAN_VARIANCE).
 
-    Returns: (passed: bool, details: dict)
+    Returns:
+        (passed: bool, details: dict)
     """
     if isinstance(image_path, np.ndarray):
         arr = image_path[0] if image_path.ndim == 3 else image_path
         if arr.dtype != np.uint8:
             if arr.max() <= 1.0:
-                # Inverted float array (background 0, ink high):
-                # Convert to standard scan polarity (paper 255, ink 0) for Otsu THRESH_BINARY_INV
+                # Inverted float array (background 0, ink 1):
+                # Convert back to standard scan polarity for Otsu thresholding.
                 img = np.clip(255.0 - arr * 255.0, 0, 255).astype(np.uint8)
             else:
                 img = np.clip(arr, 0, 255).astype(np.uint8)
@@ -278,15 +205,14 @@ def quality_gate(image_path):
     if img is None:
         return False, {"error": "Cannot load image"}
 
-    # Binarize scan using Otsu thresholding to identify stroke region
+    # Binarize scan using Otsu thresholding to find stroke regions.
     _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return False, {"error": "No signature content detected"}
 
-
-    # Calculate bounding-box span across all signature contours
+    # Calculate bounding-box dimensions across detected contours.
     x_min = min(cv2.boundingRect(c)[0] for c in contours)
     y_min = min(cv2.boundingRect(c)[1] for c in contours)
     x_max = max(cv2.boundingRect(c)[0] + cv2.boundingRect(c)[2] for c in contours)
@@ -294,7 +220,7 @@ def quality_gate(image_path):
     bbox_w = x_max - x_min
     bbox_h = y_max - y_min
 
-    # Calculate image focus/sharpness using Laplacian variance
+    # Calculate image sharpness using Laplacian variance.
     laplacian = cv2.Laplacian(img, cv2.CV_64F)
     sharpness = laplacian.var()
 
@@ -307,26 +233,18 @@ def quality_gate(image_path):
 
 
 def trajectory_gate(trajectory):
-    """
-    Check a trajectory is shaped and normalized the way the model was trained.
+    """Verify that a trajectory matches the expected shape and normalization.
 
-    The temporal counterpart to `quality_gate`, and it exists because the
-    temporal failure mode is the worse of the two. A blurry image degrades a
-    score; a trajectory still in raw device units produces an embedding with no
-    relationship to the enrolled templates, and the system returns a *confident*
-    wrong verdict. Measured on one SigComp writer: the same signature scored
-    0.9370 normalized and 0.4888 in raw tablet units — accepted, then rejected.
+    Checks:
+      - Trajectory shape matches [L, TEMPORAL_INPUT_FEATURES].
+      - Point count meets MIN_TRAJECTORY_POINTS.
+      - Values are finite without NaN or infinity.
+      - X and Y coordinates are normalized (mean near 0, standard deviation in range).
+      - Pressure values are within [0.0, 1.0].
+      - dt values (if present) are within [0.0, 1.0].
 
-    `normalize_trajectory` z-scores X and Y per signature, so the check is
-    cheap: real input has mean ~0 and std ~1 on both axes, and raw tablet units
-    have means in the thousands. This detects the *class* of error rather than a
-    specific device's scale, so it needs no per-device configuration.
-
-    Pressure is checked for range only. It is not z-scored — it is scaled to
-    [0, 1] by a fixed device maximum — and a flat P = 1.0 is the legitimate
-    pressure-blind case that `verify` reports as degraded, not an error.
-
-    Returns: (passed: bool, details: dict) — same contract as `quality_gate`.
+    Returns:
+        (passed: bool, details: dict)
     """
     trajectory = np.asarray(trajectory, dtype=np.float32)
 
@@ -365,16 +283,13 @@ def trajectory_gate(trajectory):
                        "maximum, never the file's own max."}
 
     if TEMPORAL_INPUT_FEATURES >= 4:
-        # `dt` is the gap to the previous sample, clipped at 100 ms and scaled onto
-        # [0, 1] by the parsers. A raw timestamp column reaching here would be in
-        # device milliseconds and is the same class of error as unnormalized X/Y:
-        # it scores confidently against templates it has no relationship to.
+        # Validate time delta channel values.
         details["dt_min"] = round(float(trajectory[:, 3].min()), 3)
         details["dt_max"] = round(float(trajectory[:, 3].max()), 3)
         if trajectory[:, 3].min() < 0.0 or trajectory[:, 3].max() > 1.0:
             return False, {**details, "error":
-                           "dt outside [0, 1] — it is the inter-sample gap clipped at "
-                           "100 ms and scaled, not a raw timestamp."}
+                            "dt outside [0, 1] — it is the inter-sample gap clipped at "
+                            "100 ms and scaled, not a raw timestamp."}
 
     return True, details
 
@@ -382,21 +297,14 @@ def trajectory_gate(trajectory):
 def writer_independent_split(writer_ids, train_ratio=SPATIAL_SPLIT_RATIOS[0],
                               val_ratio=SPATIAL_SPLIT_RATIOS[1],
                               test_ratio=SPATIAL_SPLIT_RATIOS[2], seed=42):
-    """
-    Split writer IDs into non-overlapping train/val/test sets.
+    """Split writer IDs into non-overlapping train, validation, and test sets.
 
-    Ensures zero writer overlap across partitions (ISO/IEC 23053:2022 standard).
-    No individual writer appears in more than one partition, ensuring true
-    writer-independent open-set verification evaluation.
+    Guarantees no writer appears in more than one partition.
     """
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
     rng = random.Random(seed)
-    # Sorted first, so the partition depends on the seed and the SET of IDs,
-    # never on the order the caller happened to pass. Every in-repo caller
-    # already passed sorted(...), but a holdout list built from dict-key order
-    # on 2026-09-04 differed from theirs by 40 of 65 writers and let a
-    # checkpoint be scored on writers it had trained on (SUMMARY.md Part 9 §27).
-    ids = sorted(writer_ids)
+    # Sort first so partition is deterministic and independent of input dict order.
+    ids = sorted(writer_ids)  # same order-independence guarantee as writer_independent_split
     rng.shuffle(ids)
     n = len(ids)
     t1 = int(n * train_ratio)
@@ -405,33 +313,22 @@ def writer_independent_split(writer_ids, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 
 
 def split_record_path(weights_path):
-    """`models/weights/spatial_cnn.pth` -> `models/weights/spatial_cnn.split.json`."""
+    """Return the companion `.split.json` path for a given model weights file."""
     root, _ = os.path.splitext(weights_path)
     return root + ".split.json"
 
 
 def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, split_seed,
                       holdout_writers=None, input_size=None, max_gap_ms=None):
-    """
-    Write the writer partition a checkpoint was trained under, next to the weights.
-
-    A checkpoint that does not say which writers it trained on cannot be scored
-    honestly: on 2026-09-06 one was benchmarked on 34 writers from its own
-    training set because the scorer recomputed a different partition than
-    training had used, and nothing on disk could say so (SUMMARY.md Part 9 §27).
-    The record is the provenance that experiment had to reconstruct by scoring
-    seen and unseen writers separately.
-    """
+    """Save the writer split record beside the trained model weights."""
     record = {
         "data_dirs": [str(d) for d in data_dirs],
         "split_seed": split_seed,
         "holdout_writers": sorted(holdout_writers) if holdout_writers else None,
         "train": list(train_ids), "val": list(val_ids), "test": list(test_ids),
-        # The image size is not recoverable from the weights (adaptive pooling
-        # makes the trunk size-agnostic), so a checkpoint trained under
-        # SIGVER_SPATIAL_INPUT_SIZE says so here and is scored only at that size.
+        # Save image input size so evaluation uses matching dimensions.
         "input_size": list(input_size) if input_size else None,
-        # The dt clip (parsers.MAX_GAP_MS) is a data contract the same way.
+        # Save max gap threshold for dt delta calculations.
         "max_gap_ms": float(max_gap_ms) if max_gap_ms else None,
     }
     with open(split_record_path(weights_path), "w") as fh:
@@ -440,7 +337,7 @@ def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, spl
 
 
 def load_split_record(weights_path):
-    """The stored partition, or None for a checkpoint that predates the record."""
+    """Load the stored writer partition record, or None if not found."""
     path = split_record_path(weights_path)
     if not os.path.exists(path):
         return None
@@ -450,16 +347,10 @@ def load_split_record(weights_path):
 
 def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True,
                                input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None):
-    """
-    Refuse to score a checkpoint on a partition that disagrees with its record.
+    """Check that evaluation split matches the record saved during training.
 
-    Two failures, both hard errors: a writer about to be scored sits in the
-    checkpoint's stored training set (a leak, whatever else matches), or the
-    set about to be scored is not the stored held-out set (a different, and so
-    incomparable, partition: corpus list, split seed or pinned holdout changed
-    since training). `require_same_test=False` is for an explicit `--writers`
-    narrowing, where a subset of the held-out writers is the intention; the
-    leak check still applies. Returns the record, or None when there is none.
+    Ensures no training writer is evaluated as a test subject, and that
+    preprocessing parameters match training configuration.
     """
     record = load_split_record(weights_path)
     if record is None:
@@ -500,29 +391,7 @@ def check_split_against_record(weights_path, train_ids, test_ids, require_same_t
 def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
                 val_ratio=SPATIAL_SPLIT_RATIOS[1],
                 test_ratio=SPATIAL_SPLIT_RATIOS[2], seed=42):
-    """
-    Split writers, forcing `pinned` into the test partition.
-
-    `writer_independent_split` shuffles every ID it is handed, so the partition a
-    writer lands in depends on how many *other* writers are present. That makes
-    it impossible to add a corpus and still compare against an earlier number:
-    adding DeepSignDB's 498 writers relocates the 31 SVC2004/SigComp writers the
-    current result was scored on, and some of them land in training. The run
-    still completes and still reports a plausible EER, so the leak is silent.
-
-    Pinning holds those writers out no matter what else joins the corpus. The
-    remainder is split by the same seeded shuffle, so the unpinned partition is
-    reproducible and unaffected by the pinned set's size.
-
-    An unknown ID raises rather than being ignored: a typo would otherwise hold
-    out nothing and quietly score the model on the wrong writers.
-
-    `test_ratio` does not size the test partition here — the pinned writers do —
-    but it is still checked against the other two. Callers pass the same
-    `*ratios` triple to this and to `writer_independent_split`, so accepting a
-    triple that does not sum to 1 would mean the two paths disagree about the
-    split while both look like they were configured identically.
-    """
+    """Split writers into sets, placing all `pinned` writers into the test set."""
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
 
     ids = sorted(writer_ids)  # same order-independence guarantee as writer_independent_split
@@ -536,9 +405,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
     pinned = set(pinned)
     rest = [w for w in ids if w not in pinned]
 
-    # The pinned writers already occupy the test partition, so the remaining
-    # ratios are renormalized over train and val only. Splitting `rest` by the
-    # original test_ratio as well would hold out far more than asked.
+    # Renormalize remaining train and validation ratios over unpinned writers.
     denominator = train_ratio + val_ratio
     if denominator <= 0:
         raise ValueError("train_ratio + val_ratio must be positive to pin a holdout")
@@ -552,39 +419,18 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
                            num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
                            random_impostor_ratio=0.0):
-    """
-    Generate pairs under the **skilled-forgery** scenario (AGENTS.md eval protocol).
+    """Generate training or evaluation pairs under the skilled forgery setting.
 
-    Negatives are by default a genuine signature paired
-    against a forgery *of that same writer* — a deliberate imitation, not a
-    random stranger's signature. Random-impostor negatives are trivially
-    separable and inflate the reported EER into a number that does not describe
-    the attack the system actually faces. **All reported metrics use that pairing
-    and nothing here changes it**: leave `random_impostor_ratio` at 0 for every
-    evaluation loader.
-
-    `random_impostor_ratio` exists for *training* only, and training passes
-    RANDOM_IMPOSTOR_RATIO explicitly (scripts/train.py::build_loader). The
-    default stays 0: it was once the training constant itself, so when that
-    moved to 0.5 on 2026-08-09 every caller relying on the default, evaluation
-    included, silently got 50% random-impostor negatives. Supervising exclusively
-    on same-writer forgeries never tells the encoder that two different people
-    should be far apart, and measurement showed it does not infer that on its
-    own: on CEDAR the shipped model placed a stranger's genuine signature at mean
-    distance 0.048 against 0.038 for the same writer's, while that writer's own
-    skilled forgery sat at 2.043 — a genuine/forged axis rather than an identity
-    one, and 36.64% EER against random impostors. The ratio takes its share out
-    of the negative budget rather than adding to it, so the 1:1 positive-negative
-    balance per writer is unchanged and the only variable is what the negatives
-    are made of.
+    Positive pairs consist of two genuine signatures from the same writer.
+    Negative pairs by default consist of a genuine signature and a skilled forgery
+    targeting that same writer.
 
     Args:
-        samples_by_writer: dict mapping writer_id to
-            {"genuine": [paths/arrays], "forged": [paths/arrays]}.
-        num_genuine_per_writer: target genuine pairs per writer (label = 1).
-        num_forged_per_writer: target negative pairs per writer (label = 0).
-        random_impostor_ratio: fraction of the negative budget drawn from other
-            writers' genuine signatures instead of this writer's forgeries.
+        samples_by_writer: dict mapping writer ID to {"genuine": [...], "forged": [...]}.
+        num_genuine_per_writer: target count of positive pairs per writer.
+        num_forged_per_writer: target count of negative pairs per writer.
+        seed: random seed for reproducibility.
+        random_impostor_ratio: fraction of negative pairs drawn from other writers.
 
     Returns:
         (pairs: list of (sample1, sample2), labels: list of int)
@@ -600,60 +446,37 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         genuine = samples_by_writer[writer].get("genuine", [])
         forged = samples_by_writer[writer].get("forged", [])
 
-        # A writer needs 2 genuines to form a positive and >=1 forgery for a
-        # skilled negative. Without both, this writer cannot be scored.
+        # Each writer needs at least two genuine signatures and one forgery.
         if len(genuine) < 2 or not forged:
             continue
 
-        # A writer contributes equal numbers of positives and negatives, so the
-        # scarcer arm caps both. Capping each arm only by its own supply silently
-        # reweights datasets that ship few forgeries: UTSig has 27 genuine but 6
-        # skilled forgeries per writer, giving C(27,2)=351 genuine combinations
-        # against 27x6=162 impostor ones. At a 276 budget that produced a 1.70:1
-        # genuine-heavy batch for UTSig while every other dataset stayed 1:1, and
-        # UTSig's held-out EER rose 38.83% -> 43.43% when the budget was raised.
-        # At the old budget of 40 everything was balanced by accident, which is
-        # why this only surfaced once the budget went up.
+        # Balance pairs so positive and negative sample counts match.
         num_pairs = min(
             num_genuine_per_writer,
             num_forged_per_writer,
-            len(genuine) * (len(genuine) - 1) // 2,   # available genuine combinations
-            len(genuine) * len(forged),               # available impostor combinations
+            len(genuine) * (len(genuine) - 1) // 2,
+            len(genuine) * len(forged),
         )
 
-        # Both arms enumerate their pair space, shuffle it, and take the first
-        # `num_pairs` — they do **not** draw `num_pairs` times with replacement.
-        #
-        # Drawing with replacement from a space of the same size returns only
-        # about 1 - 1/e of it, so a writer whose budget said 276 was really
-        # training on ~174 distinct pairs and ~102 duplicates. `num_pairs` is
-        # already capped at the available combination count above, so the slice
-        # can never run short of the requested budget.
+        # Draw genuine pairs without replacement from all unique combinations.
         genuine_space = list(itertools.combinations(genuine, 2))
         rng.shuffle(genuine_space)
         for s1, s2 in genuine_space[:num_pairs]:
             pairs.append((s1, s2))
             labels.append(1)
 
-        # The negative budget splits between the two attack types. Rounding down
-        # keeps at least one skilled pair unless the ratio is exactly 1.0, so a
-        # small ratio never silently wipes out the arm that already works.
+        # Split negative pairs into skilled forgeries and random impostors.
         num_random = int(num_pairs * random_impostor_ratio)
         num_skilled = num_pairs - num_random
 
-        # Skilled-forgery pairs: authentic vs. an imitation of this same writer
+        # Skilled forgery pairs (authentic signature vs skilled imitation).
         impostor_space = list(itertools.product(genuine, forged))
         rng.shuffle(impostor_space)
         for s1, s2 in impostor_space[:num_skilled]:
             pairs.append((s1, s2))
             labels.append(0)
 
-        # Random-impostor pairs: authentic vs. a *different* writer's authentic
-        # signature. Drawn with replacement, unlike the two same-writer arms:
-        # the cross-writer space is the whole corpus (301 training writers x ~24
-        # genuines is over 7000 candidates per slot), so the coupon-collector
-        # duplication that cost the same-writer arms ~37% of their diversity is
-        # negligible here, and enumerating that space per writer is not.
+        # Random impostor pairs (authentic signature vs different writer's genuine signature).
         others = [w for w in samples_by_writer if w != writer
                   and samples_by_writer[w].get("genuine")]
         if not others:
@@ -668,20 +491,13 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
 
 
 def collate_temporal_pairs(batch):
-    """
-    Collate variable-length trajectory pairs into a padded batch.
-
-    Signatures have different point counts, so a batch must be padded to its
-    longest member. The true lengths are returned alongside so the LSTM can
-    `pack_padded_sequence` them — otherwise the recurrent state keeps consuming
-    pad rows and short samples get a different embedding inside a batch than
-    they do alone.
+    """Collate variable-length trajectory pairs into a padded batch for the LSTM.
 
     Args:
-        batch: list of (seq1 [L1, 3], seq2 [L2, 3], label) from TemporalSignatureDataset.
+        batch: list of (seq1 [L1, C], seq2 [L2, C], label) tuples.
 
     Returns:
-        (seq1 [B, maxL1, 3], lengths1 [B], seq2 [B, maxL2, 3], lengths2 [B], labels [B])
+        (padded1, lengths1, padded2, lengths2, labels)
     """
     seqs1, seqs2, labels = zip(*batch)
 
@@ -698,27 +514,14 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
                   max_shear=SPATIAL_AUG_MAX_SHEAR, max_scale=SPATIAL_AUG_MAX_SCALE,
                   max_translate=SPATIAL_AUG_MAX_TRANSLATE,
                   stroke_prob=SPATIAL_AUG_STROKE_PROB):
-    """
-    Perturb one preprocessed [1, H, W] image for training-time augmentation.
-
-    The spatial branch trains on 301 writers and saturates inside a single
-    epoch, so the limit is how much *variety* the training set holds, not how
-    many pairs are drawn from it. This is the only lever that adds variety
-    without new writers, and it is what the Siamese references (Dey et al.,
-    Hafemann et al.) rely on at comparable dataset sizes.
-
-    Every warp is small and label-preserving: a signature rotated 6 degrees or
-    written with a slightly wider pen is still that person's signature. Large
-    warps would manufacture pairs whose label is no longer true.
-
-    Ranges are deliberately conservative because forgery detection keys on fine
-    stroke geometry — the thing an aggressive warp destroys first.
+    """Apply affine warps and stroke variations to perturb an image during training.
 
     Args:
-        image: [1, H, W] float32, ink high, background 0 (post-`preprocess_image`).
-        rng:   a `numpy.random.Generator`.
+        image: [1, H, W] float32 image with inverted polarity (ink high, background 0).
+        rng: numpy random generator.
 
-    Returns: a new [1, H, W] float32 array in the same range. Never in-place.
+    Returns:
+        A perturbed [1, H, W] float32 image array.
     """
     channels, height, width = image.shape
     canvas = image[0]
@@ -728,19 +531,16 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
     shear = rng.uniform(-max_shear, max_shear)
 
     matrix = cv2.getRotationMatrix2D((width / 2.0, height / 2.0), angle, scale)
-    matrix[0, 1] += shear                      # horizontal skew, as in slanted handwriting
+    matrix[0, 1] += shear
     matrix[0, 2] += rng.uniform(-max_translate, max_translate) * width
     matrix[1, 2] += rng.uniform(-max_translate, max_translate) * height
 
-    # borderValue=0 keeps the background black, matching the inverted polarity
-    # preprocess_image produces. A white border would inject a bright constant
-    # the convolutions would read as ink.
+    # borderValue=0 keeps background black to match inverted polarity.
     warped = cv2.warpAffine(canvas, matrix, (width, height),
                             flags=cv2.INTER_LINEAR,
                             borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
 
-    # Stroke width stands in for pen choice and writing pressure. Applied to
-    # only some samples so the unmodified width stays the dominant mode.
+    # Occasionally vary stroke thickness using dilation or erosion.
     if rng.random() < stroke_prob:
         kernel = np.ones((2, 2), dtype=np.uint8)
         warped = (cv2.dilate(warped, kernel) if rng.random() < 0.5
@@ -750,18 +550,9 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
 
 
 class SpatialSignatureDataset(Dataset):
-    """
-    PyTorch Dataset loading spatial signature pairs for Siamese training.
+    """PyTorch Dataset loading spatial signature image pairs for Siamese training.
 
-    A pair element is a file path, a raw scan array, an already-rendered
-    canonical image, or an `[L, C]` pen trajectory — freely mixed, so one dataset
-    can draw on the image corpora and the pen corpora at once. `as_spatial_input`
-    resolves each side and is the only place that decides which kind a sample is.
-
-    Each item returns:
-        - img1_tensor: [1, H, W] float32, H/W from SPATIAL_INPUT_SIZE
-        - img2_tensor: [1, H, W] float32
-        - label: float tensor (1.0 for genuine, 0.0 for forgery)
+    Pairs can contain image paths, raw arrays, or rendered trajectory arrays.
     """
 
     def __init__(self, pairs, labels, transform=None, augment=False, seed=None,
@@ -770,16 +561,7 @@ class SpatialSignatureDataset(Dataset):
         self.labels = labels
         self.transform = transform
         self.augment = augment
-        # Overrides for augment_image's ranges (max_rotation_deg, max_shear,
-        # max_scale, max_translate, stroke_prob). Held on the instance so they
-        # reach DataLoader workers, which re-import the module defaults.
         self.augment_params = dict(augment_params or {})
-        # Seeded so an augmented run reproduces from --seed. An unseeded
-        # default_rng() draws OS entropy, which silently made augmented training
-        # irreproducible even though every other RNG in the pipeline was seeded.
-        # DataLoader workers re-seed this per worker — see `worker_init_fn` in
-        # scripts/train.py — because fork-spawned workers otherwise inherit one
-        # generator state and replay identical augmentations in lockstep.
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
@@ -788,17 +570,12 @@ class SpatialSignatureDataset(Dataset):
 
     def __getitem__(self, index):
         sample1, sample2 = self.pairs[index]
-        # Each side is resolved independently, so one pair may hold a scanned
-        # reference against a rasterized tablet capture. `as_spatial_input`
-        # decides which kind each is; the fork is documented there because the
-        # two look identical from here.
+        # Resolve each sample to a canonical spatial tensor.
         img1 = as_spatial_input(sample1, allow_trajectory=True)
         img2 = as_spatial_input(sample2, allow_trajectory=True)
 
         if self.augment:
-            # Each side is warped independently. Warping a pair identically would
-            # move both embeddings the same way and leave the distance between
-            # them unchanged, which teaches the metric nothing.
+            # Warp each side of the pair independently.
             img1 = augment_image(img1, self._rng, **self.augment_params)
             img2 = augment_image(img2, self._rng, **self.augment_params)
 
@@ -816,26 +593,12 @@ class SpatialSignatureDataset(Dataset):
 def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION_DEG,
                        jitter=TEMPORAL_AUG_JITTER,
                        max_speed_change=TEMPORAL_AUG_MAX_SPEED_CHANGE):
-    """
-    Perturb one [L, C] trajectory for training-time augmentation, preserving C.
+    """Apply speed, rotation, and jitter perturbations to a trajectory sequence.
 
-    Three perturbations, each chosen because it mimics variation a genuine
-    signer actually produces:
-
-      * **Speed change** — resample the sequence slightly faster or slower.
-        People do not sign at a fixed tempo, and speed is the feature family the
-        derived (dX, dY, dP) channels key on, so varying it teaches tolerance
-        where the model is most sensitive.
-      * **Small rotation** — nobody aligns the pen identically to the tablet
-        every time. Rotation applies to X/Y only, never pressure.
-      * **Coordinate jitter** — sensor noise and hand tremor.
-
-    Deliberately absent: mirroring, which produces a trajectory the signer could
-    never draw, and scaling, which is already normalized away because X/Y are
-    z-scored per signature by `normalize_trajectory`.
-
-    Sequences too short to resample are returned unchanged; perturbing three
-    points corrupts rather than varies them.
+    Perturbations mimic natural variations in signing:
+    - Speed variations resample the trajectory slightly faster or slower.
+    - Small rotations vary the angle of the pen strokes.
+    - Coordinate jitter adds minor sensor noise and natural tremor.
     """
     sequence = np.asarray(sequence, dtype=np.float32)
     if len(sequence) < 8:
@@ -849,8 +612,7 @@ def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION
 
     xy += rng.normal(0.0, jitter, size=xy.shape).astype(np.float32)
 
-    # Resample onto a stretched or compressed timeline. Interpolating each
-    # channel against the original index keeps the stroke order intact.
+    # Resample trajectory along a modified timeline to vary signing speed.
     scale = 1.0 + rng.uniform(-max_speed_change, max_speed_change)
     new_length = max(8, int(round(len(sequence) * scale)))
     source = np.arange(len(sequence), dtype=np.float32)
@@ -859,16 +621,7 @@ def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION
     columns = [np.interp(target, source, xy[:, 0]),
                np.interp(target, source, xy[:, 1])]
 
-    # Pressure and every trailing capture channel (`dt`, and whatever a widened
-    # contract adds later) ride the same resampled timeline. They are physical
-    # quantities in [0, 1] rather than coordinates, so they are never rotated or
-    # jittered — only carried through the new timing — and interpolation can
-    # drift them a hair outside the range at the endpoints.
-    #
-    # Rebuilding a fixed three-column array here used to drop the 4th channel
-    # silently: the narrowed batch then fed a wider LSTM, which raises for
-    # batches of two or more but runs to completion on a single-sample batch and
-    # returns a plausible embedding computed from the wrong tensor.
+    # Interpolate pressure and additional channels along the new timeline.
     for channel in range(2, sequence.shape[1]):
         columns.append(np.clip(np.interp(target, source, sequence[:, channel]), 0.0, 1.0))
 
@@ -876,33 +629,18 @@ def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION
 
 
 class TemporalSignatureDataset(Dataset):
-    """
-    PyTorch Dataset loading temporal (dynamic) signature pairs for Siamese training.
-
-    Each item returns:
-        - seq1_tensor: trajectory sequence tensor [L1, 3] containing (X, Y, Pressure)
-        - seq2_tensor: trajectory sequence tensor [L2, 3] containing (X, Y, Pressure)
-        - label: float tensor (1.0 for genuine, 0.0 for forgery)
-    """
+    """PyTorch Dataset loading temporal signature trajectory pairs for Siamese training."""
 
     def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42):
         self.pairs = pairs
         self.labels = labels
-        # Training only. Perturbing validation or test data would measure the
-        # model against inputs the deployed system never sees.
         self.augment = augment
         self.augment_scale = augment_scale
-        # Seeded from the run, not a hard-coded 0. `_seed_worker` in scripts/train.py
-        # reads `_seed` to give each forked DataLoader worker its own augmentation
-        # stream; without the attribute it silently no-ops, so every worker replayed
-        # the identical draws in lockstep — exactly the bug already found and fixed
-        # on the spatial side. A fixed 0 also meant --seed never varied the temporal
-        # augmentation, so "independent" re-runs of that arm were not independent.
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
     def _augment(self, sequence):
-        """Perturb one side of a pair, with every range scaled by `augment_scale`."""
+        """Perturb a trajectory with scaled augmentation parameters."""
         return augment_trajectory(sequence, self._rng,
                                   max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION_DEG * self.augment_scale,
                                   jitter=TEMPORAL_AUG_JITTER * self.augment_scale,
@@ -914,16 +652,7 @@ class TemporalSignatureDataset(Dataset):
     def __getitem__(self, index):
         seq1, seq2 = self.pairs[index]
         if self.augment:
-            # Each side is perturbed independently: two recordings of the same
-            # signature differ by exactly this kind of variation, so the pair
-            # stays honest.
-            #
-            # `augment_scale` shrinks all three ranges together. At the default
-            # 1.0 strength, augmentation measured 2.54 EER points *worse* than
-            # none, and the spatial branch's rule — "keep the ranges small;
-            # forgery detection keys on fine stroke geometry" — applies with
-            # more force to a trajectory, which is nothing but fine geometry.
-            # Strength is therefore a tunable, not a fixed cost of enabling.
+            # Perturb each sequence independently.
             seq1 = self._augment(seq1)
             seq2 = self._augment(seq2)
         return (
@@ -931,4 +660,3 @@ class TemporalSignatureDataset(Dataset):
             torch.tensor(seq2, dtype=torch.float32),
             torch.tensor(self.labels[index], dtype=torch.float32),
         )
-

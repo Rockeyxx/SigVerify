@@ -1,13 +1,8 @@
-"""
-interfaces.py — Signature Verification System
+"""GUI interfaces for signature verification.
 
-Thin GUI-facing wrapper around Omar's real integration facade
-(src/verification.py). This module does NOT reimplement any model or
-scoring logic — it only converts between the GUI's storage format
-(base64 strings in JSON) and the real SignatureService's format
-(raw bytes embeddings).
-
-Dynamic (tablet) verification is not wired yet — pending src/capture/.
+This module provides a GUI wrapper around SignatureService (src/verification.py).
+It converts between GUI storage formats (base64-encoded strings) and raw embedding
+byte formats used by the service.
 """
 
 import os
@@ -32,11 +27,11 @@ def _get_service() -> RealSignatureService:
     return _service
 
 def _prepare_image(path: str) -> str:
-    """
-    Full preparation pipeline for any image before it reaches the model:
-    1. Crop to ink + binarize (fixes phone-photo framing/lighting issues)
-    2. Copy to an ASCII-safe temp path (fixes cv2.imread failing silently
-       on non-ASCII paths, e.g. Arabic "Desktop" folder names)
+    """Prepare an image before sending it to the model.
+
+    Steps:
+      1. Crop to ink and clean background noise.
+      2. Copy to an ASCII-safe temporary path to prevent filename encoding issues.
     """
     cleaned_path = crop_to_ink(path)
 
@@ -51,16 +46,12 @@ def _prepare_image(path: str) -> str:
 
 
 def enroll_client(image_paths: list) -> dict:
-    """
-    Runs each reference image through the real spatial model.
+    """Enroll client reference images using the spatial model.
 
-    Returns a dict (NOT a bare list anymore):
-        {
-            "embeddings": [base64 str, ...],
-            "spatial_origin": "scan",   # these are real scanned/photographed images
-        }
-    The caller (enrollment.py) must save spatial_origin alongside the
-    embeddings — verify_client() requires it later.
+    Returns:
+        A dictionary containing:
+          - "embeddings": list of base64-encoded embedding strings.
+          - "spatial_origin": origin type ("scan").
     """
     safe_paths = [_prepare_image(p) for p in image_paths]
     service = _get_service()
@@ -72,13 +63,7 @@ def enroll_client(image_paths: list) -> dict:
 
 
 def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_image_path: str) -> dict:
-    """
-    Verifies a probe image against a client's stored reference embeddings.
-
-    spatial_origin ("scan" or "render") must match how those references
-    were originally enrolled — main's verify() refuses to guess this.
-    Read it from the client's stored enrollment record (storage.py).
-    """
+    """Verify a probe image against stored client reference embeddings."""
     service = _get_service()
     ref_bytes = [base64.b64decode(b) for b in reference_embeddings_b64]
     safe_probe_path = _prepare_image(probe_image_path)

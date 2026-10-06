@@ -7,8 +7,8 @@ The first is that the harness scores through `verify()`. That is the entire
 reason this tool exists rather than another `benchmark.py` flag: `trajectory_gate`
 and the routing-dependent threshold selection are reachable *only* from
 `verify()`, so a harness that embedded and compared scores itself would report a
-number for a code path the deployment does not run. Part 9 §12 records three
-serving defects that were invisible to the suite for exactly that reason.
+number for a code path the deployment does not run. Three serving defects
+were invisible to the suite for exactly that reason.
 
 The second is that tau is never fitted on the writers it is then scored on. A
 constant selected on the scores it is quoted against is optimistically biased

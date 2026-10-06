@@ -1,12 +1,6 @@
-"""
-Training Pipeline — Signature Verification System
+"""Training pipeline for signature verification models.
 
 Entry point script for training spatial (CNN) and temporal (LSTM) Siamese networks.
-
-CLI Examples:
-    OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch spatial --data-dir data/cedar data/bhsig260 data/utsig --epochs 100 --batch-size 32 --num-workers 4 --seed 42
-    OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch temporal --data-dir ./data/svc2004
-    OPENCV_LOG_LEVEL=ERROR python scripts/train.py --branch spatial --resume models/weights/checkpoint_spatial.pth
 """
 
 
@@ -271,21 +265,11 @@ def parse_args(argv=None):
 
 
 def apply_derived_features(writer_samples):
-    """
-    Replace every trajectory with its 16 z-scored time functions, in place.
+    """Replace every trajectory with its 16 z-scored time functions in place.
 
-    Applied once here rather than in `__getitem__` because the Butterworth
-    filter would otherwise re-run on every sample on every epoch. The z-scoring
-    is per signature and matches `tools.dtw_baseline.standardized_time_functions`
-    exactly, so the training input is the input Arm 0 measured — a different
-    normalization here would make the two numbers describe different
-    experiments.
-
-    Measured 2026-08-09 with DTW under the enrolment protocol: worth ~6 EER
-    points on practised-signature corpora (sigcomp_Dutch 11.53% -> 5.02%,
-    sigcomp_Chinese 15.31% -> 9.35%) and **costly on SVC2004** (8.63% ->
-    17.02%), whose signers invented the signatures they enrolled and whose
-    dynamics are therefore uninformative. Expect the same split here.
+    Applied once before training to avoid recomputing filtering per epoch.
+    Note: Derived time functions improve discrimination on practiced signature
+    corpora, but can degrade performance when signatures lack consistent dynamic patterns.
     """
     from tools.dtw_baseline import standardized_time_functions
 
@@ -494,8 +478,7 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
         "optimizer_state_dict": optimizer.state_dict(),
         "loss": loss,
         "best_val_loss": best_val_loss,
-        # Without this the counter restarts on resume and the run trains past
-        # the epoch it would have stopped at (2026-09-25, about five GPU-hours).
+        # Save early stopping state so resuming training preserves the patience counter.
         "early_stopping": early_stopping.state_dict() if early_stopping else None,
     }, path)
     tqdm.write(f"  Checkpoint saved: {path}")
@@ -572,23 +555,8 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
 def main(argv=None):
     args = parse_args(argv)
 
-    # docs/rules.md section 12 mandates fixed global PRNG seeds. `torch.manual_seed`
-    # alone left numpy's and Python's global generators free-running, and left CUDA
-    # kernel selection nondeterministic. Most of this pipeline is already careful to
-    # thread locally-seeded generators through (`writer_independent_split`,
-    # `generate_skilled_pairs`, both Dataset classes), so this closes the remaining
-    # global surface rather than being the only defence.
-    #
-    # Since 2026-09-21 a run IS bit-reproducible per seed on one machine, and
-    # `use_deterministic_algorithms` enforces it: any kernel without a
-    # deterministic implementation raises at the first backward pass instead of
-    # silently varying. The two that did (adaptive avg/max pool backward on CUDA)
-    # were replaced by sliced pools in src/models/siamese.py; the temporal branch
-    # never had one. CUBLAS_WORKSPACE_CONFIG is the cuBLAS half of the same
-    # guarantee and has to be in the environment before the first CUDA call.
-    # Seeds still differ from each other by ~0.7 points, so arms are still
-    # compared over six paired seeds; reproducibility makes each seed a fixed
-    # point, not the spread smaller.
+    # Seed Python, NumPy, and PyTorch RNGs and enforce deterministic algorithms
+    # to guarantee exact run reproducibility.
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -694,23 +662,17 @@ def main(argv=None):
             embedding_dim=args.embedding_dim or TEMPORAL_EMBEDDING_DIM,
             bidirectional=not args.unidirectional,
             pressure_dropout=pressure_dropout,
-            # The derived set already carries dx, dy, ddx, ddy. Appending deltas
-            # to it differentiates them a second time, which is what invalidated
-            # the 2026-08-10 arm.
+            # Pre-derived features already include velocity and acceleration.
+            # Do not append extra deltas when features are pre-derived.
             derive_deltas=args.temporal_features != "derived",
         ).to(device)
 
-        # Distinct filenames so the pressure-blind ablation can never silently
-        # overwrite the shipped pressure-aware weights (AGENTS.md pressure ablation).
+        # Distinct filenames so pressure-blind runs do not overwrite
+        # the shipped pressure-aware weights.
         weights_filename = ("temporal_lstm.pth" if has_pressure
                             else "temporal_lstm_task1.pth")
 
-        # Same reasoning, extended to the channel set. A derived-feature run
-        # produces a 16-channel model that the shipped TEMPORAL_CHANNELS-width
-        # verifier cannot load, so writing it to the shipped name replaces
-        # working weights with ones no deployed path can use. This is not
-        # hypothetical: it happened on 2026-08-09 and the file had to be
-        # recovered from release v0.6.0.
+        # Distinct filename for derived feature models to preserve standard weights.
         if args.temporal_features == "derived":
             weights_filename = weights_filename.replace(".pth", "_derived.pth")
 
@@ -818,8 +780,7 @@ def main(argv=None):
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")
     print(f"Weights: {weights_path}")
-    # The partition travels with the weights, so benchmark.py and evaluate.py can
-    # refuse to score this checkpoint on writers it trained on (Part 9 §27).
+    # Save the writer split record so evaluation can verify partition integrity.
     save_split_record(weights_path, train_ids, val_ids, test_ids,
                       data_dirs=args.data_dir, split_seed=args.split_seed,
                       holdout_writers=args.holdout_writers,

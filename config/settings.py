@@ -1,12 +1,6 @@
 """
-Configuration Core — Signature Verification System (EE 499)
-
-Consolidated hyperparameter definitions, system boundaries, paths,
-and global operational constants.
-
-Model Weights Storage Note:
-  Binary `.pth` weight files are excluded from git tracking via `.gitignore`
-  and are distributed through GitHub Releases for local setup.
+Configuration settings and constants for signature verification system.
+Contains model hyperparameters, paths, hardware constraints, and decision thresholds.
 """
 
 import os
@@ -68,14 +62,8 @@ PIN_MEMORY = False                      # CPU-bound execution — memory pinning
 # ─── Spatial Branch (Offline — Siamese CNN) ───────────────────────────
 def spatial_input_size_from_env(value, default):
     """
-    Parse `SIGVER_SPATIAL_INPUT_SIZE=WxH`, the one override for the image size.
-
-    It exists for the input-size sweep only: the size has to reach DataLoader
-    workers (which re-import this module under forkserver) and the benchmark
-    alike, and the environment is the only channel both inherit. A checkpoint
-    trained under it records the size in its split record, and benchmark.py
-    refuses to score it at any other size. A malformed value raises rather than
-    falling back, so a typo cannot silently train at the default.
+    Parse the image size override from SIGVER_SPATIAL_INPUT_SIZE (e.g. '220x155').
+    Used during input size sweeps. Raises ValueError if format is invalid.
     """
     if value is None or value == "":
         return default
@@ -145,7 +133,7 @@ MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean thresh
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
-# The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%. See SUMMARY.md Part 9 §10.
+# The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.
 # Capture hardware must supply timestamps (channel 3 of standard 7-channel tablet data).
 TEMPORAL_CHANNELS = "dt"                # "xyp" for the legacy 3-channel weights
 # Input feature dimension per channel mode. Used to build model input width dynamically.
@@ -200,7 +188,7 @@ TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
 
 # ─── Enrollment Evaluation Protocol ──────────────────────────────────
 # Operational protocol: subjects register K=5 genuine signatures, and probe signatures match against nearest enrolled reference embedding.
-# K = 5 aligns with standard benchmark protocols (SVC2004). See AGENTS.md and SUMMARY.md.
+# K = 5 aligns with standard benchmark protocols (SVC2004). See AGENTS.md.
 NUM_ENROLLMENT_REFERENCES = 5
 
 # Number of independent reference draws averaged during evaluation to minimize sample variation.
@@ -246,25 +234,15 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# ALPHA_DEFAULT = 0.5 was measured, not assumed. On paired SigComp2011 writers
-# (25 writer-disjoint splits, alpha fitted on 10 writers and scored on the other
-# 10) the fixed 0.5 scored 13.85% against 14.57% for a per-split grid search;
-# the fitted value was 0.548 +/- 0.122, statistically the default. Cascade, AND,
-# likelihood-ratio and band rules all measured worse than the plain average
-# (SUMMARY.md Part 9, sections 7 and 25). Do not grid-search alpha on small
-# calibration sets; it overfits.
+# Equal weighting (alpha = 0.5) is robust across evaluation splits.
 ALPHA_DEFAULT = 0.5                     # Measured: equal weighting is the optimum
 ALPHA_GRID_STEP = 0.05
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
-# See AGENTS.md and SUMMARY.md.
 SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-# Fused tau: EER point of 0.5*s + 0.5*t on the 24 paired writers held out by
-# both branches (10 SigComp2011 + 14 SigComp2009/NFI), K=5, 10 draws, measured
-# 2026-09-18 (SUMMARY.md Part 9 section 28). The previous 0.8196 was the midpoint
-# of the two branch thresholds and refused 15% of genuine users on those writers.
+# Fused threshold: EER point of 0.5*s + 0.5*t on paired writers held out by both branches.
 DECISION_THRESHOLD = 0.7751             # Measured fused threshold (EER point on clean paired writers)
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────

@@ -1,26 +1,7 @@
-"""
-Sig2Vec and the average-precision ranking loss — phase 2 of SynSig2Vec.
+"""Sig2Vec model and average-precision ranking loss for synthetic trajectories.
 
-Phase 1 (`tools/sigma_lognormal.py`) turns one genuine signature into two pools
-of synthetics: `G1` at low distortion and `G2` at median distortion. This module
-learns from that ordering. The network sees a template and its synthetics and is
-trained so that `G1` ranks above `G2` by similarity to the template — no skilled
-forgeries anywhere in the objective, which is the entire appeal for this project.
-
-**Clean-room** from the paper (arXiv:1911.05358, Tables 1-2). The authors'
-implementation is GPL-3.0 and this repository is MIT, so nothing was copied.
-
-## Where this deviates from the paper, and why
-
-The paper optimises AP through *direct loss minimisation* (Song et al. 2016),
-which needs a dynamic program to find the loss-augmented ranking `y_direct`.
-This module instead uses a **smooth relaxation**: the rank indicator becomes a
-sigmoid, making AP differentiable directly. That is a real deviation and it may
-cost accuracy. It is taken because a subtly wrong DP would produce a loss that
-trains to a plausible-looking number while optimising the wrong quantity — the
-failure mode this project keeps hitting — whereas a smooth surrogate is
-verifiable by the tests in `tests/test_sig2vec.py`. Swap in the exact DP later
-and compare; do not assume either is right.
+Learns representations from genuine signature templates and their synthetic
+distortions (G1 and G2) without requiring skilled forgery samples during training.
 """
 
 import numpy as np

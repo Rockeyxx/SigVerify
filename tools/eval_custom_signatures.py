@@ -1,8 +1,4 @@
-"""
-Custom Signature Evaluation Script
-Benchmarking Spatial Branch Models (With UTSig vs Without UTSig)
-on custom signature photo samples from ~/Downloads (H: English, M: Arabic, Omar: Arabic).
-"""
+"""Evaluate spatial models on custom signature image samples."""
 
 import os
 import tempfile
