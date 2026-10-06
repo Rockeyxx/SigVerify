@@ -281,14 +281,7 @@ class TestGenerateSkilledPairs:
             assert kind1.startswith("g") and kind2.startswith("f")
 
     def test_default_negatives_are_same_writer_forgeries(self):
-        """
-        A caller that passes no ratio gets skilled forgeries only. The default
-        was bound to the training constant RANDOM_IMPOSTOR_RATIO, so when
-        training moved to 0.5 on 2026-08-09 every caller relying on it (the
-        notebook's "Skilled Forgery" preview, benchmark.py without --enroll)
-        silently got 50% cross-writer negatives. Every other test here passes
-        the ratio explicitly, which is why none of them noticed.
-        """
+        """Verify that default negative pairs are same-writer skilled forgeries."""
         pairs, labels = generate_skilled_pairs(self._writers())
         cross = [(s1, s2) for (s1, s2), y in zip(pairs, labels)
                  if y == 0 and s1.split("_")[0] != s2.split("_")[0]]
@@ -370,14 +363,7 @@ class TestGenerateSkilledPairs:
                 assert s1.split("_")[0] != s2.split("_")[0]
 
     def test_ratio_zero_reproduces_the_skilled_only_pairing(self):
-        """
-        Ratio 0 must give the pre-2026-08-04 pairing: every negative a same-writer
-        forgery, no cross-writer pair anywhere.
-
-        This used to compare against the *default*, which was 0.0. The default is
-        now 0.5 — the shipped value — so the assertion has to name the behaviour
-        it wants rather than inherit it.
-        """
+        """Verify ratio 0 produces skilled forgery negatives without cross-writer pairs."""
         pairs, labels = generate_skilled_pairs(self._writers(), seed=7,
                                                random_impostor_ratio=0.0)
         for (s1, s2), y in zip(pairs, labels):
@@ -746,12 +732,7 @@ class TestPinnedHoldout:
             assert not set(a) & set(b)
 
     def test_split_does_not_depend_on_input_order(self):
-        """
-        2026-09-18: a holdout list generated from an unsorted dict-key order
-        differed from the sorted split by 40 of 65 writers, and a checkpoint
-        pinned to it was then scored on writers it had trained on. The split
-        must depend on the seed and the set of IDs, never on their order.
-        """
+        """Verify that partitioning is deterministic and independent of input list order."""
         ids = [f"w{i}" for i in range(100)]
         shuffled = list(reversed(ids))
         assert writer_independent_split(ids, 0.7, 0.15, 0.15, seed=42) == \

@@ -1,19 +1,7 @@
-"""
-Dataset leakage checks.
+"""Dataset leakage and split validation tests.
 
-Every published EER in this repository is "held-out writers of the training
-corpora". Two ways that claim has silently failed:
-
-  * 2026-09-06: a checkpoint was scored on 34 writers it had trained on, because
-    a holdout list built from dict-key order differed from the sorted split by
-    40 of 65 writers (SUMMARY.md Part 9 §27).
-  * 2026-08-31: a "cross-corpus" benchmark contained 362 images byte-identical
-    to a training corpus, and the trained-on checkpoint scored 0.39% on it
-    (docs/SOLUTIONS.md, "RANDOM_IMPOSTOR_RATIO did not fix the identity axis").
-
-The unit tests here pin the mechanism with synthetic data so they run in CI.
-The real-data tests re-check the corpora on disk and skip when a corpus is not
-downloaded: a missing dataset is not a leak.
+Verifies writer independence across train, validation, and test partitions,
+preventing data leakage and overlap across datasets.
 """
 
 import collections
@@ -134,7 +122,7 @@ class TestLeakDetectors:
 
 class TestSplitLeakage:
     def test_pinned_writers_never_reach_training_whatever_the_input_order(self):
-        """The §27 failure shape: the same pin list, three orderings of the corpus."""
+        """The leak's failure shape: the same pin list, three orderings of the corpus."""
         ids = [f"w{i}" for i in range(80)]
         pinned = ["w7", "w70"]
         for order in (ids, list(reversed(ids)), sorted(ids, key=lambda s: s[::-1])):
@@ -143,13 +131,7 @@ class TestSplitLeakage:
 
 
 class TestSplitRecord:
-    """
-    A checkpoint carries the writer split it was trained under, and scoring
-    refuses a partition that disagrees with it. This is the check that would
-    have stopped the 2026-09-06 incident at the first benchmark: `exp_sc11`'s
-    stored test set was the pinned list, the benchmark recomputed the default
-    split, and 34 of the 65 writers it scored were in the stored train set.
-    """
+    """Tests that model checkpoints verify writer split records during evaluation."""
 
     def _record(self, tmp_path, train, val, test):
         weights = str(tmp_path / "model.pth")
@@ -258,15 +240,7 @@ _PEN_CORPORA = TEMPORAL_TRAIN_DIRS
 @pytest.mark.parametrize("weights, train_dirs", [(SPATIAL_WEIGHTS_PATH, SPATIAL_TRAIN_DIRS),
                                                  (TEMPORAL_WEIGHTS_PATH, TEMPORAL_TRAIN_DIRS)])
 def test_settings_training_corpora_match_the_shipped_split_record(weights, train_dirs):
-    """
-    The settings name the corpora a run trains on; the record next to the
-    shipped weights names the ones it did. Anything that builds a split from
-    settings while they differ scores a partition the checkpoint never trained
-    under. The notebook did exactly that with the parser registry's 4-corpus
-    list: 5 of its 68 "held-out" spatial writers were training writers
-    (2026-09-27). Update the settings when a weight trained on other corpora
-    ships.
-    """
+    """Verify that settings training corpora match the split record of shipped weights."""
     record = load_split_record(weights)
     if record is None:
         pytest.skip(f"no split record next to {weights}")
@@ -277,7 +251,7 @@ def test_settings_training_corpora_match_the_shipped_split_record(weights, train
 @pytest.mark.skipif(not _have(*_IMAGE_CORPORA), reason="CEDAR, BHSig260 and UTSig not all downloaded")
 def test_real_spatial_split_matches_the_published_held_out_set():
     """
-    README and SUMMARY quote 65 held-out spatial writers: 8 CEDAR, 23 Hindi,
+    The README quotes 65 held-out spatial writers: 8 CEDAR, 23 Hindi,
     16 Bengali, 18 UTSig, from seed 42. Every published spatial number stands on
     that set. If the corpus list, the seed, the ratios or the split function
     change, this fails and the documents have to be re-derived rather than
@@ -289,7 +263,7 @@ def test_real_spatial_split_matches_the_published_held_out_set():
     held_out = writer_independent_split(sorted(samples), *SPATIAL_SPLIT_RATIOS, seed=42)[2]
     from_dict_order = writer_independent_split(list(samples.keys()), *SPATIAL_SPLIT_RATIOS, seed=42)[2]
 
-    assert set(held_out) == set(from_dict_order), "the split depends on input order again (§27)"
+    assert set(held_out) == set(from_dict_order), "the split depends on input order again"
     assert collections.Counter(map(_corpus_of, held_out)) == {
         "cedar": 8, "bhsig_Hindi": 23, "bhsig_Bengali": 16, "utsig": 18}
 
@@ -303,7 +277,7 @@ def test_real_temporal_split_matches_the_published_held_out_set():
     held_out = writer_independent_split(sorted(samples), *TEMPORAL_SPLIT_RATIOS, seed=42)[2]
     from_dict_order = writer_independent_split(list(samples.keys()), *TEMPORAL_SPLIT_RATIOS, seed=42)[2]
 
-    assert set(held_out) == set(from_dict_order), "the split depends on input order again (§27)"
+    assert set(held_out) == set(from_dict_order), "the split depends on input order again"
     assert collections.Counter(map(_corpus_of, held_out)) == {
         "svc": 10, "sigcomp_Dutch": 15, "sigcomp_Chinese": 6}
 

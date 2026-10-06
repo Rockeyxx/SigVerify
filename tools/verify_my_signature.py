@@ -1,16 +1,6 @@
-"""Run your own signature images through the shipped spatial model.
+"""Verify signature images using the spatial branch model.
 
-A hands-on check of the deployed decision path — the same `verify()` the GUI
-calls, not the evaluation harness. Prints the raw similarity score alongside the
-decision, because the score is what tells you whether a call was marginal or
-clear-cut; the decision alone hides that.
-
-    python tools/verify_my_signature.py \
-        --references mine/ref1.png mine/ref2.png \
-        --probes mine/genuine.png mine/forged.png
-
-Spatial only. The temporal branch needs a pen trajectory (x, y, pressure at
-100 Hz) which a photograph cannot supply.
+Runs probe images against reference signatures using the standard verification pipeline.
 """
 import argparse
 import os
@@ -30,16 +20,7 @@ from src.verification import (_as_spatial_input, embed, load_model,
 
 
 def dump_model_input(path, destination):
-    """
-    Write the exact array the model receives for `path`, as a viewable PNG.
-
-    `_as_spatial_input` is the same call `embed()` makes, so this is not a
-    reconstruction: it is the tensor, scaled from [0.0, 1.0] back to [0, 255].
-    It looks inverted compared with the file on disk because the contract is
-    background 0, ink high (SUMMARY.md Part 1), and it is 155x220 regardless of
-    the input's aspect ratio. A signature that vanishes, fills the frame, or
-    arrives upside down here explains a wrong decision better than any score.
-    """
+    """Save the preprocessed tensor array for an input image as a PNG file."""
     array = _as_spatial_input(path)[0]
     cv2.imwrite(destination, np.clip(array * 255.0, 0, 255).astype(np.uint8))
     ink = float((array > 0.1).mean() * 100)

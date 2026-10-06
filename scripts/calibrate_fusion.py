@@ -1,9 +1,8 @@
-"""
-Paired Multimodal Calibration Engine.
+"""Multimodal calibration script.
 
 Renders online trajectories into paired spatial images, evaluates both branches
-on the exact same signatures across validation writers, and derives the true
-empirically optimal fusion weight alpha and decision threshold tau.
+on the same signatures across validation writers, and finds the optimal
+fusion weight alpha and decision threshold tau.
 """
 
 from __future__ import annotations
@@ -204,7 +203,7 @@ def main():
     f_eer, _ = compute_eer(f_test_gen, f_test_imp)
     f_far, f_frr = compute_far_frr(f_test_gen, f_test_imp, tau)
 
-    # Fixed alpha = 0.5 (Project default; SUMMARY.md §7 proved fixed beats fitted across 25 splits)
+    # Fixed alpha = 0.5 default baseline.
     from config.settings import ALPHA_DEFAULT
     fixed_gen = ALPHA_DEFAULT * s_test_gen + (1.0 - ALPHA_DEFAULT) * t_test_gen
     fixed_imp = ALPHA_DEFAULT * s_test_imp + (1.0 - ALPHA_DEFAULT) * t_test_imp
@@ -218,7 +217,7 @@ def main():
     print(f"{f'FUSED (fitted a={alpha:.2f})':<22}{f_eer * 100:>9.2f}%{f_far * 100:>9.2f}%{f_frr * 100:>9.2f}%{tau:>12.4f}")
     print(f"{f'FUSED (fixed a={ALPHA_DEFAULT:.2f})':<22}{fixed_eer * 100:>9.2f}%{fixed_far * 100:>9.2f}%{fixed_frr * 100:>9.2f}%{fixed_tau:>12.4f}")
     print("====================================================")
-    print("Note: ALPHA_DEFAULT = 0.5 remains fixed in config/settings.py per SUMMARY.md §7.")
+    print("Note: ALPHA_DEFAULT = 0.5 remains fixed in config/settings.py.")
 
 
 if __name__ == "__main__":

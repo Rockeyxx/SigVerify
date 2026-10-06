@@ -1,21 +1,9 @@
-"""Score, or retrain, a published release and compare with the numbers its notes published.
+"""Score or retrain a published release and compare with published metrics.
 
+Examples:
     python tools/reproduce_release.py --list
-    python tools/reproduce_release.py v0.6.0                    # score its weights
-    python tools/reproduce_release.py v0.10.0 --branch spatial
-    python tools/reproduce_release.py v0.6.0 --retrain           # hours to days: run it detached
-
-Weights download once into models/weights/releases/<tag>/ (gitignored), with their
-split records where the release has them. Scoring runs the current
-scripts/benchmark.py under the enrolment protocol in config/settings.py, on the
-corpora in SPATIAL_TRAIN_DIRS / TEMPORAL_TRAIN_DIRS, on the device each release
-was measured on (CPU-measured ones run with the GPU hidden). Run it with the
-CUDA venv so both kinds are available.
-
---retrain checks out the commit that ran the release's recorded training
-command into a git worktree under the cache, trains there, and scores the
-result the same way. Releases whose notes recorded no command are refused: a
-guessed recipe would reproduce nothing.
+    python tools/reproduce_release.py v0.8.0
+    python tools/reproduce_release.py v0.8.0 --branch spatial
 """
 import argparse
 import os
@@ -42,14 +30,7 @@ class Train:
 
 @dataclass(frozen=True)
 class Weight:
-    """
-    One release asset. `published` holds the notes' figures by kind: "mean" and
-    "sd" are the mean and spread over the ten enrolment draws, "pooled" is the EER
-    of the representative draw, and a corpus name maps to that corpus's mean.
-    `device` is where those figures were measured: the same file differs in the
-    second decimal between CPU and CUDA, and each figure reproduces exactly only
-    on its own device (checked for every release on 2026-09-27, ENG_REPORT M10).
-    """
+    """Represents a release asset and its published evaluation metrics."""
     branch: str
     asset: str
     published: dict
@@ -59,37 +40,54 @@ class Weight:
 
 
 _V05_TEMPORAL = {"mean": 10.26, "sigcomp_Dutch": 4.19, "sigcomp_Chinese": 8.11, "svc": 17.46}
-_DT_RECIPE = Train("4a9f6ed", ("--branch", "temporal", "--temporal-channels", "dt", "--seed", "45"))
+# Recipes the notes did not publish were recovered from the training logs in logs/
+# and the experiment record (docs/RELEASE_PLAN.md says which source each comes from).
+# The six paired temporal seeds all trained on split seed 42, as the split records say.
+_DT_RECIPE = Train("4a9f6ed", ("--branch", "temporal", "--temporal-channels", "dt", "--seed", "45",
+                               "--split-seed", "42", "--epochs", "100"))
+_XYP_2LAYER_RECIPE = Train("46dae87", ("--branch", "temporal", "--seed", "42", "--epochs", "30",
+                                       "--pressure-dropout", "0"))
+_M20_RECIPE = Train("96e297b", ("--branch", "spatial", "--seed", "42", "--lr-schedule", "plateau",
+                                "--margin", "2.0", "--random-impostor-ratio", "0.5"))
 
 # From the published notes, `gh release view <tag>`. Commits are where each recipe
 # runs; tags v0.1.0 to v0.7.0 point at older code (ENG_REPORT M9).
 RELEASES = {
-    "v0.1.0": (Weight("spatial", "archive_spatial_cnn_compact_12.31eer.pth", {"mean": 12.31, "sd": 0.96}, "cuda"),),
-    "v0.2.0": (Weight("spatial", "archive_spatial_cnn_wide_11.78eer.pth", {"mean": 11.78}, "cuda"),),
-    "v0.3.0": (Weight("spatial", "spatial_cnn_aug_lr.pth", {"mean": 11.23}, "cuda"),),
-    "v0.4.0": (Weight("spatial", "spatial_cnn_pairfix.pth", {"mean": 10.58}, "cuda"),),
+    "v0.1.0": (Weight("spatial", "archive_spatial_cnn_compact_12.31eer.pth", {"mean": 12.31, "sd": 0.96}, "cuda",
+                      train=Train("eafdf10", ("--branch", "spatial", "--seed", "42"))),),
+    "v0.2.0": (Weight("spatial", "archive_spatial_cnn_wide_11.78eer.pth", {"mean": 11.78}, "cuda",
+                      train=Train("eafdf10", ("--branch", "spatial", "--seed", "42", "--trunk", "wide",
+                                              "--grad-checkpoint", "4", "--epochs", "3", "--patience", "2"))),),
+    "v0.3.0": (Weight("spatial", "spatial_cnn_aug_lr.pth", {"mean": 11.23}, "cuda",
+                      train=Train("9285088", ("--branch", "spatial", "--seed", "42", "--augment",
+                                              "--lr-schedule", "plateau", "--epochs", "16"))),),
+    "v0.4.0": (Weight("spatial", "spatial_cnn_pairfix.pth", {"mean": 10.58}, "cuda",
+                      train=Train("c4bf958", ("--branch", "spatial", "--seed", "42", "--lr-schedule",
+                                              "plateau"))),),
     "v0.5.0": (
         Weight("spatial", "spatial_cnn.pth",
                {"mean": 10.10, "sd": 0.38, "cedar": 0.00, "bhsig_Hindi": 4.30,
                 "bhsig_Bengali": 12.07, "utsig": 30.74}, "cuda",
                train=Train("af67d37", ("--branch", "spatial", "--seed", "42", "--lr-schedule",
                                        "plateau", "--random-impostor-ratio", "0.5"))),
-        Weight("temporal", "temporal_lstm.pth", _V05_TEMPORAL, "cuda", channels="xyp"),
+        Weight("temporal", "temporal_lstm.pth", _V05_TEMPORAL, "cuda", channels="xyp", train=_XYP_2LAYER_RECIPE),
     ),
     "v0.6.0": (
         Weight("spatial", "spatial_cnn.pth",
                {"mean": 8.59, "cedar": 0.00, "bhsig_Hindi": 3.64, "bhsig_Bengali": 8.64, "utsig": 30.26}, "cpu",
-               train=Train("96e297b", ("--branch", "spatial", "--seed", "42", "--lr-schedule", "plateau",
-                                       "--margin", "2.0", "--random-impostor-ratio", "0.5"))),
-        Weight("temporal", "temporal_lstm.pth", _V05_TEMPORAL, "cuda", channels="xyp"),
+               train=_M20_RECIPE),
+        Weight("temporal", "temporal_lstm.pth", _V05_TEMPORAL, "cuda", channels="xyp", train=_XYP_2LAYER_RECIPE),
     ),
     "v0.7.0": (
-        Weight("spatial", "spatial_cnn.pth", {"pooled": 8.45}, "cuda"),
-        Weight("temporal", "temporal_lstm.pth", {"mean": 9.41}, "cuda", channels="xyp"),
+        Weight("spatial", "spatial_cnn.pth", {"pooled": 8.45}, "cuda", train=_M20_RECIPE),
+        # Temporal baseline run on split seed 42.
+        Weight("temporal", "temporal_lstm.pth", {"mean": 9.41}, "cuda", channels="xyp",
+               train=Train("4a9f6ed", ("--branch", "temporal", "--temporal-channels", "xyp", "--seed", "43",
+                                       "--split-seed", "42", "--epochs", "100"))),
     ),
     "v0.8.0": (
         Weight("spatial", "spatial_cnn.pth", {"mean": 8.59, "sd": 0.58, "cedar": 0.00,
-                                              "bhsig_Hindi": 3.64, "bhsig_Bengali": 8.64}, "cpu"),
+                                              "bhsig_Hindi": 3.64, "bhsig_Bengali": 8.64}, "cpu", train=_M20_RECIPE),
         Weight("temporal", "temporal_lstm.pth", {"mean": 7.81, "sd": 0.63}, "cuda", channels="dt", train=_DT_RECIPE),
     ),
     "v0.9.0": (

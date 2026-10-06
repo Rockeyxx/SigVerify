@@ -1,28 +1,7 @@
-"""
-Late-fusion evaluation on genuinely paired multimodal signatures.
+"""Late-fusion evaluation on paired multimodal signatures.
 
-`config/settings.py` records ALPHA_DEFAULT = 0.5 as provisional "until in-house
-multimodal dataset is collected". That blocker is narrower than it looks:
-SigComp2011's *training* set is already paired. Measured from the archive,
-
-    Dutch    10 writers, 239/239 genuine and 40/40 forgery sample indices match
-    Chinese  10 writers, 227/235 genuine and 123/123 forgery sample indices match
-
-between `data/sigcomp2011` (online .HWR) and `data/sigcomp2011_offline` (scanned
-.PNG), under the identical `{writer:03d}_{sample:02d}` convention. The signers
-wrote on paper over a digitizer, so image and trajectory come from one signing
-event. That is exactly what late fusion needs.
-
-**Writer independence.** These 20 writers appear in the *training* splits of the
-shipped models, so this tool defaults to the two checkpoints that predate their
-corpora — `spatial_cnn.pth` (trained on cedar/bhsig/utsig, before the offline
-SigComp parser existed) and `temporal_lstm_mobisig_svc.pth` (MOBISIG + SVC2004,
-before SigComp was added). Both are weaker than what ships today, so read the
-*gap* between fused and single-branch, not the absolute EER.
-
-The number that decides whether fusion is worth pursuing is not the best alpha —
-it is the error correlation. Two branches that fail on the same probes cannot
-help each other no matter how alpha is tuned.
+Evaluates multimodal fusion performance on signatures where both scanned images
+and dynamic trajectory data are available for the same signing events.
 """
 import argparse
 import collections

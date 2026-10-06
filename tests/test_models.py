@@ -52,13 +52,7 @@ class TestSpatialSiamese:
 
 
 class TestDeterministicPooling:
-    """
-    The spatial head's max pooling must match nn.AdaptiveMaxPool2d exactly in
-    the forward pass (so every existing checkpoint scores identically) and must
-    not be the reason two runs of one seed differ: adaptive_max_pool2d's CUDA
-    backward scatters with atomic adds and was the only non-deterministic
-    kernel in either branch (found 2026-09-21 with use_deterministic_algorithms).
-    """
+    """Verifies deterministic adaptive pooling operations for exact reproducibility."""
 
     @pytest.mark.parametrize("hw,grid", [((19, 27), 4), ((19, 27), 8), ((9, 13), 4), ((7, 7), 3),
                                          ((38, 55), 6), ((4, 4), 4), ((5, 9), 2)])
@@ -741,8 +735,8 @@ class TestPoolingGridIsRecoverable:
 
 class TestPoolChannelReduction:
     """
-    §22 could not attribute its result: raising the pooling grid to 8 also
-    quadrupled the head, and §5 already measured extra head capacity as harmful
+    The grid-8 run could not attribute its result: raising the pooling grid to 8
+    also quadrupled the head, and extra head capacity was already measured as harmful
     at this data scale. A 1x1 convolution before pooling cuts channels so the
     head width is unchanged, which isolates spatial resolution from capacity.
 

@@ -1,6 +1,4 @@
-"""
-Verification Panel — Signature Verification System
-"""
+"""Verification Panel for the signature verification graphical interface."""
 
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
@@ -129,10 +127,8 @@ class VerificationPanel(QWidget):
             )
             return
 
-        # spatial_origin ("scan" or "render") was recorded at enrollment time
-        # (storage.py, default "scan"). main's verify() requires it — it
-        # refuses to guess whether these embeddings came from a scanned
-        # image or a tablet-rendered stroke.
+        # Spatial origin ('scan' or 'render') recorded during enrollment.
+        # This informs the verification service of the original input modality.
         spatial_origin = client.get("spatial_origin", "scan")
 
         if not self.selected_image_path:
