@@ -43,7 +43,11 @@ from config.settings import (
     TEMPORAL_INPUT_FEATURES,
     SPATIAL_AUG_MAX_ROTATION_DEG, SPATIAL_AUG_MAX_SHEAR, SPATIAL_AUG_MAX_SCALE,
     SPATIAL_AUG_MAX_TRANSLATE, SPATIAL_AUG_STROKE_PROB,
+    SPATIAL_AUG_BLUR_SIGMA, SPATIAL_AUG_INK_GAIN_MIN, SPATIAL_AUG_NOISE_STD,
     TEMPORAL_AUG_MAX_ROTATION_DEG, TEMPORAL_AUG_JITTER, TEMPORAL_AUG_MAX_SPEED_CHANGE,
+    TEMPORAL_CHANNELS, TEMPORAL_SAMPLE_RATE_HZ,
+    TEMPORAL_DEVICE_AUG_RATE_HZ, TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA,
+    TEMPORAL_DEVICE_AUG_PRESSURE_GAIN, TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS,
     SPATIAL_SPLIT_RATIOS,
 )
 from src.data.renderer import render_trajectory_to_image
@@ -513,7 +517,10 @@ def collate_temporal_pairs(batch):
 def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
                   max_shear=SPATIAL_AUG_MAX_SHEAR, max_scale=SPATIAL_AUG_MAX_SCALE,
                   max_translate=SPATIAL_AUG_MAX_TRANSLATE,
-                  stroke_prob=SPATIAL_AUG_STROKE_PROB):
+                  stroke_prob=SPATIAL_AUG_STROKE_PROB,
+                  blur_sigma_max=SPATIAL_AUG_BLUR_SIGMA,
+                  ink_gain_min=SPATIAL_AUG_INK_GAIN_MIN,
+                  noise_std_max=SPATIAL_AUG_NOISE_STD):
     """Apply affine warps and stroke variations to perturb an image during training.
 
     Args:
@@ -545,6 +552,19 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
         kernel = np.ones((2, 2), dtype=np.uint8)
         warped = (cv2.dilate(warped, kernel) if rng.random() < 0.5
                   else cv2.erode(warped, kernel))
+
+    # Scanner effects: optics blur, ink darkness, sensor noise. Each draws from the RNG
+    # only when switched on, so the shipped recipe (all off) consumes the same random
+    # stream as before these existed and every released seed reproduces.
+    if blur_sigma_max > 0:
+        sigma = rng.uniform(0.0, blur_sigma_max)
+        if sigma > 0:
+            warped = cv2.GaussianBlur(warped, (0, 0), sigma)
+    if ink_gain_min < 1.0:
+        warped = warped * rng.uniform(ink_gain_min, 1.0)
+    if noise_std_max > 0:
+        noise = rng.normal(0.0, rng.uniform(0.0, noise_std_max), warped.shape)
+        warped = np.clip(warped + noise, 0.0, 1.0)
 
     return warped.reshape(channels, height, width).astype(np.float32)
 
@@ -628,14 +648,55 @@ def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION
     return np.column_stack(columns).astype(np.float32)
 
 
+def augment_device(sequence, rng, rate_range_hz=TEMPORAL_DEVICE_AUG_RATE_HZ,
+                   gamma_range=TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA,
+                   gain_range=TEMPORAL_DEVICE_AUG_PRESSURE_GAIN,
+                   pressure_levels=TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS,
+                   dt_channel=3 if TEMPORAL_CHANNELS == "dt" else None):
+    """Re-record a trajectory as another tablet inside the capture spec would deliver it.
+
+    The spec (README hardware table) admits any tablet reporting at 200 Hz or more with
+    1024 pressure levels or more; ingest keeps every n-th sample to reach the model rate
+    and scales pressure to [0, 1]. Two device differences survive that. Integer
+    decimation lands a 270 Hz tablet on 90 Hz rather than 100, which stretches every
+    delta and every dt. And each tablet maps force to level through its own curve. This
+    draws one such tablet and returns the sequence as it would arrive. Shape and
+    orientation are untouched: those belong to the writer, not the device.
+    """
+    sequence = np.asarray(sequence, dtype=np.float32)
+    if len(sequence) < 8:
+        return sequence
+
+    rate = rng.uniform(*rate_range_hz)
+    factor = rate / max(1, round(rate / TEMPORAL_SAMPLE_RATE_HZ)) / TEMPORAL_SAMPLE_RATE_HZ
+    gamma = float(np.exp(rng.uniform(np.log(gamma_range[0]), np.log(gamma_range[1]))))
+    gain = rng.uniform(*gain_range)
+
+    new_length = max(8, int(round(len(sequence) * factor)))
+    source = np.arange(len(sequence), dtype=np.float32)
+    target = np.linspace(0, len(sequence) - 1, new_length, dtype=np.float32)
+    out = np.column_stack([np.interp(target, source, sequence[:, c])
+                           for c in range(sequence.shape[1])]).astype(np.float32)
+
+    steps = pressure_levels - 1
+    curved = gain * np.clip(out[:, 2], 0.0, 1.0) ** gamma
+    out[:, 2] = np.round(np.clip(curved, 0.0, 1.0) * steps) / steps
+    if dt_channel is not None and out.shape[1] > dt_channel:
+        # A slower effective clock lengthens every regular gap by 1 / factor.
+        out[:, dt_channel] = np.clip(out[:, dt_channel] / factor, 0.0, 1.0)
+    return out
+
+
 class TemporalSignatureDataset(Dataset):
     """PyTorch Dataset loading temporal signature trajectory pairs for Siamese training."""
 
-    def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42):
+    def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42,
+                 device_augment=False):
         self.pairs = pairs
         self.labels = labels
         self.augment = augment
         self.augment_scale = augment_scale
+        self.device_augment = device_augment
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
@@ -655,6 +716,10 @@ class TemporalSignatureDataset(Dataset):
             # Perturb each sequence independently.
             seq1 = self._augment(seq1)
             seq2 = self._augment(seq2)
+        if self.device_augment:
+            # Each side as if captured on its own tablet inside the spec.
+            seq1 = augment_device(seq1, self._rng)
+            seq2 = augment_device(seq2, self._rng)
         return (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),

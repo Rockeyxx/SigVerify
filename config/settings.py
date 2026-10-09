@@ -207,9 +207,24 @@ SPATIAL_AUG_MAX_SHEAR = 0.08
 SPATIAL_AUG_MAX_SCALE = 0.08
 SPATIAL_AUG_MAX_TRANSLATE = 0.04
 SPATIAL_AUG_STROKE_PROB = 0.0           # Measured 2026-09-26: stroke dilate/erode jitter costs 1.23 pooled EER points (report L9)
+# Scanner effects (E3, report F9 follow-up): off by default, so the shipped recipe draws
+# the same random stream and every released seed reproduces. Switched on per run with
+# --aug-blur, --aug-ink-gain-min and --aug-noise.
+SPATIAL_AUG_BLUR_SIGMA = 0.0            # Max Gaussian blur sigma in pixels
+SPATIAL_AUG_INK_GAIN_MIN = 1.0          # Ink intensity scaled by U(min, 1); 1.0 is off
+SPATIAL_AUG_NOISE_STD = 0.0             # Max additive noise sigma on the [0, 1] image
 TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
+# Device-spec augmentation (E2, --device-augment): a training trajectory re-recorded as
+# another tablet inside the capture spec (README hardware table: >= 200 Hz, >= 1024
+# pressure levels) would deliver it after ingest. The ranges are the spec's envelope, not
+# measured device statistics: report rates common tablets ship with, and pressure curves
+# from soft to firm.
+TEMPORAL_DEVICE_AUG_RATE_HZ = (200.0, 300.0)
+TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA = (0.67, 1.5)
+TEMPORAL_DEVICE_AUG_PRESSURE_GAIN = (0.85, 1.0)
+TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS = 1024
 
 # Target sampling rate for online trajectories, and the period that follows from
 # it. Everything inside src/ derives from these two: features.py's Nyquist term,

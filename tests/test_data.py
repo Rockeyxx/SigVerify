@@ -15,6 +15,7 @@ from src.data.dataset import (
     TemporalSignatureDataset,
     collate_temporal_pairs,
     generate_skilled_pairs,
+    augment_device,
     augment_trajectory,
     augment_image,
     preprocess_image,
@@ -529,6 +530,14 @@ class TestTemporalDatasetAugmentation:
         ds = TemporalSignatureDataset(pairs, labels, augment=True)
         assert float(ds[0][2]) == 1.0
 
+    def test_device_augment_applies_only_when_asked(self):
+        seq = TestDeviceAugmentation._traj()
+        pairs, labels = [(seq, seq.copy())], [1.0]
+        plain = TemporalSignatureDataset(pairs, labels)[0][0]
+        device = TemporalSignatureDataset(pairs, labels, device_augment=True)[0][0]
+        assert torch.equal(plain, torch.tensor(seq))
+        assert device.shape != plain.shape or not torch.allclose(device, plain)
+
 
 class TestSkilledPairBalance:
     """
@@ -863,3 +872,85 @@ class TestAugmentTrajectoryPreservesWidth:
         ]).astype(np.float32)
         out = augment_trajectory(traj, np.random.default_rng(0))
         assert out[:, 3].min() >= 0.0 and out[:, 3].max() <= 1.0
+
+
+class TestSpatialScannerAugmentation:
+    """
+    Scanner effects the shipped augmentation never varied (L6 measured the affine ranges
+    and the stroke jitter only): blur, ink darkness and background noise. Off by default,
+    and off must leave the shipped recipe's random stream untouched, or every released
+    spatial seed would stop reproducing.
+    """
+
+    @staticmethod
+    def _image():
+        img = np.zeros((1, 155, 220), dtype=np.float32)
+        img[0, 60:95, 30:190] = 1.0
+        return img
+
+    def test_default_recipe_consumes_the_same_random_stream(self):
+        # Captured on the code before the scanner effects existed (2026-10-08).
+        rng = np.random.default_rng(5)
+        out = augment_image(self._image(), rng)
+        assert rng.random() == 0.40847320541999865
+        assert float(out.sum()) == pytest.approx(6166.539, abs=0.01)
+
+    def test_blur_spreads_the_ink(self):
+        plain = augment_image(self._image(), np.random.default_rng(0))
+        blurred = augment_image(self._image(), np.random.default_rng(0), blur_sigma_max=2.0)
+        assert (blurred > 0).sum() > (plain > 0).sum()
+
+    def test_ink_gain_dims_the_ink_and_keeps_the_background_black(self):
+        plain = augment_image(self._image(), np.random.default_rng(0))
+        dimmed = augment_image(self._image(), np.random.default_rng(0), ink_gain_min=0.5)
+        assert dimmed.sum() < plain.sum()
+        assert dimmed[0, 0, 0] == 0.0 and dimmed[0, -1, -1] == 0.0
+
+    def test_noise_stays_in_the_unit_range(self):
+        out = augment_image(self._image(), np.random.default_rng(0), noise_std_max=0.2)
+        assert out.min() >= 0.0 and out.max() <= 1.0
+        assert not np.array_equal(out, augment_image(self._image(), np.random.default_rng(0)))
+
+
+class TestDeviceAugmentation:
+    """
+    Re-record a trajectory as another tablet inside the capture spec would deliver it
+    (README hardware table: >= 200 Hz decimated to the model rate, >= 1024 pressure levels).
+    """
+
+    @staticmethod
+    def _traj(n=200):
+        t = np.linspace(0, 1, n)
+        dt = np.full(n, 0.1, dtype=np.float32)   # 10 ms of the 100 ms clip
+        dt[100] = 1.0                            # one pen lift
+        return np.column_stack([np.sin(6 * t), np.cos(4 * t), 0.2 + 0.6 * t, dt]).astype(np.float32)
+
+    def test_channels_and_dtype_are_preserved(self):
+        out = augment_device(self._traj(), np.random.default_rng(0))
+        assert out.shape[1] == 4 and out.dtype == np.float32
+
+    def test_a_200_hz_tablet_keeps_the_timeline_and_the_coordinates(self):
+        traj = self._traj()
+        out = augment_device(traj, np.random.default_rng(0), rate_range_hz=(200.0, 200.0))
+        assert len(out) == len(traj)
+        assert np.allclose(out[:, :2], traj[:, :2])
+
+    def test_integer_decimation_of_a_270_hz_tablet_lands_on_90_hz(self):
+        traj = self._traj()
+        out = augment_device(traj, np.random.default_rng(0), rate_range_hz=(270.0, 270.0))
+        assert len(out) == round(len(traj) * 0.9)
+        # A regular 10 ms gap becomes 11.1 ms on the slower effective clock.
+        assert np.median(out[:, 3]) == pytest.approx(0.1 / 0.9, rel=1e-3)
+        assert out[:, 3].max() <= 1.0
+
+    def test_pressure_keeps_its_order_and_the_unit_range(self):
+        traj = self._traj()
+        out = augment_device(traj, np.random.default_rng(3), rate_range_hz=(200.0, 200.0))
+        order = np.argsort(traj[:, 2], kind="stable")
+        assert np.all(np.diff(out[order, 2]) >= 0)
+        assert out[:, 2].min() >= 0.0 and out[:, 2].max() <= 1.0
+
+    def test_pressure_is_quantised_to_the_spec_levels(self):
+        out = augment_device(self._traj(), np.random.default_rng(1), pressure_levels=1024)
+        steps = out[:, 2] * 1023
+        assert np.allclose(steps, np.round(steps), atol=1e-3)

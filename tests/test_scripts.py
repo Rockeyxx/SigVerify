@@ -198,6 +198,25 @@ class TestPairBudget:
         assert TEMPORAL_PAIRS_GENUINE_PER_WRITER == 180
         assert n == 15 * 2 * 2
 
+    def test_device_augment_reaches_only_the_training_loader(self):
+        from scripts.train import build_loader
+
+        writers = self._writers(n_writers=2, n_samples=6, temporal=True)
+        train, _ = build_loader(writers, sorted(writers), "temporal", 4, 0, True, 42,
+                                device_augment=True)
+        val, _ = build_loader(writers, sorted(writers), "temporal", 4, 0, False, 42,
+                              device_augment=True)
+        assert train.dataset.device_augment and not val.dataset.device_augment
+
+    def test_the_new_augmentation_flags_parse(self):
+        from scripts.train import parse_args
+
+        args = parse_args(["--branch", "temporal", "--data-dir", "data/x",
+                           "--device-augment", "--aug-blur", "1.0",
+                           "--aug-ink-gain-min", "0.7", "--aug-noise", "0.02"])
+        assert args.device_augment
+        assert (args.aug_blur, args.aug_ink_gain_min, args.aug_noise) == (1.0, 0.7, 0.02)
+
 
 class TestEarlyStoppingSurvivesResume:
     """Verifies that early stopping patience state is preserved when resuming training."""
