@@ -384,7 +384,7 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 - **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion does not always help.** It helps when the two branches are about equally strong, and it hurts when one branch is much stronger. On writers that neither branch trained on, fusion improves the single temporal model (3.96% → 3.62%). On the second paired corpus (SigComp2009 / NFI) it went from 3.90% to 3.62% with the previous spatial weight, but from 3.90% to 4.09% with the current one, so there is no gain there now. Fusion makes the six-seed temporal ensemble worse (2.61% → 4.63%, worse on 22 of 25 draws). So for the pen-tablet tier the ensemble is used **alone**, and fusion is used only where the spatial branch is competitive.
+- **Fusion does not always help.** Fused numbers are measured on SigComp2009 / NFI only, where the scan and the pen recording come from the same signing. SigComp2011's scan and pen forgeries carry different forger codes, so they cannot be paired and are not used for fusion. On NFI, fusion at $\alpha = 0.5$ does not help against skilled forgeries (temporal alone 3.90% → fused 4.09%) but cuts random-forgery errors by about 40% (2.47% → 1.47%). A lower spatial weight ($\alpha \approx 0.35$) reads 3.37% on skilled forgeries, but it was found on the same 14 writers, so $\alpha$ stays 0.5 until a larger paired set is available.
 - **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number. On DeepSignDB's official lists, where the references come from one session and the probe from a later one, the shipped single model reads **13.59%** and the ensemble **11.11%** (skilled forgeries, 4 references).
 
 ---
@@ -404,13 +404,11 @@ _Ablation Insight:_ When repeated on top of the 4-channel `dt` model with pinned
 
 ### Datasets and Device Targets
 
-Device support is architected in tiers based on hardware capability:
+Target device and its requirement:
 
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **4.09% $\pm$ 1.11%** fused on NFI, 3.09% $\pm$ 0.37% on SigComp2011; 4.11% $\pm$ 1.03% pen alone |
-| **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **7.46% $\pm$ 0.46%** |
-| **Tertiary**  | Mobile / Touchscreen     | MOBISIG               | Capacitive Finger Touch | $\le 20.0\%$ |        21.26%         |
+| **Primary**   | XPPen Deco 640 Tablet    | SigComp2009 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **4.09% $\pm$ 1.11%** fused on NFI (at the shipped fused $\tau = 0.7751$: FAR 2.85%, FRR 6.70%); 4.11% $\pm$ 1.03% pen alone on SigComp2011 Dutch |
 
 ---
 
@@ -418,21 +416,23 @@ Device support is architected in tiers based on hardware capability:
 
 Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5 --enroll-trials 10 --seed 42`. To reproduce any release's published numbers, run `python tools/reproduce_release.py <tag>` (`--list` shows the releases):
 
-| Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d |
-| ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: |
-| **Spatial**  | **All Combined**    | **65**  | **7.46% $\pm$ 0.46%** | **7.72%**  | **2.195** |
-| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   8.941   |
-| Spatial      | BHSig260 Hindi      |   23    |   3.47% $\pm$ 0.90%   |   3.34%    |   2.575   |
-| Spatial      | BHSig260 Bengali    |   16    |   6.82% $\pm$ 1.10%   |   6.89%    |   2.185   |
-| Spatial      | UTSig               |   18    |  26.34% $\pm$ 2.17%   |   27.65%   |   1.277   |
-| **Temporal** | **All Combined**    | **31**  | **7.77% $\pm$ 0.67%** | **7.67%**  | **1.710** |
-| Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   |
-| Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   |
-| Temporal     | SVC2004 Task 2      |   10    |  13.58% $\pm$ 2.21%   |   14.00%   |   1.504   |
-| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ |
-| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.03% $\pm$ 0.55%   |   n/a ‡    |   n/a ‡   |
+| Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d | Random-forgery EER |
+| ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: | :----------------: |
+| **Spatial**  | **All Combined**    | **65**  | **7.46% $\pm$ 0.46%** | **7.72%**  | **2.195** | **11.48% $\pm$ 0.29%** |
+| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   8.941   | 14.77% $\pm$ 0.75% |
+| Spatial      | BHSig260 Hindi      |   23    |   3.47% $\pm$ 0.90%   |   3.34%    |   2.575   | 10.00% $\pm$ 0.62% |
+| Spatial      | BHSig260 Bengali    |   16    |   6.82% $\pm$ 1.10%   |   6.89%    |   2.185   | 4.45% $\pm$ 0.79% |
+| Spatial      | UTSig               |   18    |  26.34% $\pm$ 2.17%   |   27.65%   |   1.277   | 9.28% $\pm$ 0.68% |
+| **Temporal** | **All Combined**    | **31**  | **7.77% $\pm$ 0.67%** | **7.67%**  | **1.710** | **2.26% $\pm$ 0.33%** |
+| Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   | 0.98% $\pm$ 0.42% |
+| Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   | 3.03% $\pm$ 0.91% |
+| Temporal     | SVC2004 Task 2      |   10    |  13.58% $\pm$ 2.21%   |   14.00%   |   1.504   | 3.93% $\pm$ 1.48% |
+| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ | **1.47% $\pm$ 0.63%** |
+| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.84% $\pm$ 0.79%   |   n/a ‡    |   n/a ‡   | n/a |
 
-‡ Fused rows: shipped weights on both modalities of the same signing events, 14 NFI writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run.
+‡ Fused rows: shipped weights on both modalities of the same signing events, 14 NFI writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run. The skilled + random row adds, for each writer, as many random forgeries as that writer has skilled forgeries.
+
+Random-forgery EER: the impostors are the genuine signatures of the other test writers of the same dataset (never across datasets), scored against the same 5 references and draws as the skilled column.
 
 ---
 
