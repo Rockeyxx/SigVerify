@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
+    BIOSECURID_SONOF_DIR,
     CEDAR_DIR,
     DEEPSIGNDB_DIR,
     MOBISIG_DIR,
@@ -354,9 +355,9 @@ def load_sigcomp2011_file(path, extra_channels=None):
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2011")
 
 
-def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
+def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCOMP_DECIMATION):
     """Process raw rows from SigComp collections into a normalized trajectory sample."""
-    rows = rows[::SIGCOMP_DECIMATION]
+    rows = rows[::decimation]
     pen_down = np.flatnonzero(rows[:, 2] > 0)
     if len(pen_down) < 2:
         raise ValueError(
@@ -391,6 +392,49 @@ def load_nfi2009_file(path, extra_channels=None):
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2009")
+
+
+# BiosecurID-SONOF: Wacom Intuos3 at 100 Hz (already the target rate), x, y and
+# pressure only, pen-up recorded as pressure 0, so the SigComp core applies undecimated.
+SONOF_ONLINE_ID_OFFSET = 1000          # pen file u1001 is scan folder u0001
+SONOF_GENUINE_SLOTS = (1, 2, 6, 7)     # per session; slots 3 to 5 are skilled forgeries
+_SONOF_ONLINE_FILE = re.compile(r"^u(\d{4})(s\d{4}_sg(\d{4}))\.mat$", re.IGNORECASE)
+
+
+def load_sonof_online_file(path, extra_channels=None):
+    """Load a BiosecurID-SONOF pen recording (.mat with x, y, p) into a normalized trajectory array."""
+    from scipy.io import loadmat
+    mat = loadmat(path)
+    rows = np.column_stack([np.ravel(mat[key]) for key in ("x", "y", "p")]).astype(np.float32)
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "BiosecurID-SONOF", decimation=1)
+
+
+def parse_biosecurid_sonof_pairs(root=BIOSECURID_SONOF_DIR):
+    """Pair each SONOF pen recording with the scan of the same signing.
+
+    Returns {writer_id: {"genuine": [(png, mat)], "forged": [(png, mat)]}}. A
+    missing scan, or one whose label disagrees with its slot, raises: a silent
+    gap or a shifted join would corrupt every fused number built on it.
+    """
+    online = os.path.join(root, "OnlineReal")
+    _require_dir(online, "BiosecurID-SONOF OnlineReal")
+    writers = {}
+    for filename in sorted(os.listdir(online)):
+        match = _SONOF_ONLINE_FILE.match(filename)
+        if not match:
+            continue
+        pen_user, stem, slot = int(match.group(1)), match.group(2), int(match.group(3))
+        scan_user = pen_user - SONOF_ONLINE_ID_OFFSET
+        genuine = slot in SONOF_GENUINE_SLOTS
+        scan_dir = os.path.join(root, "OfflineReal", f"u{scan_user:04d}")
+        scan = os.path.join(scan_dir, f"u{scan_user:04d}{stem}{'g' if genuine else 'f'}.png")
+        if not os.path.exists(scan):
+            if os.path.exists(scan[:-5] + ("f" if genuine else "g") + ".png"):
+                raise ValueError(f"Scan for {filename} carries the wrong label for slot {slot}.")
+            raise FileNotFoundError(f"No scan for {filename}: expected u{scan_user:04d}{stem}")
+        record = writers.setdefault(f"sonof_u{pen_user:04d}", _new_writer())
+        record["genuine" if genuine else "forged"].append((scan, os.path.join(online, filename)))
+    return writers
 
 
 def _sigcomp_parts(dirpath, root):

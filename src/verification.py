@@ -150,6 +150,36 @@ def _gate_enrollment_sample(sample, modality, index):
             f"— recapture it. See the README's Capture Contract.")
 
 
+def _signings(probe, modality):
+    """One probe, or the list of signings of one kind the app collected (VERIFICATION_SIGNINGS)."""
+    probes = list(probe) if isinstance(probe, (list, tuple)) else [probe]
+    if not probes:
+        raise ValueError(f"{modality}: a list of probes needs at least one signing.")
+    return probes
+
+
+def _branch_score(model, references, probe, modality, gate, fallback, device):
+    """
+    Mean nearest-reference score over the signings, or None and the gate messages.
+
+    If any signing fails its gate the whole branch is dropped: averaging only the
+    signings that pass would let a forger hand in one careful forgery and one
+    scribble and be scored on the forgery alone.
+    """
+    probes = _signings(probe, modality)
+    errors = []
+    for index, sample in enumerate(probes):
+        passed, details = gate(sample)
+        if not passed:
+            label = modality if len(probes) == 1 else f"{modality}, signing {index + 1}"
+            errors.append(f"{label}: {details.get('error', fallback)}")
+    if errors:
+        return None, probes, errors
+    scores = [_nearest_reference_score(references, embed(model, sample, modality, device))
+              for sample in probes]
+    return float(np.mean(scores)), probes, []
+
+
 def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True):
     """
     Verify a signature probe against enrolled reference templates.
@@ -157,6 +187,8 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
     Args:
         spatial: Optional tuple of (model, reference_embeddings, probe_image).
         temporal: Optional tuple of (model, reference_embeddings, probe_trajectory).
+            Either probe may be a list of several signings of that kind; the branch
+            score is then their mean, and the same thresholds apply.
         engine: Optional FusionEngine instance.
         device: Device to run inference on.
         auto_render_spatial: If True, renders temporal trajectory into image if spatial probe is missing.
@@ -170,7 +202,9 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
         if s_probe is None:
             _, _, t_probe = temporal
             if t_probe is not None:
-                s_probe = render_trajectory_to_image(t_probe)
+                s_probe = ([render_trajectory_to_image(t) for t in t_probe]
+                           if isinstance(t_probe, (list, tuple))
+                           else render_trajectory_to_image(t_probe))
                 spatial = (s_model, s_references, s_probe)
 
     if spatial is None and temporal is None:
@@ -178,30 +212,24 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     spatial_score = None
     temporal_score = None
-    quality_failed = False
     pressure_imputed = False
     gate_errors = []
 
     if spatial is not None:
         model, references, probe = spatial
-        passed, details = quality_gate(probe)
-        quality_failed = not passed
-        if not passed:
-            gate_errors.append(f"spatial: {details.get('error', 'failed the quality gate')}")
-        if passed:
-            spatial_score = _nearest_reference_score(
-                references, embed(model, probe, "spatial", device))
+        spatial_score, _, errors = _branch_score(
+            model, references, probe, "spatial", quality_gate, "failed the quality gate", device)
+        gate_errors.extend(errors)
 
     if temporal is not None:
         model, references, probe = temporal
-        passed, details = trajectory_gate(probe)
-        quality_failed = quality_failed or not passed
-        if passed:
-            pressure_imputed = _pressure_is_imputed(probe)
-            temporal_score = _nearest_reference_score(
-                references, embed(model, probe, "temporal", device))
-        else:
-            gate_errors.append(f"temporal: {details.get('error', 'failed the input gate')}")
+        temporal_score, probes, errors = _branch_score(
+            model, references, probe, "temporal", trajectory_gate, "failed the input gate", device)
+        gate_errors.extend(errors)
+        if temporal_score is not None:
+            pressure_imputed = any(_pressure_is_imputed(sample) for sample in probes)
+
+    quality_failed = bool(gate_errors)
 
     if spatial_score is None and temporal_score is None:
         raise ValueError(
@@ -507,8 +535,8 @@ class SignatureService:
     def verify(
         self,
         mode: str,
-        probe_trajectory: np.ndarray | None = None,
-        probe_image: str | np.ndarray | None = None,
+        probe_trajectory: np.ndarray | list[np.ndarray] | None = None,
+        probe_image: str | np.ndarray | list[str | np.ndarray] | None = None,
         reference_spatial: list[bytes | np.ndarray] | None = None,
         reference_temporal: list[bytes | np.ndarray] | None = None,
         reference_spatial_origin: str | None = None,
@@ -518,8 +546,9 @@ class SignatureService:
 
         Args:
             mode: Operational mode ('unimodal', 'temporal-multi', or 'multimodal').
-            probe_trajectory: Optional [L, 4] trajectory array (X, Y, P, dt).
-            probe_image: Optional image path or array.
+            probe_trajectory: Optional [L, 4] trajectory array (X, Y, P, dt), or a list
+                of them when the app asks for several signings (VERIFICATION_SIGNINGS).
+            probe_image: Optional image path or array, or a list of them.
             reference_spatial: List of enrolled spatial reference templates.
             reference_temporal: List of enrolled temporal reference templates.
             reference_spatial_origin: Source type of spatial references ('scan' or 'render').

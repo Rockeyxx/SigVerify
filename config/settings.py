@@ -46,6 +46,11 @@ SIGCOMP2009_DIR = os.path.join(DATA_DIR, "sigcomp2009_dl", "extracted")
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 
+# BiosecurID-SONOF (BiDA Lab, UAM): 132 writers, a pen recording (OnlineReal/) and a scan
+# (OfflineReal/) of the same signing. **Restricted License Dataset**, as DeepSignDB:
+# evaluation and calibration only; no weight trained on it ships.
+BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
+
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
 # its split record instead, and tests/test_leakage.py fails when the two
@@ -249,16 +254,30 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# Equal weighting (alpha = 0.5) is robust across evaluation splits.
-ALPHA_DEFAULT = 0.5                     # Measured: equal weighting is the optimum
+# Chosen on the 132 BiosecurID-SONOF paired writers (lowest fused EER, K=5, 10 draws),
+# then confirmed on the 14 NFI writers, who took no part in choosing it.
+ALPHA_DEFAULT = 0.4                     # Measured: SONOF optimum; equal weighting (0.5) scored worse on both
 ALPHA_GRID_STEP = 0.05
+
+# Signings asked for at verification, of each kind (paper and tablet). The GUI reads this as its
+# default and may offer it as a toggle (1 or 2); verify() averages however many it is given, and
+# every signing must pass its input gate or that kind of evidence is dropped. The thresholds below
+# are shared: at a fixed threshold averaging can only lower FAR. Measured 2026-10-21, pen, K = 5,
+# 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06% to 13.70% a
+# session later and from 8.42% to 6.04% at the same sitting.
+VERIFICATION_SIGNINGS = 1
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
+# Pen-alone threshold. 0.7381 (the FAR 5% point on SONOF) was tried and reverted: AGENTS.md keeps FAR
+# low first, and at 0.7381 DeepSignDB MCYT and BiosecureDS2 accepted 11.6% and 12.0% of skilled
+# forgeries. No fixed pen-alone threshold meets FAR 5% on every new collection (their FAR 5% points
+# run from 0.72 to 0.83); the deployment's own writers set it.
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-# Fused threshold: EER point of 0.5*s + 0.5*t on paired writers held out by both branches.
-DECISION_THRESHOLD = 0.7751             # Measured fused threshold (EER point on clean paired writers)
+# Fused threshold: EER point of 0.4*s + 0.6*t on the 132 SONOF paired writers, which
+# neither branch trained on. On NFI it gives FAR 3.73%, FRR 3.19% (was 2.85%, 6.70% at 0.7751).
+DECISION_THRESHOLD = 0.7564             # Measured fused threshold (EER point on BiosecurID-SONOF)
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
 # These were documented in AGENTS.md as hard constraints but existed nowhere in
