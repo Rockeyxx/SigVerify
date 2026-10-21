@@ -18,10 +18,15 @@ produced a retracted "+8.87 point" fusion result.
 Neither property is visible in the numbers the tool prints, which is why both are
 asserted structurally instead.
 """
+import os
+
 import numpy as np
 import pytest
 
 from tools import cold_start_eval
+
+NFI_SCREEN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "data", "sigcomp2009_clean", "clean_writers.txt")
 
 
 def _writer(num_genuine=8, num_forged=4, dim=6, seed=0, num_models=1):
@@ -199,3 +204,21 @@ class TestEnsembleScoring:
         two = cold_start_eval.scores_per_writer(pair, 5, seed=42)
 
         assert not np.allclose(one["w0"][0], two["w0"][0])
+
+
+class TestCorpusSelection:
+
+    @pytest.mark.skipif(not os.path.exists(NFI_SCREEN),
+                        reason="SigComp2009 screen list not present (gitignored data)")
+    def test_nfi2009_corpus_reaches_its_parser(self, monkeypatch):
+        """
+        `--corpus nfi2009` read SIGCOMP2009_DIR without importing it, so the option
+        died with a NameError before a single file was parsed.
+        """
+        from config.settings import SIGCOMP2009_DIR
+
+        seen = {}
+        monkeypatch.setattr(cold_start_eval, "parse_nfi2009",
+                            lambda root, allowed: seen.update(root=root) or {})
+        cold_start_eval.load_corpus("spatial", "nfi2009")
+        assert seen["root"] == SIGCOMP2009_DIR

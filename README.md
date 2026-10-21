@@ -271,6 +271,7 @@ Verification evaluates a probe against an enrolled gallery using nearest-referen
 | Matching Rule             | Nearest Reference: $d_{min} = \min_{i} \|e_{probe} - e_{ref, i}\|_2$ | `_nearest_reference_score`                                  |
 | Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
 | Decision Threshold        | Spatial $\tau = 0.7637$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
+| Fusion                    | $S = 0.4\,S_{spatial} + 0.6\,S_{temporal}$, fused $\tau = 0.7564$    | `ALPHA_DEFAULT`, `DECISION_THRESHOLD`                       |
 
 More enrolled references give better accuracy without retraining, but the gain gets small after $K=5$. We swept $K$ from 1 to 15 with `benchmark.py --enroll K`, 10 draws each. Spatial pooled EER goes from 11.71% ($K=1$) to 8.72% ($K=5$), 7.86% ($K=10$) and 7.82% ($K=15$). These spatial numbers come from the previous spatial weight, not the one shipped now. Temporal EER goes from 13.72% ($K=1$) to 7.81% ($K=5$), 6.99% ($K=10$) and 6.31% ($K=15$). Both curves are almost flat after $K=10$. The app uses $K=5$.
 
@@ -345,24 +346,37 @@ Refer to [DATASET_LICENSES.md](DATASET_LICENSES.md) for terms of use, licensing,
 
 ### Results vs Published Literature
 
-The table below benchmarks this project against published state-of-the-art results across standard datasets. All **This project** metrics represent held-out writer evaluations under $K=5$ enrollment (mean $\pm$ standard deviation across 10 random enrollment draws, seed 42):
+Each published result sits beside this project measured under the same protocol, on writers the shipped weights never trained on, on CPU. One-reference rows score isolated pairs, and DeepSignDB rows use the dataset's official comparison lists; each is one EER over every trial, as those protocols define it. $K=5$ rows are mean $\pm$ standard deviation over 10 random enrollment draws (seed 42).
 
-| Dataset                 | Published EER / Acc | Published Protocol & Setup                               | Source | This Project (Mean $\pm$ SD) |
-| ----------------------- | :-----------------: | -------------------------------------------------------- | :----: | :--------------------------: |
-| **CEDAR**               |    **0.00%** EER    | Writer-Independent Siamese CNN (50 train / 5 test)       |  [1]   |    **0.00% $\pm$ 0.00%**     |
-| **CEDAR**               |      4.63% EER      | Writer-Dependent SVM on CNN features ($K=12$)            |  [2]   |    **0.00% $\pm$ 0.00%**     |
-| **BHSig260 Bengali**    |   **13.89%** EER    | Writer-Independent Siamese CNN (50 train / 50 test)      |  [1]   |    **6.82% $\pm$ 1.10%**     |
-| **BHSig260 Hindi**      |     15.36% EER      | Writer-Independent Siamese CNN (100 train / 60 test)     |  [1]   |    **3.47% $\pm$ 0.90%**     |
-| **UTSig (Persian)**     |    **9.80%** EER    | Writer-Dependent SVM, Persian transfer learning ($K=10$) |  [3]   |      26.34% $\pm$ 2.17%      |
-| **UTSig (Persian)**     |     11.16% EER      | Writer-Dependent SVM, Persian transfer learning ($K=5$)  |  [3]   |      26.34% $\pm$ 2.17%      |
-| **UTSig (Persian)**     |     17.45% EER      | Writer-Dependent DMML on HOG features ($K=12$)           |  [4]   |      26.34% $\pm$ 2.17%      |
-| **UTSig (Persian)**     |     29.71% EER      | Writer-Dependent SVM on geometric features ($K=12$)      |  [5]   |      26.34% $\pm$ 2.17%      |
-| **SVC2004 Task 2**      |    **2.89%** EER    | Competition winner, user-specific thresholds ($K=5$)     |  [6]   |      13.58% $\pm$ 2.21%      |
-| **SVC2004 Task 2**      |     77.00% Acc      | Writer-Independent Siamese CNN (35 train / 5 test)       |  [7]   |      13.58% $\pm$ 2.21%      |
-| **SigComp2011 Dutch**   |    _Competition_    | Multi-system reference benchmark                         |  [8]   |    **4.11% $\pm$ 1.03%**     |
-| **SigComp2011 Chinese** |    _Competition_    | Multi-system reference benchmark                         |  [8]   |    **5.28% $\pm$ 0.85%**     |
-| **MOBISIG (Touch)**     |      5.81% EER      | DTW with user-specific thresholds                        |  [9]   |       21.26% $\dagger$       |
-| **MOBISIG (Touch)**     |     14.31% EER      | Global features with global threshold                    |  [9]   |       21.26% $\dagger$       |
+| Dataset                 | Protocol                                                   | Published EER | Source | This project                  |
+| ----------------------- | ---------------------------------------------------------- | :-----------: | :----: | :---------------------------: |
+| **CEDAR**               | Writer-independent, 1 reference                            |     0.00%     |  [1]   |             0.00%             |
+| **CEDAR**               | Writer-independent, 1 reference                            |     3.51%     |  [10]  |             0.00%             |
+| **CEDAR**               | Writer-dependent SVM on CNN features, $K=12$               |     4.63%     |  [2]   |  0.00% $\pm$ 0.00% ($K=5$) §  |
+| **BHSig260 Bengali**    | Writer-independent, 1 reference                            |    13.89%     |  [1]   |            11.10%             |
+| **BHSig260 Bengali**    | Writer-independent, 1 reference                            |     6.12%     |  [10]  |            11.10%             |
+| **BHSig260 Hindi**      | Writer-independent, 1 reference                            |    15.36%     |  [1]   |             5.94%             |
+| **BHSig260 Hindi**      | Writer-independent, 1 reference                            |     6.68%     |  [10]  |             5.94%             |
+| **UTSig (Persian)**     | Writer-dependent SVM, Persian transfer learning, $K=10$    |     9.80%     |  [3]   | 26.34% $\pm$ 2.17% ($K=5$) §  |
+| **UTSig (Persian)**     | Writer-dependent SVM, Persian transfer learning, $K=5$     |    11.16%     |  [3]   |    26.34% $\pm$ 2.17% §      |
+| **UTSig (Persian)**     | Writer-dependent DMML on HOG features, $K=12$              |    17.45%     |  [4]   | 26.34% $\pm$ 2.17% ($K=5$) §  |
+| **UTSig (Persian)**     | Writer-dependent SVM on geometric features, $K=12$         |    29.71%     |  [5]   | 26.34% $\pm$ 2.17% ($K=5$) §  |
+| **SVC2004 Task 2**      | $K=5$, skilled forgeries, writer-specific thresholds       |     1.39%     |  [12]  | 13.69% $\pm$ 2.25% (global threshold) |
+| **SVC2004 Task 2**      | $K=5$, skilled forgeries, competition winner               |     2.89%     |  [6]   |      13.69% $\pm$ 2.25%       |
+| **SVC2004 Task 2**      | Writer-independent Siamese CNN, 35 train / 5 test writers  |   77.00% acc  |  [7]   |      13.69% $\pm$ 2.25%       |
+| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 4 references            |     2.44%     |  [12]  |           13.57% ‖            |
+| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 4 references            |     2.54%     |  [11]  |           13.57% ‖            |
+| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 4 references            |     3.30%     |  [15]  |           13.57% ‖            |
+| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 1 reference             |     4.20%     |  [15]  |           16.33% ‖            |
+| **DeepSignDB (stylus)** | Official lists, random forgeries, 4 references             |     0.60%     |  [15]  |            6.50% ‖            |
+| **SigComp2011 Dutch**   | Multi-system competition benchmark                         | _Competition_ |  [8]   |  4.11% $\pm$ 1.03% ($K=5$)    |
+| **SigComp2011 Chinese** | Multi-system competition benchmark                         | _Competition_ |  [8]   |  5.28% $\pm$ 0.85% ($K=5$)    |
+| **MOBISIG (Touch)**     | DTW with user-specific thresholds                          |     5.81%     |  [9]   |           21.26% †            |
+| **MOBISIG (Touch)**     | Global features with global threshold                      |    14.31%     |  [9]   |           21.26% †            |
+
+§ _This project is writer-independent: one model for everyone, nothing fitted per user. No writer-dependent result exists here, so the closest protocol, $K=5$, is shown._
+
+‖ _Shipped temporal weights, never trained on DeepSignDB, on the three pen-tablet sub-databases they can load (MCYT, BiosecurID and BiosecureDS2, 372 writers). The published figures cover all five sub-databases. Published 4-reference scores average the four comparisons; this project scores the nearest reference._
 
 $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model. The primary shipped temporal weights are trained exclusively on digitizer pen corpora (SVC2004 Task 2 + SigComp2011)._
 
@@ -371,8 +385,9 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 - **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion does not always help.** It helps when the two branches are about equally strong, and it hurts when one branch is much stronger. On writers that neither branch trained on, fusion improves the single temporal model (3.96% → 3.62%). On the second paired corpus (SigComp2009 / NFI) it went from 3.90% to 3.62% with the previous spatial weight, but from 3.90% to 4.09% with the current one, so there is no gain there now. Fusion makes the six-seed temporal ensemble worse (2.61% → 4.63%, worse on 22 of 25 draws). So for the pen-tablet tier the ensemble is used **alone**, and fusion is used only where the spatial branch is competitive.
-- **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number.
+- **Fusion weight and threshold come from a separate paired set.** Fused numbers are measured only where the scan and the pen recording come from the same signing: SigComp2009 / NFI (14 writers) and BiosecurID-SONOF (132 writers). SigComp2011's scan and pen forgeries carry different forger codes, so they cannot be paired and are not used for fusion. $\alpha = 0.4$ and $\tau = 0.7564$ were chosen on SONOF. Measured on SONOF writers that took no part in choosing them, the fused EER is 5.17%, just above the 5% target. On NFI, a different collection that took no part either, fusion beats the pen alone on skilled forgeries (temporal alone 3.90% → fused 3.40%) and almost halves random-forgery errors (2.47% → 1.27%).
+- **Time between enrolment and use costs accuracy.** All numbers here draw the references and the probe from the same pool of sessions. On BiosecurID-SONOF, enrolling on one occasion and verifying on later ones raises the fused EER from 5.06% to 7.93%, almost all through genuine signatures being refused. References taken on three different occasions bring it to 6.68%.
+- **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number. On DeepSignDB's official lists, where the references come from one session and the probe from a later one, the shipped single model reads **13.57%** and the ensemble **11.11%** (skilled forgeries, 4 references).
 
 ---
 
@@ -391,13 +406,11 @@ _Ablation Insight:_ When repeated on top of the 4-channel `dt` model with pinned
 
 ### Datasets and Device Targets
 
-Device support is architected in tiers based on hardware capability:
+Target device and its requirement:
 
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | SigComp2011 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **4.09% $\pm$ 1.11%** fused on NFI, 3.09% $\pm$ 0.37% on SigComp2011; 4.11% $\pm$ 1.03% pen alone |
-| **Secondary** | Document Scanners / Cams | CEDAR / BHSig260      | Offline Scanned Image   | $\le 10.0\%$ | **7.46% $\pm$ 0.46%** |
-| **Tertiary**  | Mobile / Touchscreen     | MOBISIG               | Capacitive Finger Touch | $\le 20.0\%$ |        21.26%         |
+| **Primary**   | XPPen Deco 640 Tablet    | BiosecurID-SONOF and SigComp2009 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **5.17% $\pm$ 0.52%** fused on 132 BiosecurID-SONOF writers ($\alpha$ and $\tau$ chosen on the other half of the writers: FAR 5.09%, FRR 5.35%); 3.40% $\pm$ 0.56% fused on 14 NFI writers (at the shipped $\alpha = 0.4$, fused $\tau = 0.7564$: FAR 3.73%, FRR 3.19%); 4.11% $\pm$ 1.03% pen alone on SigComp2011 Dutch |
 
 ---
 
@@ -405,21 +418,26 @@ Device support is architected in tiers based on hardware capability:
 
 Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5 --enroll-trials 10 --seed 42`. To reproduce any release's published numbers, run `python tools/reproduce_release.py <tag>` (`--list` shows the releases):
 
-| Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d |
-| ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: |
-| **Spatial**  | **All Combined**    | **65**  | **7.46% $\pm$ 0.46%** | **7.72%**  | **2.195** |
-| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   8.941   |
-| Spatial      | BHSig260 Hindi      |   23    |   3.47% $\pm$ 0.90%   |   3.34%    |   2.575   |
-| Spatial      | BHSig260 Bengali    |   16    |   6.82% $\pm$ 1.10%   |   6.89%    |   2.185   |
-| Spatial      | UTSig               |   18    |  26.34% $\pm$ 2.17%   |   27.65%   |   1.277   |
-| **Temporal** | **All Combined**    | **31**  | **7.77% $\pm$ 0.67%** | **7.67%**  | **1.710** |
-| Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   |
-| Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   |
-| Temporal     | SVC2004 Task 2      |   10    |  13.58% $\pm$ 2.21%   |   14.00%   |   1.504   |
-| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ |
-| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.03% $\pm$ 0.55%   |   n/a ‡    |   n/a ‡   |
+| Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d | Random-forgery EER |
+| ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: | :----------------: |
+| **Spatial**  | **All Combined**    | **65**  | **7.46% $\pm$ 0.46%** | **7.72%**  | **2.195** | **11.48% $\pm$ 0.29%** |
+| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   8.941   | 14.77% $\pm$ 0.75% |
+| Spatial      | BHSig260 Hindi      |   23    |   3.47% $\pm$ 0.90%   |   3.34%    |   2.575   | 10.00% $\pm$ 0.62% |
+| Spatial      | BHSig260 Bengali    |   16    |   6.82% $\pm$ 1.10%   |   6.89%    |   2.185   | 4.45% $\pm$ 0.79% |
+| Spatial      | UTSig               |   18    |  26.34% $\pm$ 2.17%   |   27.65%   |   1.277   | 9.28% $\pm$ 0.68% |
+| **Temporal** | **All Combined**    | **31**  | **7.79% $\pm$ 0.63%** | **7.92%**  | **1.709** | **2.28% $\pm$ 0.35%** |
+| Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   | 0.98% $\pm$ 0.42% |
+| Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   | 3.03% $\pm$ 0.91% |
+| Temporal     | SVC2004 Task 2      |   10    |  13.69% $\pm$ 2.25%   |   14.92%   |   1.505   | 3.82% $\pm$ 1.33% |
+| **Fused**    | **BiosecurID-SONOF, paired, skilled forgeries** | **132** | **5.17% $\pm$ 0.52%** § | n/a ‡ | n/a ‡ | n/a |
+| Fused        | SigComp2009 / NFI, paired, skilled forgeries |   14    |   3.40% $\pm$ 0.56%   |   n/a ‡    |   n/a ‡   | 1.27% $\pm$ 0.42% |
+| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.52% $\pm$ 0.64%   |   n/a ‡    |   n/a ‡   | n/a |
 
-‡ Fused rows: shipped weights on both modalities of the same signing events, 14 NFI writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run.
+‡ Fused rows: shipped weights at $\alpha = 0.4$ on both modalities of the same signing events, writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run. The skilled + random row adds, for each writer, as many random forgeries as that writer has skilled forgeries. NFI took no part in choosing $\alpha$ or $\tau$.
+
+§ SONOF row: $\alpha$ and $\tau$ chosen on 66 writers and measured on the other 66, mean $\pm$ SD over 200 random writer splits. BiosecurID-SONOF is a licensed corpus (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
+
+Random-forgery EER: the impostors are the genuine signatures of the other test writers of the same dataset (never across datasets), scored against the same 5 references and draws as the skilled column.
 
 ---
 
@@ -439,7 +457,7 @@ Confusion matrices evaluated at fixed production thresholds (`SPATIAL_DECISION_T
 | Modality     | True Reject | False Accept | True Accept | False Reject |    FAR     |    FRR     |
 | ------------ | ----------: | -----------: | ----------: | -----------: | :--------: | :--------: |
 | **Spatial**  |       1,360 |          110 |       1,181 |          108 | **7.48%**  | **8.38%**  |
-| **Temporal** |         556 |           71 |         548 |           24 | **11.32%** | **4.20%**  |
+| **Temporal** |         557 |           70 |         548 |           24 | **11.16%** | **4.20%**  |
 
 _Error Complementarity:_ Spatial and temporal modalities exhibit complementary error distributions ($\phi < 0$). Spatial models tend toward false rejections (rejecting genuine variations), while temporal models tend toward false acceptances. Multimodal late fusion effectively balances both operating regimes.
 
@@ -545,24 +563,28 @@ The spatial Siamese CNN was benchmarked directly against the reference architect
 7. C. Sekhar, P. Mukherjee, D. S. Guru, V. Pulabaigari. _OSVNet: Convolutional Siamese Network for Writer Independent Online Signature Verification._ ICDAR 2019. [arXiv:1904.00240](https://arxiv.org/abs/1904.00240)
 8. M. Liwicki, M. I. Malik, C. E. van den Heuvel, X. Chen, C. Berger, R. Stoel, M. Blumenstein, B. Found. _Signature Verification Competition for Online and Offline Skilled Forgeries (SigComp2011)._ ICDAR 2011, pp. 1480–1484, 2011.
 9. M. Antal, L. Z. Szabó, T. Tordai. _Online Signature Verification on MOBISIG Finger-Drawn Signature Corpus._ Mobile Information Systems, vol. 2018, Article ID 3127042, 2018.
+10. F.-H. Huang, H.-M. Lu. _Multiscale Feature Learning Using Co-Tuplet Loss for Offline Handwritten Signature Verification._ 2023. [arXiv:2308.00428](https://arxiv.org/abs/2308.00428)
+11. J. Jiang, S. Lai, L. Jin, Y. Zhu. _DsDTW: Local Representation Learning with Deep Soft-DTW for Dynamic Signature Verification._ IEEE Transactions on Information Forensics and Security 17:2198–2212, 2022.
+12. R. Li, D. Yang. _Online Signature Verification Using Augmented Path Signature and T-Mamba._ 2026. [arXiv:2609.08276](https://arxiv.org/abs/2609.08276)
 
 #### Datasets & Required Licensure Citations
 
-⚖ marks the four references DeepSignDB's licence clause 4.5 requires citing in any published work that uses that dataset (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
+⚖ marks the references a dataset licence requires citing in any published work that uses that dataset: the four of DeepSignDB clause 4.5 and the one of BiosecurID-SONOF clause 4.4 (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
 
-10. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and identification using distance statistics._ IJPRAI 18(7):1339–1360, 2004. (CEDAR)
-11. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line signature verification method based on texture features on a large indic-script signature dataset._ DAS 2016, pp. 72–77, 2016. (BHSig260)
-12. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign: Deep On-Line Signature Verification._ IEEE Transactions on Biometrics, Behavior, and Identity Science, 3(2):229–239, 2021. (DeepSignDB)
-13. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235–246, 2010.
-14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097–1111, 2010.
-15. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395–401, 2003.
+13. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and identification using distance statistics._ IJPRAI 18(7):1339–1360, 2004. (CEDAR)
+14. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line signature verification method based on texture features on a large indic-script signature dataset._ DAS 2016, pp. 72–77, 2016. (BHSig260)
+15. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign: Deep On-Line Signature Verification._ IEEE Transactions on Biometrics, Behavior, and Identity Science, 3(2):229–239, 2021. (DeepSignDB)
+16. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235–246, 2010.
+17. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097–1111, 2010.
+18. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395–401, 2003.
+19. ⚖ J. Galbally, M. Diaz-Cabrera, M. A. Ferrer, M. Gomez-Barrero, A. Morales, J. Fierrez. _On-Line Signature Recognition Through the Combination of Real Dynamic Data and Synthetically Generated Static Data._ Pattern Recognition, 48:2921–2934, 2015. (BiosecurID-SONOF)
 
 #### Standards
 
-16. **ISO/IEC 23053:2022** Framework for Artificial Intelligence Systems Using Machine Learning.
-17. **ISO/IEC 24745:2022** Information Technology Security Techniques Biometric Information Protection.
-18. **ISO/IEC 18033-1:2021** Information Security Encryption Algorithms.
-19. **IEEE 730-2014** IEEE Standard for Software Quality Assurance Processes.
+20. **ISO/IEC 23053:2022** Framework for Artificial Intelligence Systems Using Machine Learning.
+21. **ISO/IEC 24745:2022** Information Technology Security Techniques Biometric Information Protection.
+22. **ISO/IEC 18033-1:2021** Information Security Encryption Algorithms.
+23. **IEEE 730-2014** IEEE Standard for Software Quality Assurance Processes.
 
 ---
 

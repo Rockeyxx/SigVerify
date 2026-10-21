@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
+    BIOSECURID_SONOF_DIR,
     CEDAR_DIR,
     DEEPSIGNDB_DIR,
     MOBISIG_DIR,
@@ -138,8 +139,12 @@ def merge_datasets(target, incoming):
     return target
 
 
-def parse_dataset(path, **kwargs):
-    """Dispatch dataset folder to its parser based on folder name."""
+def parse_dataset(path, float32_parse=False, **kwargs):
+    """Dispatch dataset folder to its parser based on folder name.
+
+    float32_parse reaches only the parsers that read a device clock (SVC2004 and
+    DeepSignDB); every other corpus is read the same either way.
+    """
     name = os.path.basename(os.path.normpath(path)).lower()
     if name not in _PARSERS:
         raise ValueError(
@@ -147,7 +152,10 @@ def parse_dataset(path, **kwargs):
             f"Expected one of: {', '.join(sorted(_PARSERS))}. "
             f"Rename the directory to match, or add a parser."
         )
-    return _PARSERS[name](path, **kwargs)
+    parser = _PARSERS[name]
+    if float32_parse and parser in (parse_svc2004, parse_deepsigndb):
+        kwargs["float32_parse"] = True
+    return parser(path, **kwargs)
 
 
 def parse_cedar(root=CEDAR_DIR):
@@ -239,15 +247,18 @@ def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
     return writers
 
 
-def load_svc2004_file(path, extra_channels=None):
+def load_svc2004_file(path, extra_channels=None, float32_parse=False):
     """Load an SVC2004 signature file into a normalized trajectory array.
 
     Supports 4-column Task1 (X, Y, T, Button) and 7-column Task2 (with pressure and angles).
+    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
     """
     with open(path, "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = [line.split() for line in fh.read().splitlines() if line.strip()]
 
-    rows = np.array([[float(v) for v in row] for row in lines[1:]], dtype=np.float32)
+    # float64: the clock reaches 7.5e7 ms, past the 2**24 where float32 stops holding every integer.
+    rows = np.array([[float(v) for v in row] for row in lines[1:]],
+                    dtype=np.float32 if float32_parse else np.float64)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
@@ -288,7 +299,7 @@ def svc2004_has_pressure(root=SVC2004_DIR):
     return False
 
 
-def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
+def parse_svc2004(root=SVC2004_DIR, extra_channels=None, float32_parse=False):
     """Parse the SVC2004 online signature dataset."""
     _require_dir(root, "SVC2004")
     writers = {}
@@ -303,7 +314,8 @@ def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
         label = "genuine" if sample <= 20 else "forged"
 
         writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels))
+        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
+                                                           float32_parse))
 
     return writers
 
@@ -354,9 +366,9 @@ def load_sigcomp2011_file(path, extra_channels=None):
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2011")
 
 
-def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
+def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCOMP_DECIMATION):
     """Process raw rows from SigComp collections into a normalized trajectory sample."""
-    rows = rows[::SIGCOMP_DECIMATION]
+    rows = rows[::decimation]
     pen_down = np.flatnonzero(rows[:, 2] > 0)
     if len(pen_down) < 2:
         raise ValueError(
@@ -391,6 +403,49 @@ def load_nfi2009_file(path, extra_channels=None):
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2009")
+
+
+# BiosecurID-SONOF: Wacom Intuos3 at 100 Hz (already the target rate), x, y and
+# pressure only, pen-up recorded as pressure 0, so the SigComp core applies undecimated.
+SONOF_ONLINE_ID_OFFSET = 1000          # pen file u1001 is scan folder u0001
+SONOF_GENUINE_SLOTS = (1, 2, 6, 7)     # per session; slots 3 to 5 are skilled forgeries
+_SONOF_ONLINE_FILE = re.compile(r"^u(\d{4})(s\d{4}_sg(\d{4}))\.mat$", re.IGNORECASE)
+
+
+def load_sonof_online_file(path, extra_channels=None):
+    """Load a BiosecurID-SONOF pen recording (.mat with x, y, p) into a normalized trajectory array."""
+    from scipy.io import loadmat
+    mat = loadmat(path)
+    rows = np.column_stack([np.ravel(mat[key]) for key in ("x", "y", "p")]).astype(np.float32)
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "BiosecurID-SONOF", decimation=1)
+
+
+def parse_biosecurid_sonof_pairs(root=BIOSECURID_SONOF_DIR):
+    """Pair each SONOF pen recording with the scan of the same signing.
+
+    Returns {writer_id: {"genuine": [(png, mat)], "forged": [(png, mat)]}}. A
+    missing scan, or one whose label disagrees with its slot, raises: a silent
+    gap or a shifted join would corrupt every fused number built on it.
+    """
+    online = os.path.join(root, "OnlineReal")
+    _require_dir(online, "BiosecurID-SONOF OnlineReal")
+    writers = {}
+    for filename in sorted(os.listdir(online)):
+        match = _SONOF_ONLINE_FILE.match(filename)
+        if not match:
+            continue
+        pen_user, stem, slot = int(match.group(1)), match.group(2), int(match.group(3))
+        scan_user = pen_user - SONOF_ONLINE_ID_OFFSET
+        genuine = slot in SONOF_GENUINE_SLOTS
+        scan_dir = os.path.join(root, "OfflineReal", f"u{scan_user:04d}")
+        scan = os.path.join(scan_dir, f"u{scan_user:04d}{stem}{'g' if genuine else 'f'}.png")
+        if not os.path.exists(scan):
+            if os.path.exists(scan[:-5] + ("f" if genuine else "g") + ".png"):
+                raise ValueError(f"Scan for {filename} carries the wrong label for slot {slot}.")
+            raise FileNotFoundError(f"No scan for {filename}: expected u{scan_user:04d}{stem}")
+        record = writers.setdefault(f"sonof_u{pen_user:04d}", _new_writer())
+        record["genuine" if genuine else "forged"].append((scan, os.path.join(online, filename)))
+    return writers
 
 
 def _sigcomp_parts(dirpath, root):
@@ -494,9 +549,13 @@ def deepsigndb_source(user_id, split):
     return None
 
 
-def load_deepsigndb_file(path, source, extra_channels=None):
-    """Load a DeepSignDB trajectory file into a normalized array."""
-    rows = np.loadtxt(path, dtype=np.float32, skiprows=1, ndmin=2)
+def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False):
+    """Load a DeepSignDB trajectory file into a normalized array.
+
+    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
+    """
+    # float64: timestamps pass 2**24 ms, where float32 stops holding every integer.
+    rows = np.loadtxt(path, dtype=np.float32 if float32_parse else np.float64, skiprows=1, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
@@ -536,7 +595,7 @@ def load_deepsigndb_file(path, source, extra_channels=None):
 
 
 def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus",
-                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None):
+                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None, float32_parse=False):
     """Parse the DeepSignDB online signature dataset."""
     unknown = set(sources) - set(DEEPSIGN_PRESSURE_COLUMN)
     if unknown:
@@ -570,7 +629,7 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
         writers.setdefault(writer_id, _new_writer())
         writers[writer_id][label].append(
             load_deepsigndb_file(os.path.join(directory, filename), source,
-                                 extra_channels))
+                                 extra_channels, float32_parse))
 
     return writers
 

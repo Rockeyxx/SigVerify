@@ -39,6 +39,21 @@ The binding terms of this agreement constrain repository operations through seve
 
 Executing model training and applying resulting weights for internal benchmarks, reports, and system demonstrations falls under authorized academic usage. Commercial distribution or integration into proprietary software remains strictly forbidden.
 
+## BiosecurID-SONOF (signed agreement, research use only)
+
+BiosecurID-SONOF is distributed by the **Biometric Recognition Group (ATVS), Universidad Autónoma de Madrid**, through BiDA Lab. It holds 132 signers, each with 16 genuine signatures and 12 skilled forgeries, every signing both recorded on a pen tablet and scanned from paper. Access requires a signed license request.
+
+A valid agreement for this project took effect on **14 October 2026** for a period of two years. **The raw archive is held locally under that agreement.** It is gitignored and has never been committed. The project uses it to evaluate and calibrate the shipped weights. No weight is trained on it for release.
+
+| Clause | What it means here |
+| ------ | ------------------ |
+| 4.1 | Use is limited to the licensee and direct research colleagues at the same institution who have accepted the terms |
+| 4.2 | No copies or distribution beyond the licensee's backup. Because `data/` is gitignored, no raw signatures, feature caches or embeddings enter source control |
+| 4.3 | Research use only, never inside a commercial application in any form, including files of extracted features. Weights trained on it would carry the same restriction |
+| 4.4 | Any public work based on it, directly or indirectly, cites J. Galbally, M. Diaz-Cabrera, M. A. Ferrer, M. Gomez-Barrero, A. Morales and J. Fierrez, "On-Line Signature Recognition Through the Combination of Real Dynamic Data and Synthetically Generated Static Data", Pattern Recognition, vol. 48, pp. 2921-2934, 2015 (DOI: 10.1016/j.patcog.2015.03.019) |
+| 4.5 | Unless both parties renew it, the license ends on 14 October 2028, and all copies must then be destroyed |
+| 5 | Compliance with any data protection law that applies to the licensee is the licensee's responsibility |
+
 ## Adding another licensed corpus
 
 Operational procedures are specified in [AGENTS.md](AGENTS.md#licensed-datasets): never check in raw data or derived assets, limit visual signature renders strictly to whitelisted participants, include mandatory citations, restrict output model weights to non-commercial scope, and log agreement expiration dates. Update this document concurrently when adding any new corpus.

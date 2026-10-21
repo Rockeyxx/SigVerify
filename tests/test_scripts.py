@@ -198,6 +198,25 @@ class TestPairBudget:
         assert TEMPORAL_PAIRS_GENUINE_PER_WRITER == 180
         assert n == 15 * 2 * 2
 
+    def test_device_augment_reaches_only_the_training_loader(self):
+        from scripts.train import build_loader
+
+        writers = self._writers(n_writers=2, n_samples=6, temporal=True)
+        train, _ = build_loader(writers, sorted(writers), "temporal", 4, 0, True, 42,
+                                device_augment=True)
+        val, _ = build_loader(writers, sorted(writers), "temporal", 4, 0, False, 42,
+                              device_augment=True)
+        assert train.dataset.device_augment and not val.dataset.device_augment
+
+    def test_the_new_augmentation_flags_parse(self):
+        from scripts.train import parse_args
+
+        args = parse_args(["--branch", "temporal", "--data-dir", "data/x",
+                           "--device-augment", "--aug-blur", "1.0",
+                           "--aug-ink-gain-min", "0.7", "--aug-noise", "0.02"])
+        assert args.device_augment
+        assert (args.aug_blur, args.aug_ink_gain_min, args.aug_noise) == (1.0, 0.7, 0.02)
+
 
 class TestEarlyStoppingSurvivesResume:
     """Verifies that early stopping patience state is preserved when resuming training."""
@@ -372,3 +391,67 @@ class TestFusedChannelDispatch:
         _make_svc_fixture(str(task1), num_writers=2)
         with pytest.raises(ValueError, match="cannot supply"):
             build_writer_samples([str(task1)], extra_channels="tilt")
+
+
+class _Stop(Exception):
+    """Raised by a stand-in loader to end a run once it has been asked for its data."""
+
+
+def _stop_at_loading(seen):
+    def spy(data_dirs, extra_channels=None, float32_parse=False):
+        seen.append(float32_parse)
+        raise _Stop
+    return spy
+
+
+class TestFloat32Parse:
+    """
+    Training reads SVC2004 and DeepSignDB as float32, the read the shipped dt
+    recipe was trained on, and every scorer reads them exactly. On exact
+    timestamps the recipe is 2.8 EER points worse.
+    """
+
+    @staticmethod
+    def _svc_with_a_large_clock(root):
+        os.makedirs(root)
+        for user in (1, 2):
+            for sample in (1, 21):
+                with open(os.path.join(root, f"U{user}S{sample}.TXT"), "w") as fh:
+                    fh.write("30\n" + "".join(f"{100 + t} {200 + t} {70_000_000 + 10 * t} 1 1500 700 500\n"
+                                              for t in range(30)))
+        return root
+
+    def test_only_the_corpora_with_a_device_clock_are_asked_for_it(self, tmp_path):
+        from scripts.train import build_writer_samples
+        from src.data.parsers import MAX_GAP_MS
+
+        cedar = _make_cedar_fixture(str(tmp_path / "cedar"), num_writers=3)
+        svc = self._svc_with_a_large_clock(str(tmp_path / "svc2004_task2"))
+        exact = build_writer_samples([svc], extra_channels="dt")
+        old = build_writer_samples([cedar, svc], extra_channels="dt", float32_parse=True)
+        assert np.allclose(exact["svc_1"]["genuine"][0][1:, 3], 10.0 / MAX_GAP_MS)
+        assert not np.allclose(old["svc_1"]["genuine"][0][1:, 3], 10.0 / MAX_GAP_MS)
+
+    def test_training_reads_the_corpora_as_the_shipped_recipe_did(self, tmp_path, monkeypatch):
+        import scripts.train as train
+        from config.settings import TEMPORAL_TRAIN_FLOAT32_PARSE
+
+        seen = []
+        monkeypatch.setattr(train, "build_writer_samples", _stop_at_loading(seen))
+        with pytest.raises(_Stop):
+            train.main(["--branch", "temporal", "--data-dir", str(tmp_path), "--weights-dir", str(tmp_path)])
+        assert TEMPORAL_TRAIN_FLOAT32_PARSE is True
+        assert seen == [True]
+
+    def test_the_benchmark_reads_exactly_unless_asked(self, tmp_path, monkeypatch):
+        """`--float32-parse` exists so the releases scored before the fix still reproduce."""
+        import scripts.benchmark as benchmark
+        import scripts.train as train
+
+        seen = []
+        monkeypatch.setattr(train, "build_writer_samples", _stop_at_loading(seen))
+        for extra in ([], ["--float32-parse"]):
+            with pytest.raises(_Stop):
+                benchmark.main(["--branch", "temporal", "--weights", str(tmp_path / "w.pth"),
+                                "--data-dir", str(tmp_path), *extra])
+        assert seen == [False, True]

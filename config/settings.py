@@ -46,6 +46,11 @@ SIGCOMP2009_DIR = os.path.join(DATA_DIR, "sigcomp2009_dl", "extracted")
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 
+# BiosecurID-SONOF (BiDA Lab, UAM): 132 writers, a pen recording (OnlineReal/) and a scan
+# (OfflineReal/) of the same signing. **Restricted License Dataset**, as DeepSignDB:
+# evaluation and calibration only; no weight trained on it ships.
+BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
+
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
 # its split record instead, and tests/test_leakage.py fails when the two
@@ -198,6 +203,13 @@ ENROLLMENT_TRIALS = 10
 TEMPORAL_AUGMENT = False
 SPATIAL_AUGMENT = True
 
+# Training reads the SVC2004 and DeepSignDB files as float32, the way the loaders once
+# did; every scorer reads them as float64. float32 cannot hold every millisecond past
+# 2**24 ms, and SVC2004's clock runs to 7.5e7 ms, so on most of its files 10 ms steps
+# come out as 8, 12 or 16 ms. That rounding is the only noise the shipped dt recipe
+# trains with: on exact timestamps the same recipe is 2.8 EER points worse in-domain.
+TEMPORAL_TRAIN_FLOAT32_PARSE = True
+
 # Augmentation strengths. These were function defaults inside `src/data/dataset.py`
 # and restated a second time at the call site, so retuning one left the other stale.
 # Ranges stay deliberately small: forgery detection keys on fine stroke geometry,
@@ -207,9 +219,24 @@ SPATIAL_AUG_MAX_SHEAR = 0.08
 SPATIAL_AUG_MAX_SCALE = 0.08
 SPATIAL_AUG_MAX_TRANSLATE = 0.04
 SPATIAL_AUG_STROKE_PROB = 0.0           # Measured 2026-09-26: stroke dilate/erode jitter costs 1.23 pooled EER points (report L9)
+# Scanner effects (E3, report F9 follow-up): off by default, so the shipped recipe draws
+# the same random stream and every released seed reproduces. Switched on per run with
+# --aug-blur, --aug-ink-gain-min and --aug-noise.
+SPATIAL_AUG_BLUR_SIGMA = 0.0            # Max Gaussian blur sigma in pixels
+SPATIAL_AUG_INK_GAIN_MIN = 1.0          # Ink intensity scaled by U(min, 1); 1.0 is off
+SPATIAL_AUG_NOISE_STD = 0.0             # Max additive noise sigma on the [0, 1] image
 TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
+# Device-spec augmentation (E2, --device-augment): a training trajectory re-recorded as
+# another tablet inside the capture spec (README hardware table: >= 200 Hz, >= 1024
+# pressure levels) would deliver it after ingest. The ranges are the spec's envelope, not
+# measured device statistics: report rates common tablets ship with, and pressure curves
+# from soft to firm.
+TEMPORAL_DEVICE_AUG_RATE_HZ = (200.0, 300.0)
+TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA = (0.67, 1.5)
+TEMPORAL_DEVICE_AUG_PRESSURE_GAIN = (0.85, 1.0)
+TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS = 1024
 
 # Target sampling rate for online trajectories, and the period that follows from
 # it. Everything inside src/ derives from these two: features.py's Nyquist term,
@@ -234,16 +261,42 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# Equal weighting (alpha = 0.5) is robust across evaluation splits.
-ALPHA_DEFAULT = 0.5                     # Measured: equal weighting is the optimum
+# Chosen on the 132 BiosecurID-SONOF paired writers (lowest fused EER, K=5, 10 draws),
+# then confirmed on the 14 NFI writers, who took no part in choosing it.
+ALPHA_DEFAULT = 0.4                     # Measured: SONOF optimum; equal weighting (0.5) scored worse on both
 ALPHA_GRID_STEP = 0.05
+
+# Signings asked for at verification, of each kind (paper and tablet). The GUI reads this as its
+# default and may offer it as a toggle (1 or 2); verify() averages however many it is given, and
+# every signing must pass its input gate or that kind of evidence is dropped. The thresholds below
+# are shared: at a fixed threshold averaging can only lower FAR. Measured 2026-10-21, pen, K = 5,
+# 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06% to 13.70% a
+# session later and from 8.42% to 6.04% at the same sitting.
+VERIFICATION_SIGNINGS = 1
+
+# Step-up verification, off until the GUI can show "Sign again" (AGENTS.md). One signing of each
+# kind first: a fused score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is
+# rejected, and anything between asks for one more signing of each kind, whose mean with the first
+# must reach STEP_UP_TWO. Fused decisions only, with VERIFICATION_SIGNINGS left at 1. Calibrated on
+# 132 BiosecurID-SONOF writers three sessions after enrolment, forgers assumed to repeat their first
+# attempt (the worst case for false accepts), at most 30% asked twice: 11.4% of genuine signers
+# refused at 5.1% of forgeries passed, against 15.7% for one signing at 5%; 18% asked twice.
+VERIFICATION_STEP_UP = False
+STEP_UP_REJECT = 0.4229
+STEP_UP_ACCEPT = 0.7514
+STEP_UP_TWO = 0.7470
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
+# Pen-alone threshold. 0.7381 (the FAR 5% point on SONOF) was tried and reverted: AGENTS.md keeps FAR
+# low first, and at 0.7381 DeepSignDB MCYT and BiosecureDS2 accepted 11.6% and 12.0% of skilled
+# forgeries. No fixed pen-alone threshold meets FAR 5% on every new collection (their FAR 5% points
+# run from 0.72 to 0.83); the deployment's own writers set it.
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-# Fused threshold: EER point of 0.5*s + 0.5*t on paired writers held out by both branches.
-DECISION_THRESHOLD = 0.7751             # Measured fused threshold (EER point on clean paired writers)
+# Fused threshold: EER point of 0.4*s + 0.6*t on the 132 SONOF paired writers, which
+# neither branch trained on. On NFI it gives FAR 3.73%, FRR 3.19% (was 2.85%, 6.70% at 0.7751).
+DECISION_THRESHOLD = 0.7564             # Measured fused threshold (EER point on BiosecurID-SONOF)
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
 # These were documented in AGENTS.md as hard constraints but existed nowhere in

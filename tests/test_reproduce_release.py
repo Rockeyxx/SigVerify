@@ -147,6 +147,22 @@ def test_scoring_runs_on_the_device_the_release_was_measured_on():
     assert benchmark_env(cuda).get("CUDA_VISIBLE_DEVICES") != ""
 
 
+def test_the_dt_releases_are_scored_on_the_read_they_were_published_on():
+    """
+    v0.8.0 to v0.10.0 published their dt figures on the float32 read the
+    loaders made before B7's fix, so those figures reproduce only on that read.
+    A release that does not say so is scored on exact timestamps.
+    """
+    for tag in ("v0.8.0", "v0.9.0", "v0.10.0"):
+        dt = next(w for w in RELEASES[tag] if w.branch == "temporal")
+        assert dt.channels == "dt" and dt.float32_parse
+        assert "--float32-parse" in benchmark_command(dt, "/cache/temporal_lstm.pth")
+    spatial = next(w for w in RELEASES["v0.10.0"] if w.branch == "spatial")
+    assert "--float32-parse" not in benchmark_command(spatial, "/cache/spatial_cnn.pth")
+    new = Weight("temporal", "temporal_lstm.pth", {"mean": 1.0}, "cpu", channels="dt")
+    assert "--float32-parse" not in benchmark_command(new, "/cache/temporal_lstm.pth")
+
+
 def test_only_a_known_release_tag_reaches_the_filesystem():
     """The cache path is built from the tag, so an unknown or crafted tag is refused before any mkdir."""
     assert release_dir("v0.10.0").endswith(os.path.join("releases", "v0.10.0"))

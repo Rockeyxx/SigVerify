@@ -35,7 +35,7 @@ from config.settings import (
     NUM_WORKERS, PIN_MEMORY,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
-    TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO,
+    TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO, TEMPORAL_TRAIN_FLOAT32_PARSE,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
@@ -167,6 +167,15 @@ def parse_args(argv=None):
                         help="Spatial augmentation: max translation (default SPATIAL_AUG_MAX_TRANSLATE)")
     parser.add_argument("--aug-stroke-prob", type=float, default=None,
                         help="Spatial augmentation: stroke dilate/erode probability (default SPATIAL_AUG_STROKE_PROB)")
+    parser.add_argument("--aug-blur", type=float, default=None, metavar="SIGMA",
+                        help="Spatial augmentation: max Gaussian blur sigma in pixels (default SPATIAL_AUG_BLUR_SIGMA, off)")
+    parser.add_argument("--aug-ink-gain-min", type=float, default=None,
+                        help="Spatial augmentation: ink intensity scaled by U(min, 1) (default SPATIAL_AUG_INK_GAIN_MIN, off)")
+    parser.add_argument("--aug-noise", type=float, default=None, metavar="STD",
+                        help="Spatial augmentation: max additive noise sigma (default SPATIAL_AUG_NOISE_STD, off)")
+    parser.add_argument("--device-augment", action="store_true",
+                        help="Temporal branch: re-record each training trajectory as another tablet "
+                             "inside the capture spec would deliver it (TEMPORAL_DEVICE_AUG_*)")
     parser.add_argument("--unidirectional", action="store_true",
                         help="Temporal branch: forward-only LSTM instead of bidirectional. "
                              "Recoverable from the checkpoint.")
@@ -280,8 +289,12 @@ def apply_derived_features(writer_samples):
     return writer_samples
 
 
-def build_writer_samples(data_dirs, extra_channels=None):
-    """Parse and merge every requested dataset into one writer-keyed mapping."""
+def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
+    """Parse and merge every requested dataset into one writer-keyed mapping.
+
+    float32_parse reads SVC2004 and DeepSignDB as training does
+    (TEMPORAL_TRAIN_FLOAT32_PARSE); every scorer leaves it off.
+    """
     writer_samples = {}
     for directory in data_dirs:
         # Refusing here is the point. Every corpus in one run must return the
@@ -301,7 +314,7 @@ def build_writer_samples(data_dirs, extra_channels=None):
                     f"{', '.join(sorted(c for c, ch in EXTRA_CHANNEL_SUPPORT.items() if extra_channels in ch))}."
                 )
             kwargs = {"extra_channels": extra_channels}
-        parsed = parse_dataset(directory, **kwargs)
+        parsed = parse_dataset(directory, float32_parse=float32_parse, **kwargs)
         print(f"  {directory}: {len(parsed)} writers")
         merge_datasets(writer_samples, parsed)
     if not writer_samples:
@@ -330,7 +343,8 @@ def _seed_worker(worker_id):
 
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
                  augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
-                 augment_scale=1.0, pairs_per_writer=None, augment_params=None):
+                 augment_scale=1.0, pairs_per_writer=None, augment_params=None,
+                 device_augment=False):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -377,7 +391,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         dataset = TemporalSignatureDataset(pairs, labels,
                                            augment=shuffle and augment,
                                            augment_scale=augment_scale,
-                                           seed=seed)
+                                           seed=seed,
+                                           device_augment=shuffle and device_augment)
         collate = collate_temporal_pairs
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
@@ -578,7 +593,9 @@ def main(argv=None):
         # a timing channel and abort a perfectly valid run.
         extra_channels=(None if args.branch != "temporal"
                         or args.temporal_channels == "xyp"
-                        else args.temporal_channels))
+                        else args.temporal_channels),
+        # The recipe's only training noise; see TEMPORAL_TRAIN_FLOAT32_PARSE.
+        float32_parse=TEMPORAL_TRAIN_FLOAT32_PARSE)
 
     # Each branch keeps its own documented default; --augment/--no-augment override.
     if args.augment is None:
@@ -683,7 +700,10 @@ def main(argv=None):
                                         ("max_shear", args.aug_shear),
                                         ("max_scale", args.aug_scale),
                                         ("max_translate", args.aug_translate),
-                                        ("stroke_prob", args.aug_stroke_prob)) if v is not None}
+                                        ("stroke_prob", args.aug_stroke_prob),
+                                        ("blur_sigma_max", args.aug_blur),
+                                        ("ink_gain_min", args.aug_ink_gain_min),
+                                        ("noise_std_max", args.aug_noise)) if v is not None}
     if augment_params:
         print(f"  Augmentation overrides: {augment_params}")
     if args.branch == "temporal":
@@ -697,7 +717,8 @@ def main(argv=None):
                                            augment_scale=args.augment_scale,
                                            random_impostor_ratio=args.random_impostor_ratio,
                                            pairs_per_writer=args.pairs_per_writer,
-                                           augment_params=augment_params)
+                                           augment_params=augment_params,
+                                           device_augment=args.device_augment)
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
                                        args.num_workers, False, args.seed,
                                        augment=args.augment,

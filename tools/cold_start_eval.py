@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import (
     MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
+    SIGCOMP2009_DIR,
     SPATIAL_DECISION_THRESHOLD,
     TARGET_FAR,
     TEMPORAL_CHANNELS,
