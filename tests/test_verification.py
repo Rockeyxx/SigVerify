@@ -328,6 +328,77 @@ class TestVerify:
         os.unlink(path)
 
 
+class TestSeveralSignings:
+    """
+    `VERIFICATION_SIGNINGS` > 1: the app asks for several signings of each kind and
+    `verify()` scores their mean. Measured 2026-10-21 on BiosecureDS2 (140 writers,
+    K = 5, references from one session): two signings took the pen EER from 16.06% to
+    13.70% a session later and from 8.42% to 6.04% at the same sitting. At a fixed
+    threshold averaging can only lower FAR, which is why the thresholds are shared.
+    """
+
+    def _temporal(self):
+        model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
+                                embedding_dim=128).eval()
+        references = [embed(model, _valid_trajectory(seed=1), "temporal")]
+        return model, references, _valid_trajectory(seed=2), _valid_trajectory(seed=3)
+
+    def test_the_score_is_the_mean_of_the_signings(self):
+        model, references, first, second = self._temporal()
+        one = verify(temporal=(model, references, first))["confidence"]
+        two = verify(temporal=(model, references, second))["confidence"]
+        assert one != pytest.approx(two), "the two signings must score differently"
+
+        both = verify(temporal=(model, references, [first, second]))
+        assert both["confidence"] == pytest.approx((one + two) / 2)
+
+    def test_one_signing_in_a_list_matches_a_single_probe(self):
+        model, references, first, _ = self._temporal()
+        assert (verify(temporal=(model, references, [first]))
+                == verify(temporal=(model, references, first)))
+
+    def test_a_failed_signing_drops_its_whole_branch(self):
+        """
+        Averaging only the signings that pass would let a forger hand in one
+        careful forgery and one scribble and be scored on the forgery alone.
+        """
+        smodel = SpatialSiamese(embedding_dim=512).eval()
+        good, bad = _sharp_signature_image(), _blank_image()
+        srefs = [embed(smodel, good, "spatial")]
+        tmodel, trefs, first, second = self._temporal()
+
+        result = verify(spatial=(smodel, srefs, [good, bad]),
+                        temporal=(tmodel, trefs, [first, second]))
+
+        assert result["routing"] == "temporal_only"
+        assert result["degraded"] is True
+        assert any("signing 2" in r for r in result["reasons"])
+        os.unlink(good)
+        os.unlink(bad)
+
+    def test_an_empty_list_of_signings_raises(self):
+        model, references, _, _ = self._temporal()
+        with pytest.raises(ValueError, match="at least one signing"):
+            verify(temporal=(model, references, []))
+
+    def test_rendered_spatial_probes_follow_several_trajectories(self):
+        smodel = SpatialSiamese(embedding_dim=512).eval()
+        path = _sharp_signature_image()
+        srefs = [embed(smodel, path, "spatial")]
+        tmodel, trefs, first, second = self._temporal()
+
+        result = verify(spatial=(smodel, srefs, None),
+                        temporal=(tmodel, trefs, [first, second]),
+                        auto_render_spatial=True)
+
+        assert result["routing"] == "multimodal"
+        os.unlink(path)
+
+    def test_the_default_is_one_signing(self):
+        from config.settings import VERIFICATION_SIGNINGS
+        assert VERIFICATION_SIGNINGS == 1
+
+
 def _embedded_writer(genuine, forged):
     return {"genuine": np.asarray(genuine, dtype=np.float32),
             "forged": np.asarray(forged, dtype=np.float32)}
@@ -463,9 +534,14 @@ class TestThresholdFollowsRouting:
         return raw
 
     def test_dropped_temporal_branch_does_not_move_the_spatial_verdict(self):
-        # 0.70 sits above SPATIAL_DECISION_THRESHOLD and below DECISION_THRESHOLD,
-        # which is the only band where the two disagree.
-        model, references, path = self._spatial_at_score(0.70)
+        # The score sits halfway between SPATIAL_DECISION_THRESHOLD and
+        # DECISION_THRESHOLD, the only band where the two disagree. A literal
+        # (0.70 once) leaves the band whenever either threshold is re-set, and the
+        # test then passes with the bug back in.
+        from config.settings import DECISION_THRESHOLD, SPATIAL_DECISION_THRESHOLD
+        assert SPATIAL_DECISION_THRESHOLD != DECISION_THRESHOLD
+        model, references, path = self._spatial_at_score(
+            (SPATIAL_DECISION_THRESHOLD + DECISION_THRESHOLD) / 2)
         temporal_model = TemporalSiamese(
             input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
         dead_probe = self._rejected_trajectory()

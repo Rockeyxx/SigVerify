@@ -14,6 +14,7 @@ import pytest
 
 from config.settings import (
     BHSIG260_DIR,
+    BIOSECURID_SONOF_DIR,
     CEDAR_DIR,
     DEEPSIGNDB_DIR,
     MOBISIG_DIR,
@@ -26,9 +27,11 @@ from src.data.parsers import (
     SIGCOMP_DECIMATION,
     deepsigndb_source,
     load_sigcomp2011_file,
+    load_sonof_online_file,
     load_svc2004_file,
     merge_datasets,
     parse_bhsig260,
+    parse_biosecurid_sonof_pairs,
     parse_cedar,
     parse_deepsigndb,
     parse_mobisig,
@@ -918,3 +921,93 @@ class TestLoadNfi2009File:
         sig = load_sigcomp2011_file(str(p2011), extra_channels="dt")
 
         np.testing.assert_allclose(nfi, sig)
+
+
+class TestBiosecurIDSonof:
+    """BiosecurID-SONOF: a pen recording and a scan of the same signing, joined by name.
+
+    Pen `OnlineReal/u1NNNsSSSS_sgKKKK.mat` (x, y, p at 100 Hz, pen-up as p = 0, no
+    clock), scan `OfflineReal/u0NNN/u0NNNsSSSS_sgKKKK{g|f}.png`. Slots 1, 2, 6, 7
+    are genuine, 3 to 5 skilled forgeries. A fused number is only as good as this
+    join, so the tests pin it by name, not by sort order.
+    """
+
+    @staticmethod
+    def _mat(path, pressures):
+        from scipy.io import savemat
+        n = len(pressures)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        savemat(path, {"x": np.arange(n, dtype=np.uint16)[None] * 3 + 9000,
+                       "y": np.arange(n, dtype=np.uint16)[None] * 2 + 18000,
+                       "p": np.asarray(pressures, dtype=np.uint16)[None]})
+
+    def _archive(self, root, writers=(1, 2), sessions=(1, 2)):
+        for u in writers:
+            for s in sessions:
+                for slot in range(1, 8):
+                    stem = f"s{s:04d}_sg{slot:04d}"
+                    self._mat(str(root / "OnlineReal" / f"u{1000 + u}{stem}.mat"), [500] * 10)
+                    label = "g" if slot in (1, 2, 6, 7) else "f"
+                    _touch(str(root / "OfflineReal" / f"u{u:04d}" / f"u{u:04d}{stem}{label}.png"))
+
+    def test_pen_up_is_dropped_and_dt_is_the_dropped_run(self, tmp_path):
+        from config.settings import TEMPORAL_INPUT_FEATURES, TEMPORAL_SAMPLE_PERIOD_MS
+        from src.data.parsers import MAX_GAP_MS
+        path = str(tmp_path / "u1001s0001_sg0001.mat")
+        self._mat(path, [400] * 5 + [0] * 3 + [600] * 5)
+
+        sample = load_sonof_online_file(path, extra_channels="dt")
+
+        assert sample.shape == (10, TEMPORAL_INPUT_FEATURES)
+        # No decimation at 100 Hz; the gap across the 3 in-air rows is 4 periods.
+        expected = np.full(10, TEMPORAL_SAMPLE_PERIOD_MS / MAX_GAP_MS, dtype=np.float32)
+        expected[0], expected[5] = 0.0, 4 * TEMPORAL_SAMPLE_PERIOD_MS / MAX_GAP_MS
+        np.testing.assert_allclose(sample[:, 3], expected)
+        np.testing.assert_allclose(sample[:5, 2], 400 / 1023.0, rtol=1e-6)
+
+    def test_too_little_ink_raises(self, tmp_path):
+        path = str(tmp_path / "u1001s0001_sg0001.mat")
+        self._mat(path, [0, 0, 300, 0])
+        with pytest.raises(ValueError, match="fewer than 2 pen-down"):
+            load_sonof_online_file(path)
+
+    def test_pairs_join_by_name_and_labels_follow_the_slot(self, tmp_path):
+        self._archive(tmp_path)
+
+        writers = parse_biosecurid_sonof_pairs(str(tmp_path))
+
+        assert sorted(writers) == ["sonof_u1001", "sonof_u1002"]
+        rec = writers["sonof_u1002"]
+        assert len(rec["genuine"]) == 8 and len(rec["forged"]) == 6
+        for label in ("genuine", "forged"):
+            for png, mat in rec[label]:
+                # Same signing: scan folder = pen user - 1000, same session and slot.
+                assert os.path.basename(png)[5:-5] == os.path.basename(mat)[5:-4]
+                assert int(os.path.basename(png)[1:5]) + 1000 == int(os.path.basename(mat)[1:5])
+                assert png.endswith("g.png") == (label == "genuine")
+
+    def test_a_scan_with_the_wrong_label_stops_the_parse(self, tmp_path):
+        self._archive(tmp_path, writers=(1,), sessions=(1,))
+        good = tmp_path / "OfflineReal" / "u0001" / "u0001s0001_sg0003f.png"
+        good.rename(good.with_name("u0001s0001_sg0003g.png"))
+        with pytest.raises(ValueError, match="slot"):
+            parse_biosecurid_sonof_pairs(str(tmp_path))
+
+    def test_a_missing_scan_stops_the_parse(self, tmp_path):
+        self._archive(tmp_path, writers=(1,), sessions=(1,))
+        os.remove(tmp_path / "OfflineReal" / "u0001" / "u0001s0001_sg0006g.png")
+        with pytest.raises(FileNotFoundError, match="u0001s0001_sg0006"):
+            parse_biosecurid_sonof_pairs(str(tmp_path))
+
+
+@pytest.mark.skipif(not _have(BIOSECURID_SONOF_DIR), reason="BiosecurID-SONOF not licensed/downloaded")
+def test_real_biosecurid_sonof_counts():
+    """132 writers, each 16 genuine and 12 skilled forgeries, every one with its scan."""
+    from config.settings import TEMPORAL_INPUT_FEATURES
+    writers = parse_biosecurid_sonof_pairs(BIOSECURID_SONOF_DIR)
+    assert len(writers) == 132
+    assert all(len(r["genuine"]) == 16 and len(r["forged"]) == 12 for r in writers.values())
+    png, mat = writers["sonof_u1001"]["genuine"][0]
+    sample = load_sonof_online_file(mat, extra_channels="dt")
+    assert sample.shape[1] == TEMPORAL_INPUT_FEATURES and np.all(np.isfinite(sample))
+    assert sample[:, 2].std() > 0.0
