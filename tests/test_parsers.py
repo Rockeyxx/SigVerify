@@ -24,8 +24,10 @@ from config.settings import (
     UTSIG_DIR,
 )
 from src.data.parsers import (
+    MAX_GAP_MS,
     SIGCOMP_DECIMATION,
     deepsigndb_source,
+    load_deepsigndb_file,
     load_sigcomp2011_file,
     load_sonof_online_file,
     load_svc2004_file,
@@ -193,6 +195,30 @@ class TestLoadSVC2004File:
         with open(path, "w") as fh:
             fh.write("99\n100 200 1000 0\n110 210 1010 1\n")
         assert load_svc2004_file(path).shape == (2, 3)
+
+    def test_dt_is_exact_when_the_device_clock_is_large(self, tmp_path):
+        """
+        SVC2004's clock runs across days (up to 7.5e7 ms). float32 holds every
+        integer only below 2**24, so differencing a float32 timestamp turned 10 ms
+        steps into 8 and 16 ms and marked false pen-up gaps.
+        """
+        rows = [[100 + i, 200 + i, 70_000_000 + 10 * i, 1, 1500, 700, 500] for i in range(50)]
+        seq = load_svc2004_file(self._write(tmp_path / "U1S1.TXT", rows), extra_channels="dt")
+        assert np.allclose(seq[1:, 3], 10.0 / MAX_GAP_MS, atol=1e-6)
+
+    def test_float32_parse_keeps_the_dt_the_shipped_recipe_trained_on(self, tmp_path):
+        """
+        Training asks for the old float32 read. Its rounded clock turns 10 ms
+        steps into 8 and 16 ms, and that is the only noise the shipped dt recipe
+        trains with: on exact timestamps the recipe is 2.8 EER points worse.
+        Every score keeps the exact read above.
+        """
+        rows = [[100 + i, 200 + i, 70_000_000 + 10 * i, 1, 1500, 700, 500] for i in range(50)]
+        path = self._write(tmp_path / "U1S1.TXT", rows)
+        rounded = np.diff(np.float32(70_000_000 + 10 * np.arange(50))) / MAX_GAP_MS
+        assert not np.allclose(rounded, 10.0 / MAX_GAP_MS)  # the clock is large enough to round
+        seq = load_svc2004_file(path, extra_channels="dt", float32_parse=True)
+        assert np.allclose(seq[1:, 3], rounded, atol=1e-6)
 
 
 class TestParseSVC2004:
@@ -705,6 +731,36 @@ class TestParseDeepSignDB:
         assert deepsigndb_source(300, "Development") == "BiosecurID"
         assert deepsigndb_source(300, "Evaluation") == "BiosecureDS2"
         assert deepsigndb_source(9999, "Development") is None
+
+
+class TestLoadDeepSignDBFile:
+    """One DeepSignDB file: count header, then x, y, timestamp, ..., pressure."""
+
+    def test_dt_is_exact_when_the_device_clock_is_large(self, tmp_path):
+        """
+        BiosecureDS2 and e-BioSign clocks pass 2**24 ms, where float32 stops
+        holding every integer, so a float32 read turned 10 ms steps into 8 and
+        16 ms before the difference was taken.
+        """
+        path = tmp_path / "u0240_g_synthetic.txt"
+        rows = [f"{100 + i} {200 + i} {70_000_000 + 10 * i} 1 1500 700 500" for i in range(50)]
+        path.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        seq = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels="dt")
+        assert len(seq) == 50
+        assert np.allclose(seq[1:, 3], 10.0 / MAX_GAP_MS, atol=1e-6)
+
+    def test_float32_parse_keeps_the_dt_the_shipped_recipe_trained_on(self, tmp_path):
+        """
+        Training reads DeepSignDB as float32 too, as the loader once did, so the
+        research families trained on it are reproduced exactly.
+        """
+        path = tmp_path / "u0240_g_synthetic.txt"
+        rows = [f"{100 + i} {200 + i} {70_000_000 + 10 * i} 1 1500 700 500" for i in range(50)]
+        path.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        rounded = np.diff(np.float32(70_000_000 + 10 * np.arange(50))) / MAX_GAP_MS
+        seq = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels="dt", float32_parse=True)
+        assert len(seq) == 50
+        assert np.allclose(seq[1:, 3], rounded, atol=1e-6)
 
 
 @pytest.mark.skipif(not _have(DEEPSIGNDB_DIR), reason="DeepSignDB not licensed/downloaded")

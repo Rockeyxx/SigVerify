@@ -35,7 +35,7 @@ from config.settings import (
     NUM_WORKERS, PIN_MEMORY,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
-    TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO,
+    TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO, TEMPORAL_TRAIN_FLOAT32_PARSE,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
@@ -289,8 +289,12 @@ def apply_derived_features(writer_samples):
     return writer_samples
 
 
-def build_writer_samples(data_dirs, extra_channels=None):
-    """Parse and merge every requested dataset into one writer-keyed mapping."""
+def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
+    """Parse and merge every requested dataset into one writer-keyed mapping.
+
+    float32_parse reads SVC2004 and DeepSignDB as training does
+    (TEMPORAL_TRAIN_FLOAT32_PARSE); every scorer leaves it off.
+    """
     writer_samples = {}
     for directory in data_dirs:
         # Refusing here is the point. Every corpus in one run must return the
@@ -310,7 +314,7 @@ def build_writer_samples(data_dirs, extra_channels=None):
                     f"{', '.join(sorted(c for c, ch in EXTRA_CHANNEL_SUPPORT.items() if extra_channels in ch))}."
                 )
             kwargs = {"extra_channels": extra_channels}
-        parsed = parse_dataset(directory, **kwargs)
+        parsed = parse_dataset(directory, float32_parse=float32_parse, **kwargs)
         print(f"  {directory}: {len(parsed)} writers")
         merge_datasets(writer_samples, parsed)
     if not writer_samples:
@@ -589,7 +593,9 @@ def main(argv=None):
         # a timing channel and abort a perfectly valid run.
         extra_channels=(None if args.branch != "temporal"
                         or args.temporal_channels == "xyp"
-                        else args.temporal_channels))
+                        else args.temporal_channels),
+        # The recipe's only training noise; see TEMPORAL_TRAIN_FLOAT32_PARSE.
+        float32_parse=TEMPORAL_TRAIN_FLOAT32_PARSE)
 
     # Each branch keeps its own documented default; --augment/--no-augment override.
     if args.augment is None:

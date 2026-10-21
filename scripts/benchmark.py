@@ -165,6 +165,11 @@ def parse_args(argv=None):
                         help="Must match the channels the weights were trained on. "
                              "The model recovers its own width from the checkpoint, "
                              "but the parser cannot, so a mismatch fails loudly here")
+    parser.add_argument("--float32-parse", action="store_true",
+                        help="Read SVC2004 and DeepSignDB as float32, the way training reads "
+                             "them and the way the releases before exact timestamps were "
+                             "scored. tools/reproduce_release.py sets it for those releases; "
+                             "leave it off to score what the tablet sends")
     parser.add_argument("--enroll", type=int, nargs="?", const=NUM_ENROLLMENT_REFERENCES,
                         default=None, metavar="K",
                         help="Score under the enrollment protocol the field uses and "
@@ -279,7 +284,7 @@ def main(argv=None):
     from scripts.train import build_writer_samples
     channels = getattr(args, "temporal_channels", "xyp")
     writer_samples = build_writer_samples(
-        args.data_dir, None if channels == "xyp" else channels)
+        args.data_dir, None if channels == "xyp" else channels, float32_parse=args.float32_parse)
 
     if args.branch == "temporal" and args.temporal_features == "derived":
         # Same transform, applied the same way as training. Importing it from

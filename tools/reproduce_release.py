@@ -37,6 +37,8 @@ class Weight:
     device: str
     channels: str = None
     train: Train = None
+    # Scored before the loaders read timestamps exactly: its figures reproduce only on the float32 read.
+    float32_parse: bool = False
 
 
 _V05_TEMPORAL = {"mean": 10.26, "sigcomp_Dutch": 4.19, "sigcomp_Chinese": 8.11, "svc": 17.46}
@@ -88,14 +90,16 @@ RELEASES = {
     "v0.8.0": (
         Weight("spatial", "spatial_cnn.pth", {"mean": 8.59, "sd": 0.58, "cedar": 0.00,
                                               "bhsig_Hindi": 3.64, "bhsig_Bengali": 8.64}, "cpu", train=_M20_RECIPE),
-        Weight("temporal", "temporal_lstm.pth", {"mean": 7.81, "sd": 0.63}, "cuda", channels="dt", train=_DT_RECIPE),
+        Weight("temporal", "temporal_lstm.pth", {"mean": 7.81, "sd": 0.63}, "cuda", channels="dt", train=_DT_RECIPE,
+               float32_parse=True),
     ),
     "v0.9.0": (
         Weight("spatial", "spatial_cnn.pth",
                {"mean": 8.72, "sd": 0.42, "bhsig_Bengali": 8.17, "bhsig_Hindi": 5.33,
                 "utsig": 28.10, "cedar": 0.00}, "cuda",
                train=Train("7811f1a", ("--branch", "spatial", "--seed", "42"))),
-        Weight("temporal", "temporal_lstm.pth", {"mean": 7.77, "sd": 0.67}, "cpu", channels="dt", train=_DT_RECIPE),
+        Weight("temporal", "temporal_lstm.pth", {"mean": 7.77, "sd": 0.67}, "cpu", channels="dt", train=_DT_RECIPE,
+               float32_parse=True),
     ),
     "v0.10.0": (
         Weight("spatial", "spatial_cnn.pth",
@@ -103,7 +107,8 @@ RELEASES = {
                 "utsig": 26.34, "cedar": 0.00}, "cpu",
                train=Train("8bb6f5e", ("--branch", "spatial", "--seed", "42", "--split-seed", "42",
                                        "--aug-stroke-prob", "0"))),
-        Weight("temporal", "temporal_lstm.pth", {"mean": 7.77, "sd": 0.67}, "cpu", channels="dt", train=_DT_RECIPE),
+        Weight("temporal", "temporal_lstm.pth", {"mean": 7.77, "sd": 0.67}, "cpu", channels="dt", train=_DT_RECIPE,
+               float32_parse=True),
     ),
 }
 
@@ -121,6 +126,8 @@ def benchmark_command(weight, weights_path):
            "--seed", str(SEED)]
     if weight.branch == "temporal":
         cmd += ["--temporal-channels", weight.channels]
+    if weight.float32_parse:
+        cmd.append("--float32-parse")
     return cmd
 
 

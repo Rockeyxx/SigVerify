@@ -203,6 +203,13 @@ ENROLLMENT_TRIALS = 10
 TEMPORAL_AUGMENT = False
 SPATIAL_AUGMENT = True
 
+# Training reads the SVC2004 and DeepSignDB files as float32, the way the loaders once
+# did; every scorer reads them as float64. float32 cannot hold every millisecond past
+# 2**24 ms, and SVC2004's clock runs to 7.5e7 ms, so on most of its files 10 ms steps
+# come out as 8, 12 or 16 ms. That rounding is the only noise the shipped dt recipe
+# trains with: on exact timestamps the same recipe is 2.8 EER points worse in-domain.
+TEMPORAL_TRAIN_FLOAT32_PARSE = True
+
 # Augmentation strengths. These were function defaults inside `src/data/dataset.py`
 # and restated a second time at the call site, so retuning one left the other stale.
 # Ranges stay deliberately small: forgery detection keys on fine stroke geometry,

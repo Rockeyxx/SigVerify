@@ -198,6 +198,21 @@ stored references takes 0.08 s (0.28 s on one core); never quote it as the budge
   seeds, `dt` improved pooled EER from 10.45% to 8.97% (t = 3.25). Attention
   pooling alone is worth 1.16 points, but the two **do not stack** (9.53% together, worse
   than `dt` alone), because they recover the same information.
+- **Training reads SVC2004 and DeepSignDB as float32, and every scorer reads them
+  exactly.** float32 cannot hold every millisecond past 2^24 ms, and SVC2004's
+  clock runs to 7.5 x 10^7 ms, so on most of its files training sees 10 ms steps
+  as 8, 12 or 16 ms. That rounding is the only noise the shipped `dt` recipe
+  trains with, and the `dt` gain above depends on it: retrained on exact
+  timestamps over six paired seeds, the recipe reads 11.76% in-domain against
+  8.97% (worse on every seed), no better than `xyp`, and ±2 ms of explicit jitter
+  came within noise of 8.97% without passing its adoption rule.
+  `TEMPORAL_TRAIN_FLOAT32_PARSE` in `config/settings.py` holds the training read;
+  with it, seed 45 retrains to the shipped `temporal_lstm.pth` tensor for tensor.
+  Never turn it off without a six-seed retrain that beats these numbers. Scorers
+  keep the exact read, which is what the tablet sends;
+  `scripts/benchmark.py --float32-parse` exists only so
+  `tools/reproduce_release.py` can reproduce the releases scored before this
+  split.
 
 - **`supports_extra_channel()` in `src/data/parsers.py` is the single authority**
   on which corpus can supply which channel, and `build_writer_samples` raises

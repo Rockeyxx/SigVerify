@@ -139,8 +139,12 @@ def merge_datasets(target, incoming):
     return target
 
 
-def parse_dataset(path, **kwargs):
-    """Dispatch dataset folder to its parser based on folder name."""
+def parse_dataset(path, float32_parse=False, **kwargs):
+    """Dispatch dataset folder to its parser based on folder name.
+
+    float32_parse reaches only the parsers that read a device clock (SVC2004 and
+    DeepSignDB); every other corpus is read the same either way.
+    """
     name = os.path.basename(os.path.normpath(path)).lower()
     if name not in _PARSERS:
         raise ValueError(
@@ -148,7 +152,10 @@ def parse_dataset(path, **kwargs):
             f"Expected one of: {', '.join(sorted(_PARSERS))}. "
             f"Rename the directory to match, or add a parser."
         )
-    return _PARSERS[name](path, **kwargs)
+    parser = _PARSERS[name]
+    if float32_parse and parser in (parse_svc2004, parse_deepsigndb):
+        kwargs["float32_parse"] = True
+    return parser(path, **kwargs)
 
 
 def parse_cedar(root=CEDAR_DIR):
@@ -240,15 +247,18 @@ def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
     return writers
 
 
-def load_svc2004_file(path, extra_channels=None):
+def load_svc2004_file(path, extra_channels=None, float32_parse=False):
     """Load an SVC2004 signature file into a normalized trajectory array.
 
     Supports 4-column Task1 (X, Y, T, Button) and 7-column Task2 (with pressure and angles).
+    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
     """
     with open(path, "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = [line.split() for line in fh.read().splitlines() if line.strip()]
 
-    rows = np.array([[float(v) for v in row] for row in lines[1:]], dtype=np.float32)
+    # float64: the clock reaches 7.5e7 ms, past the 2**24 where float32 stops holding every integer.
+    rows = np.array([[float(v) for v in row] for row in lines[1:]],
+                    dtype=np.float32 if float32_parse else np.float64)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
@@ -289,7 +299,7 @@ def svc2004_has_pressure(root=SVC2004_DIR):
     return False
 
 
-def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
+def parse_svc2004(root=SVC2004_DIR, extra_channels=None, float32_parse=False):
     """Parse the SVC2004 online signature dataset."""
     _require_dir(root, "SVC2004")
     writers = {}
@@ -304,7 +314,8 @@ def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
         label = "genuine" if sample <= 20 else "forged"
 
         writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels))
+        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
+                                                           float32_parse))
 
     return writers
 
@@ -538,9 +549,13 @@ def deepsigndb_source(user_id, split):
     return None
 
 
-def load_deepsigndb_file(path, source, extra_channels=None):
-    """Load a DeepSignDB trajectory file into a normalized array."""
-    rows = np.loadtxt(path, dtype=np.float32, skiprows=1, ndmin=2)
+def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False):
+    """Load a DeepSignDB trajectory file into a normalized array.
+
+    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
+    """
+    # float64: timestamps pass 2**24 ms, where float32 stops holding every integer.
+    rows = np.loadtxt(path, dtype=np.float32 if float32_parse else np.float64, skiprows=1, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
@@ -580,7 +595,7 @@ def load_deepsigndb_file(path, source, extra_channels=None):
 
 
 def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus",
-                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None):
+                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None, float32_parse=False):
     """Parse the DeepSignDB online signature dataset."""
     unknown = set(sources) - set(DEEPSIGN_PRESSURE_COLUMN)
     if unknown:
@@ -614,7 +629,7 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
         writers.setdefault(writer_id, _new_writer())
         writers[writer_id][label].append(
             load_deepsigndb_file(os.path.join(directory, filename), source,
-                                 extra_channels))
+                                 extra_channels, float32_parse))
 
     return writers
 
