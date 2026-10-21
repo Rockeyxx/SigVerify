@@ -271,6 +271,7 @@ Verification evaluates a probe against an enrolled gallery using nearest-referen
 | Matching Rule             | Nearest Reference: $d_{min} = \min_{i} \|e_{probe} - e_{ref, i}\|_2$ | `_nearest_reference_score`                                  |
 | Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
 | Decision Threshold        | Spatial $\tau = 0.7637$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
+| Fusion                    | $S = 0.4\,S_{spatial} + 0.6\,S_{temporal}$, fused $\tau = 0.7564$    | `ALPHA_DEFAULT`, `DECISION_THRESHOLD`                       |
 
 More enrolled references give better accuracy without retraining, but the gain gets small after $K=5$. We swept $K$ from 1 to 15 with `benchmark.py --enroll K`, 10 draws each. Spatial pooled EER goes from 11.71% ($K=1$) to 8.72% ($K=5$), 7.86% ($K=10$) and 7.82% ($K=15$). These spatial numbers come from the previous spatial weight, not the one shipped now. Temporal EER goes from 13.72% ($K=1$) to 7.81% ($K=5$), 6.99% ($K=10$) and 6.31% ($K=15$). Both curves are almost flat after $K=10$. The app uses $K=5$.
 
@@ -384,7 +385,8 @@ $\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model
 - **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
 - **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
 - **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion does not always help.** Fused numbers are measured on SigComp2009 / NFI only, where the scan and the pen recording come from the same signing. SigComp2011's scan and pen forgeries carry different forger codes, so they cannot be paired and are not used for fusion. On NFI, fusion at $\alpha = 0.5$ does not help against skilled forgeries (temporal alone 3.90% → fused 4.09%) but cuts random-forgery errors by about 40% (2.47% → 1.47%). A lower spatial weight ($\alpha \approx 0.35$) reads 3.37% on skilled forgeries, but it was found on the same 14 writers, so $\alpha$ stays 0.5 until a larger paired set is available.
+- **Fusion weight and threshold come from a separate paired set.** Fused numbers are measured only where the scan and the pen recording come from the same signing: SigComp2009 / NFI (14 writers) and BiosecurID-SONOF (132 writers). SigComp2011's scan and pen forgeries carry different forger codes, so they cannot be paired and are not used for fusion. $\alpha = 0.4$ and $\tau = 0.7564$ were chosen on SONOF. Measured on SONOF writers that took no part in choosing them, the fused EER is 5.17%, just above the 5% target. On NFI, a different collection that took no part either, fusion beats the pen alone on skilled forgeries (temporal alone 3.90% → fused 3.40%) and almost halves random-forgery errors (2.47% → 1.27%).
+- **Time between enrolment and use costs accuracy.** All numbers here draw the references and the probe from the same pool of sessions. On BiosecurID-SONOF, enrolling on one occasion and verifying on later ones raises the fused EER from 5.06% to 7.93%, almost all through genuine signatures being refused. References taken on three different occasions bring it to 6.68%.
 - **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number. On DeepSignDB's official lists, where the references come from one session and the probe from a later one, the shipped single model reads **13.59%** and the ensemble **11.11%** (skilled forgeries, 4 references).
 
 ---
@@ -408,7 +410,7 @@ Target device and its requirement:
 
 | Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
 | ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | SigComp2009 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **4.09% $\pm$ 1.11%** fused on NFI (at the shipped fused $\tau = 0.7751$: FAR 2.85%, FRR 6.70%); 4.11% $\pm$ 1.03% pen alone on SigComp2011 Dutch |
+| **Primary**   | XPPen Deco 640 Tablet    | BiosecurID-SONOF and SigComp2009 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **5.17% $\pm$ 0.52%** fused on 132 BiosecurID-SONOF writers ($\alpha$ and $\tau$ chosen on the other half of the writers: FAR 5.09%, FRR 5.35%); 3.40% $\pm$ 0.56% fused on 14 NFI writers (at the shipped $\alpha = 0.4$, fused $\tau = 0.7564$: FAR 3.73%, FRR 3.19%); 4.11% $\pm$ 1.03% pen alone on SigComp2011 Dutch |
 
 ---
 
@@ -427,10 +429,13 @@ Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5
 | Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   | 0.98% $\pm$ 0.42% |
 | Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   | 3.03% $\pm$ 0.91% |
 | Temporal     | SVC2004 Task 2      |   10    |  13.58% $\pm$ 2.21%   |   14.00%   |   1.504   | 3.93% $\pm$ 1.48% |
-| **Fused**    | SigComp2009 / NFI, paired, skilled forgeries | **14** | **4.09% $\pm$ 1.11%** | n/a ‡ | n/a ‡ | **1.47% $\pm$ 0.63%** |
-| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.84% $\pm$ 0.79%   |   n/a ‡    |   n/a ‡   | n/a |
+| **Fused**    | **BiosecurID-SONOF, paired, skilled forgeries** | **132** | **5.17% $\pm$ 0.52%** § | n/a ‡ | n/a ‡ | n/a |
+| Fused        | SigComp2009 / NFI, paired, skilled forgeries |   14    |   3.40% $\pm$ 0.56%   |   n/a ‡    |   n/a ‡   | 1.27% $\pm$ 0.42% |
+| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.52% $\pm$ 0.64%   |   n/a ‡    |   n/a ‡   | n/a |
 
-‡ Fused rows: shipped weights on both modalities of the same signing events, 14 NFI writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run. The skilled + random row adds, for each writer, as many random forgeries as that writer has skilled forgeries.
+‡ Fused rows: shipped weights at $\alpha = 0.4$ on both modalities of the same signing events, writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run. The skilled + random row adds, for each writer, as many random forgeries as that writer has skilled forgeries. NFI took no part in choosing $\alpha$ or $\tau$.
+
+§ SONOF row: $\alpha$ and $\tau$ chosen on 66 writers and measured on the other 66, mean $\pm$ SD over 200 random writer splits. BiosecurID-SONOF is a licensed corpus (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
 
 Random-forgery EER: the impostors are the genuine signatures of the other test writers of the same dataset (never across datasets), scored against the same 5 references and draws as the skilled column.
 
@@ -564,7 +569,7 @@ The spatial Siamese CNN was benchmarked directly against the reference architect
 
 #### Datasets & Required Licensure Citations
 
-⚖ marks the four references DeepSignDB's licence clause 4.5 requires citing in any published work that uses that dataset (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
+⚖ marks the references a dataset licence requires citing in any published work that uses that dataset: the four of DeepSignDB clause 4.5 and the one of BiosecurID-SONOF clause 4.4 (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
 
 13. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and identification using distance statistics._ IJPRAI 18(7):1339–1360, 2004. (CEDAR)
 14. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line signature verification method based on texture features on a large indic-script signature dataset._ DAS 2016, pp. 72–77, 2016. (BHSig260)
@@ -572,13 +577,14 @@ The spatial Siamese CNN was benchmarked directly against the reference architect
 16. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235–246, 2010.
 17. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097–1111, 2010.
 18. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395–401, 2003.
+19. ⚖ J. Galbally, M. Diaz-Cabrera, M. A. Ferrer, M. Gomez-Barrero, A. Morales, J. Fierrez. _On-Line Signature Recognition Through the Combination of Real Dynamic Data and Synthetically Generated Static Data._ Pattern Recognition, 48:2921–2934, 2015. (BiosecurID-SONOF)
 
 #### Standards
 
-19. **ISO/IEC 23053:2022** Framework for Artificial Intelligence Systems Using Machine Learning.
-20. **ISO/IEC 24745:2022** Information Technology Security Techniques Biometric Information Protection.
-21. **ISO/IEC 18033-1:2021** Information Security Encryption Algorithms.
-22. **IEEE 730-2014** IEEE Standard for Software Quality Assurance Processes.
+20. **ISO/IEC 23053:2022** Framework for Artificial Intelligence Systems Using Machine Learning.
+21. **ISO/IEC 24745:2022** Information Technology Security Techniques Biometric Information Protection.
+22. **ISO/IEC 18033-1:2021** Information Security Encryption Algorithms.
+23. **IEEE 730-2014** IEEE Standard for Software Quality Assurance Processes.
 
 ---
 

@@ -251,7 +251,7 @@ driver must emit `[L, 4]`; a 3-channel capture path cannot feed a shipped model.
 `src/capture/tablet.py` (Windows, PyQt5 tablet events) emits `[L, 4]`, but nothing
 calls it yet and it cannot feed the model as written. It has three known bugs: it
 normalizes with its own placeholder instead of `parsers.normalize_trajectory()`,
-it does not decimate to 100 Hz, and it stops recording at the first pen lift, so a
+it does not resample to 100 Hz (see Device timing and pressure below), and it stops recording at the first pen lift, so a
 signature with several strokes keeps only the first one. Fix all three before
 connecting it to `verify()`.
 
@@ -368,11 +368,39 @@ from a literal, so the next contract change cannot break it the same way.
 | requirement | value |
 | --- | --- |
 | Shape | `[L, 4]` float32 — X, Y, Pressure, dt. Width follows `TEMPORAL_INPUT_FEATURES` |
-| Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
-| Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
+| Sample rate | **100 Hz** (10 ms). Resample by timestamp onto a 10 ms grid; never decimate by an integer factor |
+| Pressure | scaled to [0, 1] by the **maximum the device reports**, never 1023 by default and never the file's own max |
 | Pen-up samples | dropped (`P = 0`) |
 | X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
 | No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
+
+### Device timing and pressure (for the capture team)
+
+Measured 2026-10-21 on e-BioSign DS1 (inside DeepSignDB): the same 65 people signed on
+five devices, so the device was the only thing that changed. Three of the devices sample at
+200 Hz, and each stamps time differently: one sends bursts of samples under a single
+timestamp, one has a millisecond counter that wraps every second, one is clean. Their
+pressure maxima were 833, 1023 and 511. Through integer decimation the model saw intervals
+of 0 to 32 ms instead of 10 ms. Repairing the clock and resampling by timestamp lowered pen
+EER by 0.9 to 2.8 points on four of the five devices; scaling pressure by each device's own
+maximum lowered it by up to 1.4 more. The rate itself mattered less: a 125 Hz device ended
+level with the 200 Hz ones, and only a 64 Hz device stayed worst. Matching specifications
+did not mean matching signals.
+
+Rules for `src/capture/`, for the XPPen and any later device:
+
+- Resample X, Y and P onto an exact 10 ms grid by timestamp (linear interpolation). Do not
+  decimate by an integer factor: that is exact only for a clean clock at a multiple of 100 Hz.
+- Repair the clock first. Unwrap a counter that wraps, spread samples that share one
+  timestamp evenly up to the next timestamp, and treat a backward step or a jump of more than
+  1 s as one sample period.
+- A grid point is pen-down only when its nearest real sample is pen-down and lies within two
+  sample periods. Otherwise it is pen-up and dropped.
+- Scale pressure by the maximum the driver reports for the device.
+- Enrol and verify on the same device model. References from one device scored probes from
+  another at 13 to 42% EER even after every repair (24 to 69% before).
+- On the first XPPen recordings, log the raw timestamp intervals and the pressure maximum, and
+  check them against these rules before any threshold is set from them.
 
 ### High-Level Service Contract: `SignatureService` (for GUI & Backend Teams)
 
@@ -412,6 +440,38 @@ spatial call with mismatched references raises. **The database therefore stores
 must be verified both by tablet and by scan enrolls through both paths and holds
 two spatial reference sets.
 | **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
+
+**Several signings at verification (a toggle for the GUI).** `config.settings.VERIFICATION_SIGNINGS`
+(default 1) is how many signings of each kind the app asks for at verification; the GUI may
+offer 1 or 2 as an option. Pass them as lists: `probe_trajectory=[t1, t2]`,
+`probe_image=[img1, img2]`, in every mode. Each branch scores the **mean** of its signings
+against the references, and the thresholds are unchanged. Every signing must pass its input
+gate; if one fails, that branch is dropped exactly as a failed single probe is (`degraded`,
+with `"<branch>, signing <n>: ..."` in `reasons`), so ask for that signing again. Never
+accept on the better of two signings: a forger would get two tries. Measured 2026-10-21, pen,
+K = 5, 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06%
+to 13.70% a session later and from 8.42% to 6.04% at the same sitting.
+
+**Adding confirmed signings to the references (for the database and GUI teams).** A person's
+signature drifts over months, and references from one sitting fall behind it: on 132
+BiosecurID-SONOF writers enrolled at one sitting, the product refused 19.5% of genuine signers
+three sessions later at the shipped threshold, against 4.4% at the same sitting. References
+from several occasions follow the drift. After a verification that was accepted **and** in
+which the employee confirmed the person's identity, append that visit's embeddings (from the
+same `verify()` inputs, re-embedded with `enroll_*`) to the person's stored references. The
+model side needs no change: `verify()` takes any number of references. Measured on SONOF:
+references from three occasions lowered the fused EER from 8.38% to 6.68%, and adding accepted
+signatures lowered FRR from 13.90% to 8.07% while FAR at the same threshold rose from 4.57% to
+6.31%.
+
+- Add only results with `decision == "Genuine"`, `degraded == False`, and the employee's
+  confirmation. Never add a rejected, degraded or unconfirmed signing: an added forgery would
+  stay in the references.
+- Store embeddings only, as at enrolment, with the date and `spatial_origin` of each one.
+- Cap the set per modality (the measured arms held 6 to 8) and drop the oldest added signing
+  first. The cap is not measured beyond that.
+- This does not help the first visit after enrolment, which still faces the whole gap; it helps
+  every visit after a confirmed one.
 
 **Returns:**
 ```python
@@ -657,8 +717,8 @@ uniformity would have halved the apparent pen speed for 180 of 376 sampled files
 
 ### Licensed Datasets
 
-Some corpora are held under a signed agreement rather than published. DeepSignDB
-is the first. For any such dataset:
+Some corpora are held under a signed agreement rather than published: DeepSignDB
+and BiosecurID-SONOF. For any such dataset:
 
 - **Never commit it, nor anything derived from it** — no signature files, no
   cached features, no embedding dumps. `data/` being gitignored is the safety net,
@@ -667,12 +727,13 @@ is the first. For any such dataset:
   whitelist allows that specific user. DeepSignDB permits only `u1010`, `u1013`,
   `u1028` (Development) and `u0103`, `u0145` (Evaluation).
 - **Carry its required citations** into anything public. DeepSignDB clause 4.5
-  names four, listed under ⚖ in the README bibliography.
+  names four, listed under ⚖ in the README bibliography. BiosecurID-SONOF clause
+  4.4 names one (Galbally et al., Pattern Recognition 48, 2015).
 - **Treat derived weights as research-only.** The published release weights are
   trained on open corpora; licensed-data weights stay local. See the README's
   Model Weights section.
-- **Record the expiry.** DeepSignDB's agreement runs to 25 July 2028, after which
-  all copies are destroyed.
+- **Record the expiry.** DeepSignDB's agreement runs to 25 July 2028 and
+  BiosecurID-SONOF's to 14 October 2028, after which all copies are destroyed.
 
 The clause-by-clause reading lives in DATASET_LICENSES.md. This is the
 operational summary; that file is the authority if the two ever disagree.
