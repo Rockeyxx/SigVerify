@@ -23,6 +23,10 @@ from config.settings import (
     INFERENCE_NUM_THREADS,
     SPATIAL_INPUT_SIZE,
     TEMPORAL_INPUT_FEATURES,
+    VERIFICATION_STEP_UP,
+    STEP_UP_REJECT,
+    STEP_UP_ACCEPT,
+    STEP_UP_TWO,
 )
 from src.data.dataset import as_spatial_input, quality_gate, trajectory_gate
 from src.data.renderer import render_trajectory_to_image
@@ -158,6 +162,24 @@ def _signings(probe, modality):
     return probes
 
 
+# The third decision of step-up verification (VERIFICATION_STEP_UP): the first signing was too
+# close to call, so the GUI asks for one more signing of each kind and calls verify() with both.
+SIGN_AGAIN = "Sign again"
+
+
+def _step_up_round(spatial_probes, temporal_probes):
+    """1 for the first signing of each kind, 2 for the first and the one asked for."""
+    if len(spatial_probes) != len(temporal_probes):
+        raise ValueError(
+            "Step-up verification needs the same number of paper and tablet signings; got "
+            f"{len(spatial_probes)} paper and {len(temporal_probes)} tablet.")
+    if len(spatial_probes) > 2:
+        raise ValueError(
+            "Step-up verification asks for one more signing at most, never a third; got "
+            f"{len(spatial_probes)} signings of each kind.")
+    return len(spatial_probes)
+
+
 def _branch_score(model, references, probe, modality, gate, fallback, device):
     """
     Mean nearest-reference score over the signings, or None and the gate messages.
@@ -180,7 +202,8 @@ def _branch_score(model, references, probe, modality, gate, fallback, device):
     return float(np.mean(scores)), probes, []
 
 
-def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True):
+def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True,
+           step_up=None):
     """
     Verify a signature probe against enrolled reference templates.
 
@@ -192,6 +215,10 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
         engine: Optional FusionEngine instance.
         device: Device to run inference on.
         auto_render_spatial: If True, renders temporal trajectory into image if spatial probe is missing.
+        step_up: Step-up verification; None reads VERIFICATION_STEP_UP. It applies to the
+            default fused decision only. One signing of each kind is accepted at
+            STEP_UP_ACCEPT, rejected below STEP_UP_REJECT, and anything between returns
+            SIGN_AGAIN; two signings of each kind are then decided at STEP_UP_TWO.
 
     Returns:
         Dictionary with decision, confidence score, routing mode, and degraded flags.
@@ -209,6 +236,8 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
+    if step_up is None:
+        step_up = VERIFICATION_STEP_UP
 
     spatial_score = None
     temporal_score = None
@@ -217,7 +246,7 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     if spatial is not None:
         model, references, probe = spatial
-        spatial_score, _, errors = _branch_score(
+        spatial_score, spatial_probes, errors = _branch_score(
             model, references, probe, "spatial", quality_gate, "failed the quality gate", device)
         gate_errors.extend(errors)
 
@@ -239,9 +268,13 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
             + "\nSee the README's Capture Contract.")
 
     # Select operational threshold based on available modality routing.
+    step_up_round = None
     if engine is None:
         if spatial_score is not None and temporal_score is not None:
             threshold = DECISION_THRESHOLD
+            if step_up:
+                step_up_round = _step_up_round(spatial_probes, probes)
+                threshold = STEP_UP_ACCEPT if step_up_round == 1 else STEP_UP_TWO
         elif spatial_score is not None:
             threshold = SPATIAL_DECISION_THRESHOLD
         else:
@@ -250,11 +283,19 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
+    # Below STEP_UP_ACCEPT on a first signing: the same fused score against the floor.
+    if step_up_round == 1 and result["decision"] == "Forged":
+        floor = FusionEngine(alpha=ALPHA_DEFAULT, threshold=STEP_UP_REJECT)
+        if floor.fuse(spatial_score=spatial_score, temporal_score=temporal_score)["decision"] == "Genuine":
+            result["decision"] = SIGN_AGAIN
 
     if quality_failed:
         result["degraded"] = True
 
     result["reasons"] = list(gate_errors)
+    if result["decision"] == SIGN_AGAIN:
+        result["reasons"].append("step-up: the first signing is too close to call; ask for one more "
+                                 "signing of each kind and call verify() again with both")
     if pressure_imputed:
         result["reasons"].append("temporal: pressure imputed to "
                                  f"{PRESSURE_IMPUTATION_VALUE} — device reported none")

@@ -467,6 +467,42 @@ accept on the better of two signings: a forger would get two tries. Measured 202
 K = 5, 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06%
 to 13.70% a session later and from 8.42% to 6.04% at the same sitting.
 
+**Step-up verification (a contract for the GUI team; off until the GUI handles it).** With
+`config.settings.VERIFICATION_STEP_UP = True`, a verification that fuses paper and tablet
+(routing `multimodal`) can return a third decision, `SIGN_AGAIN` (`"Sign again"`, import it
+from `src.verification`), besides `"Genuine"` and `"Forged"`. The flow:
+
+1. Ask for one signing of each kind and call `service.verify()` as today.
+2. On `"Genuine"` or `"Forged"`, stop: the verdict is final.
+3. On `"Sign again"`, keep the first signings, ask for one more signing of each kind, and call
+   `service.verify()` again with both as lists, first signing first:
+   `probe_image=[img1, img2]`, `probe_trajectory=[t1, t2]`. That call returns only `"Genuine"`
+   or `"Forged"`, and its verdict is final.
+
+Rules:
+
+- Never ask a third time. Under step-up, `verify()` raises on more than two signings of a
+  kind, and on different paper and tablet counts.
+- On `"Sign again"`, show a neutral request to sign once more. Never show the score or say how
+  close the signing was: a forger would learn how near they came.
+- Log one verification event per visit, with its final verdict; `"Sign again"` is not a verdict.
+  Today `src/gui/verification.py` (around line 150) styles every decision other than `"Genuine"`
+  as a rejection and logs it, and `src/gui/dashboard.py` counts `"Genuine"` events: change both
+  before turning the setting on.
+- A signing that fails its input gate is a capture retry, as in the rule above, not a step. If a
+  kind is dropped, the other kind decides alone at its own threshold, with no step-up.
+- Keep `VERIFICATION_SIGNINGS = 1` while step-up is on. It applies to fused decisions only,
+  `temporal-multi` included (its scan-calibrated thresholds stand in there as
+  `DECISION_THRESHOLD` already does); pen-only and scan-only verification keep their single
+  thresholds.
+
+Measured on 132 BiosecurID-SONOF writers three sessions after enrolment, with the three
+thresholds in `config/settings.py` calibrated for forgers who repeat their first attempt (the
+worst case for false accepts): forgeries passed stay at 5% over both steps. Of the signers asked
+again, 36.5% of genuine signers pass and under 1% of forgers. Overall 11.4% of genuine signers are
+refused against 15.7% for one signing at the same 5%, and 18% of them sign twice. Not measured: a
+forger who tries harder after being asked again.
+
 **Adding confirmed signings to the references (for the database and GUI teams).** A person's
 signature drifts over months, and references from one sitting fall behind it: on 132
 BiosecurID-SONOF writers enrolled at one sitting, the product refused 19.5% of genuine signers

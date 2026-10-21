@@ -274,6 +274,18 @@ ALPHA_GRID_STEP = 0.05
 # session later and from 8.42% to 6.04% at the same sitting.
 VERIFICATION_SIGNINGS = 1
 
+# Step-up verification, off until the GUI can show "Sign again" (AGENTS.md). One signing of each
+# kind first: a fused score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is
+# rejected, and anything between asks for one more signing of each kind, whose mean with the first
+# must reach STEP_UP_TWO. Fused decisions only, with VERIFICATION_SIGNINGS left at 1. Calibrated on
+# 132 BiosecurID-SONOF writers three sessions after enrolment, forgers assumed to repeat their first
+# attempt (the worst case for false accepts), at most 30% asked twice: 11.4% of genuine signers
+# refused at 5.1% of forgeries passed, against 15.7% for one signing at 5%; 18% asked twice.
+VERIFICATION_STEP_UP = False
+STEP_UP_REJECT = 0.4229
+STEP_UP_ACCEPT = 0.7514
+STEP_UP_TWO = 0.7470
+
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
 SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)

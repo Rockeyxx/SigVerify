@@ -399,6 +399,110 @@ class TestSeveralSignings:
         assert VERIFICATION_SIGNINGS == 1
 
 
+class TestStepUp:
+    """
+    Step-up verification (`VERIFICATION_STEP_UP`): one signing of each kind first. A fused
+    score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is rejected, and
+    anything between asks for one more signing of each kind, whose mean with the first must
+    reach STEP_UP_TWO. Measured on 132 BiosecurID-SONOF writers three sessions after
+    enrolment: 11.4% of genuine signers refused at 5% of forgeries passed, against 15.7% for
+    one signing; of those asked again, 36.5% of genuine signers pass and under 1% of forgers.
+    """
+
+    @staticmethod
+    def _reference_at(probe_embedding, target):
+        # S = 1 / (1 + d)  ->  d = 1/S - 1, placed on a single axis.
+        offset = np.zeros_like(probe_embedding)
+        offset[0] = 1.0 / target - 1.0
+        return [probe_embedding + offset]
+
+    def _setup(self, target):
+        """Both branches score `target`, so the fused score is `target` as well."""
+        smodel = SpatialSiamese(embedding_dim=512).eval()
+        tmodel = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
+        path, trajectory = _sharp_signature_image(), _valid_trajectory(seed=2)
+        spatial = (smodel, self._reference_at(embed(smodel, path, "spatial"), target), path)
+        temporal = (tmodel, self._reference_at(embed(tmodel, trajectory, "temporal"), target), trajectory)
+        return spatial, temporal
+
+    def _verify(self, target, signings=1, step_up=True):
+        (smodel, srefs, path), (tmodel, trefs, trajectory) = self._setup(target)
+        image = path if signings == 1 else [path] * signings
+        tablet = trajectory if signings == 1 else [trajectory] * signings
+        try:
+            return verify(spatial=(smodel, srefs, image), temporal=(tmodel, trefs, tablet),
+                          step_up=step_up)
+        finally:
+            os.unlink(path)
+
+    def test_a_first_signing_too_close_to_call_asks_for_another(self):
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+        from src.verification import SIGN_AGAIN
+
+        result = self._verify((STEP_UP_REJECT + STEP_UP_ACCEPT) / 2)
+
+        assert result["decision"] == SIGN_AGAIN
+        assert result["routing"] == "multimodal"
+        assert any("one more signing" in r for r in result["reasons"])
+
+    def test_a_clear_first_signing_is_decided_at_once(self):
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+
+        assert self._verify(min(STEP_UP_ACCEPT + 0.02, 0.99))["decision"] == "Genuine"
+        assert self._verify(STEP_UP_REJECT / 2)["decision"] == "Forged"
+
+    def test_the_second_round_decides_the_mean_against_its_own_threshold(self):
+        # The score sits above STEP_UP_TWO but below both other bars: the one band where the
+        # first signing alone asks again and a plain two-signing verify() rejects. A literal
+        # would leave the band whenever a threshold is re-set, and the test would pass anyway.
+        from config.settings import DECISION_THRESHOLD, STEP_UP_ACCEPT, STEP_UP_REJECT, STEP_UP_TWO
+        from src.verification import SIGN_AGAIN
+        assert STEP_UP_REJECT < STEP_UP_TWO < min(STEP_UP_ACCEPT, DECISION_THRESHOLD)
+        target = (STEP_UP_TWO + min(STEP_UP_ACCEPT, DECISION_THRESHOLD)) / 2
+
+        assert self._verify(target)["decision"] == SIGN_AGAIN
+        assert self._verify(target, signings=2)["decision"] == "Genuine"
+        assert self._verify(target, signings=2, step_up=False)["decision"] == "Forged"
+        assert self._verify((STEP_UP_REJECT + STEP_UP_TWO) / 2, signings=2)["decision"] == "Forged"
+
+    def test_there_is_never_a_third_signing(self):
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+        with pytest.raises(ValueError, match="third"):
+            self._verify((STEP_UP_REJECT + STEP_UP_ACCEPT) / 2, signings=3)
+
+    def test_paper_and_tablet_need_the_same_number_of_signings(self):
+        (smodel, srefs, path), (tmodel, trefs, trajectory) = self._setup(0.6)
+        try:
+            with pytest.raises(ValueError, match="same number"):
+                verify(spatial=(smodel, srefs, path), temporal=(tmodel, trefs, [trajectory, trajectory]),
+                       step_up=True)
+        finally:
+            os.unlink(path)
+
+    def test_a_single_branch_keeps_its_own_threshold(self):
+        """The three thresholds were calibrated on fused scores only."""
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+        (_, _, path), temporal = self._setup((STEP_UP_REJECT + STEP_UP_ACCEPT) / 2)
+        os.unlink(path)
+
+        result = verify(temporal=temporal, step_up=True)
+
+        assert result["routing"] == "temporal_only"
+        assert result["decision"] in ("Genuine", "Forged")
+
+    def test_it_is_off_until_the_gui_handles_sign_again(self, monkeypatch):
+        import src.verification as verification
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT, VERIFICATION_SIGNINGS, VERIFICATION_STEP_UP
+        assert VERIFICATION_STEP_UP is False
+        if VERIFICATION_STEP_UP:
+            assert VERIFICATION_SIGNINGS == 1, "step-up starts from one signing of each kind"
+        target = (STEP_UP_REJECT + STEP_UP_ACCEPT) / 2
+
+        assert self._verify(target, step_up=None)["decision"] in ("Genuine", "Forged")
+        monkeypatch.setattr(verification, "VERIFICATION_STEP_UP", True)
+        assert self._verify(target, step_up=None)["decision"] == verification.SIGN_AGAIN
+
+
 def _embedded_writer(genuine, forged):
     return {"genuine": np.asarray(genuine, dtype=np.float32),
             "forged": np.asarray(forged, dtype=np.float32)}
