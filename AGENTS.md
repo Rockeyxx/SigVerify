@@ -31,6 +31,11 @@ numbers and the reason. Most ideas that get proposed again are already in it.
 dead for anyone who clones. Inline the fact instead. Full conventions are in the
 `docs-style` skill.
 
+**Design documents from the EGM plugin go in one local folder.** Briefs, drafts
+and review reports are gitignored and never committed.
+
+EGM artifact directory: .egm
+
 ---
 
 ## Drift Prevention

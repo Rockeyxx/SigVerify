@@ -422,7 +422,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
                            num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
-                           random_impostor_ratio=0.0):
+                           random_impostor_ratio=0.0, pair_caps=None):
     """Generate training or evaluation pairs under the skilled forgery setting.
 
     Positive pairs consist of two genuine signatures from the same writer.
@@ -435,6 +435,7 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         num_forged_per_writer: target count of negative pairs per writer.
         seed: random seed for reproducibility.
         random_impostor_ratio: fraction of negative pairs drawn from other writers.
+        pair_caps: optional {writer: max pairs per side} binding those writers only.
 
     Returns:
         (pairs: list of (sample1, sample2), labels: list of int)
@@ -461,6 +462,8 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
             len(genuine) * (len(genuine) - 1) // 2,
             len(genuine) * len(forged),
         )
+        if pair_caps and writer in pair_caps:
+            num_pairs = min(num_pairs, pair_caps[writer])
 
         # Draw genuine pairs without replacement from all unique combinations.
         genuine_space = list(itertools.combinations(genuine, 2))

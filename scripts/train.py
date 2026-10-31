@@ -36,6 +36,7 @@ from config.settings import (
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
     TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO, TEMPORAL_TRAIN_FLOAT32_PARSE,
+    UTSIG_TRAIN_FORGERY_TYPES, UTSIG_TRAIN_HOLD_PAIRS,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
@@ -45,7 +46,7 @@ from src.data.dataset import (
 from src.data.features import NUM_DERIVED_CHANNELS
 from src.data.parsers import (
     EXTRA_CHANNEL_SUPPORT, MAX_GAP_MS, is_known_dataset, is_temporal_dataset, merge_datasets,
-    parse_dataset, supports_extra_channel,
+    parse_dataset, parse_utsig, supports_extra_channel,
     svc2004_has_pressure,
 )
 from src.models.siamese import (
@@ -243,6 +244,15 @@ def parse_args(argv=None):
                              "keeps pure skilled-forgery pairs. At 0 the encoder "
                              "never learns that two different people should be far "
                              "apart, which measurement showed it does not infer")
+    parser.add_argument("--utsig-forgery-types", nargs="+", metavar="TYPE",
+                        default=list(UTSIG_TRAIN_FORGERY_TYPES),
+                        help="UTSig forgery folders (Skilled, Simple, 'Opposite Hand') "
+                             "used as negatives for the TRAINING writers. Validation "
+                             "and test keep skilled forgeries only")
+    parser.add_argument("--utsig-hold-pairs", action="store_true",
+                        default=UTSIG_TRAIN_HOLD_PAIRS,
+                        help="Hold each UTSig training writer at its skilled-only pair "
+                             "count, so extra forgery types do not also add pairs")
     parser.add_argument("--lr-schedule", choices=["none", "plateau"], default="none",
                         help="'plateau' halves the learning rate after 2 epochs "
                              "without validation improvement. The spatial validation "
@@ -322,6 +332,38 @@ def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
     return writer_samples
 
 
+def add_training_forgeries(writer_samples, train_ids, data_dirs, forgery_types,
+                           hold_pairs):
+    """
+    Add UTSig's other forgery types to the training writers only.
+
+    Returns (samples, pair_caps). The input mapping is never modified, so the
+    validation and test writers keep skilled forgeries only. With hold_pairs, each
+    UTSig training writer is capped at the pair count its skilled forgeries alone
+    give, so the arm changes the kind of negative and not the number of pairs.
+    """
+    extra = [t for t in forgery_types if t != "Skilled"]
+    roots = [d for d in data_dirs
+             if os.path.basename(os.path.normpath(d)).lower() == "utsig"]
+    if not extra or not roots:
+        return writer_samples, None
+
+    samples = dict(writer_samples)
+    caps = {} if hold_pairs else None
+    for root in roots:
+        added = parse_utsig(root, forgery_types=extra)
+        for writer in train_ids:
+            if writer not in added or writer not in writer_samples:
+                continue
+            record = writer_samples[writer]
+            if caps is not None:
+                g = len(record["genuine"])
+                caps[writer] = min(g * (g - 1) // 2, g * len(record["forged"]))
+            samples[writer] = {**record,
+                               "forged": record["forged"] + added[writer]["forged"]}
+    return samples, caps
+
+
 def _seed_worker(worker_id):
     """
     Give each DataLoader worker its own augmentation RNG stream.
@@ -344,7 +386,7 @@ def _seed_worker(worker_id):
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
                  augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
                  augment_scale=1.0, pairs_per_writer=None, augment_params=None,
-                 device_augment=False):
+                 device_augment=False, pair_caps=None):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -365,7 +407,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         genuine_n = pairs_per_writer or PAIRS_GENUINE_PER_WRITER
         forged_n = pairs_per_writer or PAIRS_IMPOSTOR_PER_WRITER
         pairs, labels = generate_skilled_pairs(subset, genuine_n, forged_n, seed=seed,
-                                               random_impostor_ratio=ratio)
+                                               random_impostor_ratio=ratio,
+                                               pair_caps=pair_caps)
         # `shuffle` is true only for the training loader, so validation and test
         # are never augmented — an augmented val set would move the target the
         # early-stopping rule is measuring against.
@@ -550,6 +593,9 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
             if current_lr < previous_lr:
                 tqdm.write(f"  LR decayed: {previous_lr:.2e} -> {current_lr:.2e}")
 
+        # Count this epoch before saving: a checkpoint written first carries the
+        # previous epoch's counter, and a resumed run falls one stall behind.
+        stop = early_stopping(val_loss)
         save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path,
                         best_val_loss=min(best_val_loss, val_loss),
                         early_stopping=early_stopping)
@@ -560,7 +606,7 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
             best_val_loss = val_loss
             save_weights(model, weights_path)
 
-        if early_stopping(val_loss):
+        if stop:
             tqdm.write(f"Early stopping triggered at {epoch_label(epoch, epochs)}")
             break
 
@@ -711,14 +757,23 @@ def main(argv=None):
               f"embedding {model.embedding_dim}, dt clip {MAX_GAP_MS:g} ms"
               + (" from SIGVER_MAX_GAP_MS" if os.environ.get("SIGVER_MAX_GAP_MS") else ""))
 
-    train_loader, num_train = build_loader(writer_samples, train_ids, args.branch, args.batch_size,
+    # Training-only: the val loader below still reads the unmodified mapping.
+    train_samples, pair_caps = add_training_forgeries(
+        writer_samples, train_ids, args.data_dir, args.utsig_forgery_types,
+        args.utsig_hold_pairs)
+    if train_samples is not writer_samples:
+        print(f"  UTSig training forgeries: {', '.join(args.utsig_forgery_types)}"
+              + (" (pairs held at the skilled-only count)" if pair_caps is not None else ""))
+
+    train_loader, num_train = build_loader(train_samples, train_ids, args.branch, args.batch_size,
                                            args.num_workers, True, args.seed,
                                            augment=args.augment,
                                            augment_scale=args.augment_scale,
                                            random_impostor_ratio=args.random_impostor_ratio,
                                            pairs_per_writer=args.pairs_per_writer,
                                            augment_params=augment_params,
-                                           device_augment=args.device_augment)
+                                           device_augment=args.device_augment,
+                                           pair_caps=pair_caps)
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
                                        args.num_workers, False, args.seed,
                                        augment=args.augment,
@@ -796,7 +851,8 @@ def main(argv=None):
     history = fit(model, train_loader, val_loader, loss_fn, optimizer, device,
                   args.epochs, weights_path, checkpoint_path,
                   start_epoch=start_epoch, early_stopping=early_stopping,
-                  scheduler=scheduler, resume_best=resume_best)
+                  scheduler=scheduler, resume_best=resume_best,
+                  resume_early_stopping=resume_early_stopping)
 
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")

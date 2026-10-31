@@ -218,6 +218,105 @@ class TestPairBudget:
         assert (args.aug_blur, args.aug_ink_gain_min, args.aug_noise) == (1.0, 0.7, 0.02)
 
 
+def _make_utsig_fixture(root, num_writers=8, num_genuine=6):
+    """UTSig-shaped tree: 2 Skilled, 3 Simple and 1 Opposite Hand forgery per writer."""
+    rng = np.random.default_rng(2)
+    counts = {"Skilled": 2, "Simple": 3, "Opposite Hand": 1}
+    for writer in range(1, num_writers + 1):
+        folders = [("Genuine", num_genuine)] + [
+            (os.path.join("Forgery", kind), n) for kind, n in counts.items()]
+        for folder, n in folders:
+            out = os.path.join(root, folder, str(writer))
+            os.makedirs(out, exist_ok=True)
+            for sample in range(1, n + 1):
+                img = np.full((64, 64), 255, dtype=np.uint8)
+                cv2.line(img, (5, 10 + writer), (58, 50 - writer), 0, 2)
+                img = np.clip(img.astype(int) - rng.integers(0, 20, img.shape), 0, 255)
+                cv2.imwrite(os.path.join(out, f"{sample}.png"), img.astype(np.uint8))
+    return root
+
+
+class TestUTSigTrainingForgeries:
+    """
+    UTSig's Simple and Opposite Hand forgeries are a training-only lever.
+
+    Validation and test must keep skilled forgeries only, or every reported
+    UTSig number would silently change protocol along with the training data.
+    """
+
+    def test_default_is_skilled_only(self):
+        from config.settings import UTSIG_TRAIN_FORGERY_TYPES
+
+        assert tuple(UTSIG_TRAIN_FORGERY_TYPES) == ("Skilled",)
+
+    def test_extra_types_reach_training_writers_only(self, tmp_path):
+        from scripts.train import add_training_forgeries, build_writer_samples
+
+        data = _make_utsig_fixture(str(tmp_path / "utsig"))
+        samples = build_writer_samples([data])
+        train_ids = ["utsig_1", "utsig_2"]
+        before = {w: list(r["forged"]) for w, r in samples.items()}
+
+        train_samples, caps = add_training_forgeries(
+            samples, train_ids, [data], ("Skilled", "Simple", "Opposite Hand"),
+            hold_pairs=False)
+
+        assert caps is None
+        for w in train_ids:
+            assert len(train_samples[w]["forged"]) == 2 + 3 + 1
+        # Every other writer, and the shared mapping itself, is untouched.
+        for w, forged in before.items():
+            assert samples[w]["forged"] == forged
+            assert all(os.sep + "Skilled" + os.sep in p for p in forged)
+
+    def test_hold_pairs_caps_at_the_skilled_only_supply(self, tmp_path):
+        from scripts.train import add_training_forgeries, build_writer_samples
+
+        data = _make_utsig_fixture(str(tmp_path / "utsig"))
+        samples = build_writer_samples([data])
+
+        _, caps = add_training_forgeries(
+            samples, ["utsig_1"], [data], ("Skilled", "Simple", "Opposite Hand"),
+            hold_pairs=True)
+
+        # Skilled-only supply: min(C(6,2)=15, 6 x 2 = 12) = 12.
+        assert caps == {"utsig_1": 12}
+
+    def test_default_types_change_nothing(self, tmp_path):
+        from scripts.train import add_training_forgeries, build_writer_samples
+
+        data = _make_utsig_fixture(str(tmp_path / "utsig"))
+        samples = build_writer_samples([data])
+
+        train_samples, caps = add_training_forgeries(
+            samples, ["utsig_1"], [data], ("Skilled",), hold_pairs=True)
+
+        assert train_samples is samples
+        assert caps is None
+
+    @pytest.mark.parametrize("flags,train_per_side", [
+        ([], 12),                                   # control: 6 x 2 skilled
+        (["--utsig-forgery-types", "Skilled", "Simple", "Opposite Hand"], 15),
+        (["--utsig-forgery-types", "Skilled", "Simple", "Opposite Hand",
+          "--utsig-hold-pairs"], 12),
+    ])
+    def test_training_pairs_move_and_validation_pairs_do_not(
+            self, tmp_path, capsys, flags, train_per_side):
+        import re
+
+        data = _make_utsig_fixture(str(tmp_path / "utsig"), num_writers=10)
+        history = train_main([
+            "--branch", "spatial", "--data-dir", data, "--epochs", "1",
+            "--batch-size", "8", "--weights-dir", str(tmp_path / "w"),
+            "--num-workers", "0"] + flags)
+
+        train, val = map(int, re.search(r"Pairs: (\d+) train / (\d+) val",
+                                        capsys.readouterr().out).groups())
+        assert train == 2 * train_per_side * len(history["split"]["train"])
+        # Validation writers keep 6 x 2 skilled forgeries: 12 pairs per side.
+        assert val == 2 * 12 * len(history["split"]["val"])
+
+
 class TestEarlyStoppingSurvivesResume:
     """Verifies that early stopping patience state is preserved when resuming training."""
 
@@ -247,6 +346,39 @@ class TestEarlyStoppingSurvivesResume:
         assert stopper.counter == 4 and stopper.best_loss == 0.30
         # The fifth stall must stop the run, not the ninth.
         assert stopper(0.31) is True
+
+    def test_the_checkpoint_includes_this_epochs_verdict(self, tmp_path, monkeypatch):
+        import torch
+        import torch.optim as optim
+
+        import scripts.train as train
+
+        losses = iter([0.30, 0.31])            # one baseline, then one stall
+        monkeypatch.setattr(train, "train_one_epoch", lambda *a, **k: 0.0)
+        monkeypatch.setattr(train, "validate_one_epoch", lambda *a, **k: next(losses))
+        model = torch.nn.Linear(2, 2)
+        path = str(tmp_path / "ckpt.pth")
+        train.fit(model, None, None, None, optim.Adam(model.parameters()), "cpu", 2,
+                  str(tmp_path / "w.pth"), path)
+        state = torch.load(path, map_location="cpu", weights_only=False)["early_stopping"]
+        # Saved after the stall was counted; a stale record resumes one epoch behind.
+        assert state == {"counter": 1, "best_loss": 0.30}
+
+    def test_main_hands_the_saved_counter_to_the_resumed_run(self, tmp_path):
+        import torch
+
+        data = _make_utsig_fixture(str(tmp_path / "utsig"), num_writers=10)
+        common = ["--branch", "spatial", "--data-dir", data, "--batch-size", "8",
+                  "--weights-dir", str(tmp_path / "w"), "--num-workers", "0"]
+        train_main(common + ["--epochs", "1"])
+        ckpt = str(tmp_path / "w" / "checkpoint_spatial_cnn.pth")
+        state = torch.load(ckpt, map_location="cpu", weights_only=False)
+        state["early_stopping"] = {"counter": 4, "best_loss": -1.0}   # unbeatable, one stall left
+        torch.save(state, ckpt)
+
+        history = train_main(common + ["--epochs", "5", "--resume", ckpt])
+        # Patience 5 with four stalls already counted: the first resumed epoch stops it.
+        assert len(history["val_loss"]) == 1
 
     def test_a_record_without_the_field_starts_fresh(self):
         from scripts.train import EarlyStopping

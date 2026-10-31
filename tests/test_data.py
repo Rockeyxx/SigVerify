@@ -353,6 +353,21 @@ class TestGenerateSkilledPairs:
         assert mixed.count(1) == baseline.count(1)
         assert mixed.count(0) == mixed.count(1)
 
+    def test_pair_caps_hold_one_writer_below_the_budget(self):
+        """
+        A per-writer cap must bind that writer only. The UTSig forgery-type arm
+        holds UTSig at its skilled-only 162 pairs per side while every other
+        writer keeps the full budget, so adding forgeries does not also add pairs.
+        """
+        _, labels = generate_skilled_pairs(self._writers(n=2, n_genuine=6, n_forged=6),
+                                           num_genuine_per_writer=10,
+                                           num_forged_per_writer=10,
+                                           random_impostor_ratio=0.0,
+                                           pair_caps={"w0": 3})
+        # w0 is held at 3 per side; w1 keeps min(10, C(6,2)=15, 36) = 10.
+        assert labels.count(1) == 3 + 10
+        assert labels.count(0) == 3 + 10
+
     def test_random_impostor_never_pairs_a_writer_with_themselves(self):
         """A 'random impostor' drawn from the same writer would be a positive mislabelled 0."""
         pairs, labels = generate_skilled_pairs(self._writers(n=3),

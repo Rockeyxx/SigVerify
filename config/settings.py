@@ -161,6 +161,14 @@ PAIRS_IMPOSTOR_PER_WRITER = 276
 # Benchmark evaluation always scores strictly against skilled forgeries per AGENTS.md.
 RANDOM_IMPOSTOR_RATIO = 0.5
 
+# UTSig forgery types added to the TRAINING writers' negatives. Validation and test
+# always keep skilled forgeries only. On disk each writer also has 36 Simple and
+# 3 Opposite Hand forgeries that the shipped recipe never used.
+UTSIG_TRAIN_FORGERY_TYPES = ("Skilled",)
+# Hold each UTSig training writer at the pair count its skilled forgeries alone
+# give (27 x 6 = 162 per side), so adding forgery types does not also add pairs.
+UTSIG_TRAIN_HOLD_PAIRS = False
+
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by hard-negative mining
