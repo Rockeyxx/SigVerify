@@ -172,6 +172,11 @@ UTSIG_TRAIN_HOLD_PAIRS = False
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by hard-negative mining
+# Research arms for the time gap, off in the shipped recipe: a triplet term
+# (anchor genuine, positive genuine, negative skilled forgery) added to the
+# contrastive loss, and temporal positives drawn only across recording sessions.
+TEMPORAL_TRIPLET_WEIGHT = 0.0
+TEMPORAL_CROSS_SESSION_POSITIVES = False
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
 NUM_EPOCHS = 50
