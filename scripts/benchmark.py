@@ -1,19 +1,7 @@
-"""
-Benchmark Suite — Signature Verification System
+"""Benchmark suite for signature verification models.
 
-Evaluates representation quality and threshold-independent separation (EER, Cohen's d, margin statistics)
-across held-out test writer partitions.
-
-CLI Examples:
-    python scripts/benchmark.py --branch spatial \
-        --weights models/weights/spatial_cnn.pth \
-        --data-dir data/cedar data/bhsig260 data/utsig --seed 42
-
-    # Fast evaluation run over a designated pair sample count:
-    python scripts/benchmark.py --branch spatial \
-        --weights models/weights/spatial_cnn.pth \
-        --data-dir data/cedar data/bhsig260 data/utsig \
-        --seed 42 --limit-pairs 800
+Evaluates embedding representation quality and discrimination metrics
+(EER, Cohen's d, separation margin) across held-out test writer partitions.
 """
 
 
@@ -28,6 +16,7 @@ from torch.utils.data import Subset, DataLoader
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    SEED,
     TEMPORAL_CHANNELS,
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
@@ -158,7 +147,7 @@ def parse_args(argv=None):
                         help="Dataset directories — must match the training run")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=SEED,
                         help="Must match the training seed to reproduce the same writer "
                              "split and pairing; also seeds --limit-pairs subsampling")
     parser.add_argument("--margin", type=float, default=CONTRASTIVE_MARGIN,
@@ -176,6 +165,11 @@ def parse_args(argv=None):
                         help="Must match the channels the weights were trained on. "
                              "The model recovers its own width from the checkpoint, "
                              "but the parser cannot, so a mismatch fails loudly here")
+    parser.add_argument("--float32-parse", action="store_true",
+                        help="Read SVC2004 and DeepSignDB as float32, the way training reads "
+                             "them and the way the releases before exact timestamps were "
+                             "scored. tools/reproduce_release.py sets it for those releases; "
+                             "leave it off to score what the tablet sends")
     parser.add_argument("--enroll", type=int, nargs="?", const=NUM_ENROLLMENT_REFERENCES,
                         default=None, metavar="K",
                         help="Score under the enrollment protocol the field uses and "
@@ -290,7 +284,7 @@ def main(argv=None):
     from scripts.train import build_writer_samples
     channels = getattr(args, "temporal_channels", "xyp")
     writer_samples = build_writer_samples(
-        args.data_dir, None if channels == "xyp" else channels)
+        args.data_dir, None if channels == "xyp" else channels, float32_parse=args.float32_parse)
 
     if args.branch == "temporal" and args.temporal_features == "derived":
         # Same transform, applied the same way as training. Importing it from
@@ -315,9 +309,7 @@ def main(argv=None):
         test_ids = select_test_writers(args.writers, train_ids, val_ids, test_ids)
         print(f"Restricted to {len(test_ids)} explicitly requested held-out writers")
 
-    # A checkpoint trained since 2026-09-19 carries its partition; refuse to score
-    # it on a writer it trained on, or on a held-out set that is not the one it
-    # was trained against (Part 9 §27). Older checkpoints have no record.
+    # Ensure evaluation partition matches the checkpoint's split record.
     record = check_split_against_record(args.weights, train_ids, test_ids,
                                         require_same_test=not args.writers,
                                         max_gap_ms=MAX_GAP_MS)

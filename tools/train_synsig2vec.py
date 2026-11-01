@@ -1,33 +1,7 @@
-"""
-SynSig2Vec end-to-end: synthesise, rank, verify — phase 3.
+"""SynSig2Vec training pipeline: synthesis, ranking loss, and verification.
 
-Ties `tools/sigma_lognormal.py` (SigmaLambda synthesis) to `tools/sig2vec.py`
-(1D CNN + AP ranking loss) and scores the result under **this project's**
-enrolment protocol, so the number is comparable to every other temporal figure
-in the repository rather than to the paper's own protocol.
-
-**Nothing here touches `src/models/`.** This is a parallel experiment living in
-`tools/`, per the constraint it was built under. The shipped Siamese LSTM is
-untouched.
-
-## Why this exists
-
-The temporal branch is stuck at ~10.9% pooled and every hyperparameter lever is
-exhausted. The two remaining levers were more writers (blocked: every large
-online corpus is licence-gated) and a different method. SynSig2Vec is the method
-that needs neither: it trains on **genuine signatures only**, so no skilled
-forgeries, and it manufactures its own volume, so no new corpus.
-
-## Cost, before you start
-
-SigmaLambda decomposition runs ~10 s per signature on SVC2004 and ~18 s on
-SigComp2011, single-threaded. The whole corpus is therefore hours, which is why
-parameters are extracted once, in parallel, and cached to disk. Delete the cache
-only when the extractor itself changes.
-
-Usage:
-    python tools/train_synsig2vec.py --data-dir data/svc2004_task2 \
-        --epochs 30 --seed 42 --cache /tmp/msl_cache.pt
+Integrates kinematic synthesis (tools/sigma_lognormal.py) with ranking
+representation learning (tools/sig2vec.py) for writer-independent verification.
 """
 
 import argparse

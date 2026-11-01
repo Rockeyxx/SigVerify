@@ -1,42 +1,12 @@
-"""
-Sigma-Lognormal (SigmaLambda) signature model — phase 1 of SynSig2Vec.
+"""Sigma-Lognormal signature model for synthetic trajectory generation.
 
 SynSig2Vec (Lai, Jin et al., AAAI 2020) trains a dynamic-signature verifier
-**from genuine signatures only**. It synthesises each template at two ordered
-distortion levels and learns to rank the low-distortion group above the median
-one. That matters here for two reasons this project keeps running into: it needs
-no skilled forgeries, and it needs no licensed corpus.
+using genuine signatures only. It synthesises each template at two ordered
+distortion levels (G1 and G2) and learns to rank the lower-distortion group
+closer to the genuine template.
 
-**Clean-room.** The authors' implementation is GPL-3.0 and this repository is
-MIT, so nothing was copied from it. This is written from the paper's equations
-(arXiv:1911.05358), which are not themselves copyrightable.
-
-## The model
-
-The Kinematic Theory of Rapid Human Movements holds that handwriting is a sum of
-overlapping lognormal impulse responses, one per "stroke". Stroke i has six
-parameters `[D, t0, mu, sigma, theta_s, theta_e]` and contributes speed
-
-    |v_i(t)| = D / (sigma * sqrt(2*pi) * (t - t0)) *
-               exp( -(ln(t - t0) - mu)^2 / (2 * sigma^2) )
-
-along a direction that turns linearly with the distance covered:
-
-    phi_i(t) = theta_s + (theta_e - theta_s)/D * integral_0^t |v_i(tau)| d tau
-
-and pen velocity is the vector sum over strokes. Perturbing the parameters
-produces a new signature that is still *motor-plausible* — which is the point,
-and why this is not the affine jitter `augment_trajectory` applies (measured
-2026-08-10: that made the branch 2.54 EER points worse).
-
-## What this file does not do
-
-Parameter extraction here is a bounded least-squares fit to the speed profile,
-seeded from its peaks. The paper uses O'Reilly & Plamondon's iterative
-extractor, which is more faithful. This fit is good enough **only if it passes**
-`tests/test_sigma_lognormal.py`, which gates on reconstruction RMSE and on the
-G1 < G2 distortion ordering the ranking objective depends on. If a corpus fails
-those gates, the synthesis is not usable on it — check, do not assume.
+The kinematic model represents handwriting as a sum of overlapping lognormal
+velocity profiles, producing motor-plausible stroke variations.
 """
 
 from dataclasses import dataclass, replace
@@ -56,24 +26,9 @@ _ADMISSIBLE = {
     "sigma": (-0.3250, 0.2875),
 }
 
-# Distortion levels. G1 draws from the inner part of each range, so it stays
-# close to the template; G2 draws from an outer annulus that excludes the
-# middle, so it is reliably further away. The exclusion is what keeps the two
-# groups separable — a plain wider uniform would overlap G1 and the ranking
-# objective would have nothing to learn.
-#
-# These radii were once calibrated to real corpus statistics and the result was
-# MEASURABLY WORSE — see docs/plans/2026-08-18-synsig2vec-sota-gap.md. Putting G1
-# on the real genuine spread (1.48 against 1.44) and G2 on the real forgery
-# spread (1.66 against 1.71) narrowed the training margin from 1.15 to 0.18 and
-# pushed pooled EER from 8.78% to 10.62% across three seeds, ranges disjoint. The
-# wide margin is not a defect to fix: the AP loss needs a cleanly *learnable*
-# ordering, and a realistically hard one leaves it almost nothing to rank. Do not
-# re-narrow these without re-running all three seeds.
-#
-# Level 2's scale is 1.0 rather than the paper's per-parameter values because
-# `_draw` used to ignore `scale` whenever an annulus was set. That bug is fixed,
-# so 1.0 is what reproduces the measured 8.78% baseline exactly.
+# Distortion levels. G1 draws from the inner part of each range to stay close
+# to the template; G2 draws from an outer annulus that excludes the middle to ensure
+# a reliable margin between the two groups for the ranking objective.
 _LEVELS = {
     1: {"scale": {"D": 0.25, "t0": 0.25, "mu": 0.17, "sigma": 0.25},
         "annulus": None, "theta": 0.10},

@@ -1,22 +1,7 @@
-"""
-DTW diagnostic baseline for the temporal branch.
+"""Dynamic Time Warping (DTW) baseline for temporal trajectory analysis.
 
-**Not shipped and not fused** (AGENTS.md). This exists to answer one question:
-the Siamese LSTM loses to plain DTW on SVC2004 (recorded as 17.46% against
-12.24%) while beating it by 12 points pooled, and nothing explains that row.
-DTW's only capability is elastic alignment and it uses zero training writers,
-so if it wins on a corpus, alignment is what that corpus needs.
-
-The previous version of this script was never committed and is gone, which
-means the 12.24% figure quoted in earlier local notes is not
-currently reproducible. This is a fresh implementation; its numbers are the
-ones to trust, and where they disagree with the old ones the old ones lose.
-
-Scoring goes through `scripts.evaluate.enrolled_trial_scores` with `distance=`
-rather than reimplementing the enrollment draw here. That is deliberate: the
-comparison against the LSTM is only meaningful if both see the same writers,
-the same K references and the same RNG sequence, and a second copy of the
-protocol is exactly how two measurements drift apart.
+Provides elastic sequence alignment distance calculations to compare trajectory
+dynamics against neural network embeddings.
 """
 
 import argparse

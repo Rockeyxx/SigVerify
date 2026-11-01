@@ -15,17 +15,17 @@ Read this file before writing or reviewing any code in this repository.
 
 **`README.md` is for a user, not a reviewer.** It carries what the system is, how
 to run it, and a bare results table. Every explanation of how a number was
-measured, why a design choice was made, or which experiments failed goes in
-**`SUMMARY.md`**. Rules and contracts go here in `AGENTS.md`; dataset terms go in
+measured, why a design choice was made, or which experiments failed stays out
+of the repository. Rules and contracts go here in `AGENTS.md`; dataset terms go in
 `DATASET_LICENSES.md`.
 
 **Do not move report content into the README.** Protocol derivations, experiment
-history and rejected arms belong in `SUMMARY.md` even when they explain a number
-the README quotes.
+history and rejected arms stay out of the repository, even when they explain a
+number the README quotes.
 
-**Before proposing any improvement, read `SUMMARY.md` Part 9 — Negative
-Results.** It records every approach that was run and measured worse, with the
-numbers and the mechanism. Most re-proposed ideas are already in it.
+**Before proposing an improvement, ask the model owner for the negative-results
+record.** It lists every approach that was tested and measured worse, with the
+numbers and the reason. Most ideas that get proposed again are already in it.
 
 **`docs/` is gitignored, so never link to it from a tracked file.** The link is
 dead for anyone who clones. Inline the fact instead. Full conventions are in the
@@ -45,11 +45,10 @@ them, even if they appear in the literature review or older drafts:
   application-layer AES-256-GCM only
 - **No extra _captured_ channels beyond the four in the contract** — the capture
   contract is `[1, L, 4]`, `(X, Y, Pressure, dt)`. The device must not be asked
-  for azimuth, altitude or tilt. `dt` was admitted on 2026-08-19 because a
-  timestamp is channel 3 of the standard 7 every digitizer already reports, so
-  the ban, which exists for channels the hardware cannot deliver, did not apply
-  to it. Features **derived** from those four channels inside the model are
-  allowed and expected (see Temporal Branch below)
+  for azimuth, altitude, or tilt. A timestamp is standard across digitizers and
+  forms `dt`, whereas channels that common hardware cannot deliver are excluded.
+  Features **derived** from these four channels inside the model are allowed
+  and expected (see Temporal Branch below).
 - **No cloud APIs, no remote inference, no discrete GPU at inference**
 
 ---
@@ -59,10 +58,24 @@ them, even if they appear in the literature review or older drafts:
 | Constraint                      | Value                                             |
 | ------------------------------- | ------------------------------------------------- |
 | Inference RAM ceiling           | ≤ 4 GB                                            |
-| End-to-end verification latency | < 3.0 seconds                                     |
+| End-to-end verification latency | < 3.0 s, Enter to fused result (see below)        |
 | Execution                       | Local only — no cloud, no dedicated GPU           |
 | Platform support                | Windows + Arch Linux (x86_64 and ARM64)           |
 | Native build steps              | None — all dependencies must have prebuilt wheels |
+
+The latency budget starts when the user presses Enter after submitting
+`NUM_ENROLLMENT_REFERENCES` scans, as many pen signings and one probe of each, and
+ends at the fused result. It covers enrolling those references and one `multimodal`
+verify on CPU. Starting the app is outside it: the app must call
+`SignatureService.warm_up()` once when it opens, on a background thread, so the
+imports, the model loads and the first forward pass happen before Enter. Keep one
+`SignatureService` for the whole session, because a second instance loads the models
+again. The budget must stay well under 3.0 s, because the front end needs time too.
+`tools/profile_latency.py` reports it on its first row and `tests/test_latency.py`
+asserts it off CI. Measured on an 8-core laptop CPU: 0.5 s from Enter (0.8 s on 2
+cores, 1.7 s on one), and 1.35 s to start the app, 1.0 s of it importing PyTorch,
+reported but not budgeted (1.9 s on the first launch after a reboot). A `verify()` against
+stored references takes 0.08 s (0.28 s on one core); never quote it as the budget.
 
 ---
 
@@ -71,15 +84,15 @@ them, even if they appear in the literature review or older drafts:
 ### Spatial Branch (Offline)
 
 - Input tensor: **`[1, 1, 155, 220]`** (8-bit grayscale), resized **directly** onto
-  the target — no square pad. Measured 2026-07-26: this beat the previous
-  `[1, 1, 256, 256]` square-padded geometry on **every** dataset (utsig −3.38,
-  pooled −1.41 EER points) and trains about twice as fast. BHSig260's ribbons are
-  roughly 1:3.5, so square padding left ~70% of the canvas blank and cost more
-  stroke resolution than the aspect distortion costs. `SPATIAL_SQUARE_PAD` in
-  `config/settings.py` keeps both paths available for re-measurement.
-- Pixel polarity: **inverted — background 0, ink high.** Measured: CEDAR
-  4.86% → 0.00% EER. Ink covers ~1% of the canvas, so an un-inverted image feeds
-  every convolution a large constant offset carrying no identity signal.
+  the target, with no square pad. This beat the earlier `[1, 1, 256, 256]`
+  square-padded input on every dataset (UTSig 3.38 points better, pooled 1.41)
+  and trains about twice as fast.
+  Many signature images are wide ribbons (around 1:3.5), so square padding left ~70%
+  of the canvas blank and lost valuable stroke resolution. `SPATIAL_SQUARE_PAD` in
+  `config/settings.py` keeps both options configurable.
+- Pixel polarity: **inverted — background 0, ink high.** Ink covers only ~1%
+  of the canvas, so non-inverted images feed convolutions a large constant background
+  offset that provides no identity signal. Inverting ink sharply improves separation.
 - Backbone: **Siamese CNN** → **512-d** embedding. The _model type_ is fixed;
   the embedding width is a tunable measured on held-out EER. Changing it is also
   a **database contract change** — 512-d stores as 2048 bytes, 128-d as 512 —
@@ -90,15 +103,29 @@ them, even if they appear in the literature review or older drafts:
   into 256, 384, 256). Selecting one is still a Siamese CNN with contrastive
   loss, so it is inside the architecture constraint. Run trunk, dropout and FC
   head as **separate** runs — bundled, their attribution is lost.
-- **Measured 2026-07-28, all three arms.** `wide` alone reached 11.78% pooled
-  against `compact`'s 12.31% (utsig −3.35, its first movement in five changes).
-  Adding Dey's dropout cost 6.78 points, and adding their FC-1024 head on top of
-  that collapsed the model to one embedding before it partly recovered. **Do not
-  set `SPATIAL_CONV_DROPOUT` or `SPATIAL_FC_HIDDEN` without a new reason** — at
-  301 writers the failure is data scarcity, not excess capacity, so regularizing
-  removes capacity the model needs. **`wide` is what ships** (`SPATIAL_TRUNK =
-  "wide"`); its dropout schedule and FC-1024 head are the parts that do not.
-- **A checkpoint carries its own writer split.** Since 2026-09-19 `scripts/train.py` writes `<weights>.split.json` beside the weights (`data_dirs`, `split_seed`, `holdout_writers`, and the `train` / `val` / `test` writer IDs), and `benchmark.py` and `evaluate.py` refuse to score a checkpoint on any writer in its stored `train` set, or on a held-out set that is not the stored one (`--writers` may narrow to a subset). This is the check that would have stopped the 2026-09-06 leak at the first benchmark: `exp_sc11` was trained against one 65-writer list and scored on another that overlapped its training set by 34 writers (SUMMARY.md Part 9 §27). Checkpoints without a record are scored with a printed warning, never silently. **Ship the `.split.json` next to every `.pth` in a release**, and never edit a record by hand to make a benchmark pass. The record also carries `input_size` for a spatial checkpoint: the image geometry is not recoverable from the weights (adaptive pooling makes the trunk size-agnostic), so a checkpoint trained under the sweep-only override `SIGVER_SPATIAL_INPUT_SIZE=WxH` is scored only under the same value, and `benchmark.py` refuses any other. The override exists for the input-size sweep and nothing else; shipped weights train and serve at `SPATIAL_INPUT_SIZE`.
+- The `wide` trunk reached 11.78% pooled EER against 12.31% for `compact`. Adding
+  Dey's convolution dropout cost 6.78 points, and adding their FC-1024 head on top
+  of that collapsed every signature to one embedding before it partly recovered.
+  **Do not set `SPATIAL_CONV_DROPOUT` or `SPATIAL_FC_HIDDEN` without a new measured
+  reason.** With about 300 writers the problem is too little data, not too much
+  capacity, so regularizing removes capacity the model needs. The shipped model
+  uses `SPATIAL_TRUNK = "wide"` without that dropout and without the FC-1024 head.
+- **A checkpoint carries its own writer split.** `scripts/train.py` writes
+  `<weights>.split.json` next to the weights (`data_dirs`, `split_seed`,
+  `holdout_writers`, and the `train` / `val` / `test` writer IDs). `benchmark.py`
+  and `evaluate.py` refuse to score a checkpoint on any writer from its stored
+  `train` set, or on a held-out set that is not the stored one (`--writers` may
+  pick a subset of it). This check would have stopped the `exp_sc11` leak at the
+  first benchmark: it was trained on one 65-writer list and scored on another that
+  shared 34 writers with its training set. A checkpoint
+  without a record is scored with a printed warning, never silently. **Ship the
+  `.split.json` next to every `.pth` in a release, and never edit a record by hand
+  to make a benchmark pass.** For a spatial checkpoint the record also stores
+  `input_size`, because the image size cannot be read from the weights (adaptive
+  pooling accepts any size). A checkpoint trained with the sweep-only override
+  `SIGVER_SPATIAL_INPUT_SIZE=WxH` is scored only with the same value, and
+  `benchmark.py` refuses any other. The override exists for the input-size sweep
+  only. Shipped weights train and serve at `SPATIAL_INPUT_SIZE`.
 - **A checkpoint carries its own architecture.** `SpatialSiamese.from_state_dict`
   recovers trunk, embedding width and FC head from the saved parameter shapes,
   and every load path (`benchmark.py`, `evaluate.py`, `src/verification.py`) goes
@@ -106,26 +133,22 @@ them, even if they appear in the literature review or older drafts:
   config points at whatever is being trained _now_, and scoring an archived
   checkpoint under the wrong architecture yields a plausible number that means
   nothing.
-- **Training-time augmentation is on, but the affine warps only**
-  (`SPATIAL_AUGMENT = True`, `SPATIAL_AUG_STROKE_PROB = 0.0`). Measured
-  2026-07-30: every prior spatial run best-validated at **epoch 1**, which was
-  image variety, not pair supply — 301 writers seen pixel-identical every epoch.
-  Warps plus stroke-width jitter moved the best epoch to 6 and pooled EER 11.78%
-  → 11.19%. That bundle was measured as one switch and hid a component pulling
-  the other way: measured 2026-09-26 at the full recipe, turning the stroke
-  dilate/erode jitter **off** takes pooled EER 8.69% → **7.46%** with no corpus
-  worse, because forgery detection keys on fine stroke geometry and that warp is
-  the one that erases stroke width. Keep the affine ranges small, keep the jitter
-  at zero, and never judge a group of augmentations by its sum again.
-  Warp each side of a pair **independently**, or the distance between them is
-  unchanged and the metric learns nothing.
-- **LR schedule: an option, not the shipped recipe.** `--lr-schedule plateau`
-  (halve after 2 stalled epochs) fired twice to 2.5e-4 on the 2026-07-30 run and
-  tightened the draw spread 40% (±0.83 → ±0.47) at the same pooled EER. The flag
-  defaults to `none`, and the shipped `exp_ctrl` weight was trained by
-  `train_ablation.sh` without it, so the plateau constants are not part of the
-  shipped model. On the temporal branch the scheduler never fires (SUMMARY.md
-  Part 9 §10). Pass the flag explicitly if a run is meant to use it.
+- **Training-time augmentation is on, but affine warps only**
+  (`SPATIAL_AUGMENT = True`, `SPATIAL_AUG_STROKE_PROB = 0.0`). Without
+  augmentation every spatial run was best at epoch 1, because the model saw the
+  same pixels every epoch. Warps plus stroke-width jitter moved the best epoch to
+  6 and pooled EER from 11.78% to 11.19%. That bundle was measured as one switch
+  and hid a part that hurt: turning the stroke dilate/erode jitter **off** took
+  pooled EER from 8.69% to **7.46%**, with no corpus getting worse. Forgery
+  detection depends on fine stroke width, and that jitter is the warp that erases
+  it. Keep the affine ranges small, keep the jitter at zero, and never judge a
+  group of augmentations only by its total effect. Warp each side of a pair
+  **independently**, or the distance between them does not change and the metric
+  learns nothing.
+- **LR schedule: optional, not part of the base recipe.** `--lr-schedule plateau`
+  (halving learning rate after stalled validation epochs) can reduce evaluation variance,
+  but defaults to `none`. Base weights are trained with a constant learning rate.
+  Pass the flag explicitly if you want to experiment with adaptive schedules.
 - Normalization: **GroupNorm or LayerNorm** — never BatchNorm (pair-sampled batches)
 - Quality gate: effective-resolution proxies (bounding-box pixel size +
   Laplacian-variance sharpness). Do **not** gate on the file's DPI tag
@@ -151,42 +174,45 @@ them, even if they appear in the literature review or older drafts:
   no-discrimination value (recorded as P-002)
 - Backbone: **Siamese LSTM** → **128-d** embedding
 - **Training:** pressure-channel dropout is **off** (`PRESSURE_DROPOUT_RATE = 0`).
-  This rule previously mandated 30–50% and was **measured wrong on 2026-07-29**.
-  Dropout at 0.4 cost 2.47 pooled EER points on normal input (12.73% → 10.26%)
-  and, against its own justification, 3.00 points on pressure-blind input
-  (23.32% → 20.32%). It lost on both paths at once, so no robustness argument
-  survives. Re-enabling it requires a measurement that beats these numbers, not
-  an appeal to robustness.
-- **Inference:** if no pressure available, impute `P = 1.0` and set the
-  degraded-mode flag in the GUI
-- **The dropped channels were measured 2026-07-30, and the ban now has a price.**
-  On SVC2004 Task2 (40 writers, seed 42, 3-channel control 19.55% at K=10):
-  adding `azimuth + altitude` reaches **11.17% (−8.38)**, adding real `dt`
-  reaches **15.17% (−4.38)**. `button` is near-constant (mean 1.0) and carries
-  nothing. Tilt is banned under Drift Prevention, unconfirmed on the XPPen Deco
-  640 (flagged below), and **deferred by the user 2026-08-19 until the tablet is
-  actually bought** — do not build for it before then.
-
-- **`dt` is available on both pen corpora and is worth 1.49 pooled points.**
-  The old claim that `SIGCOMP2011` lacks the channel, costing the branch 84 of
-  its 124 writers, was wrong. That archive has no clock column, but it samples at
-  a fixed 200 Hz and records pen-up travel as `force = 0` — 20–36% of every file,
-  5–9 lifts per signature — which `load_sigcomp2011_file` drops. **The length of
-  the dropped run is the elapsed time.** So `dt` is a measured duration in both
-  corpora, not a constant that would merely tag which corpus a sample came from
-  (the failure recorded against padding SigComp with constant tilt). Verified
-  over all 5295 signatures: identical medians (0.1000) and only **0.364 pooled
-  sd** of separation between corpora.
-
-  Six seeds paired against a same-code control: **10.45% → 8.97%, t = 3.25**,
-  beating the shipped branch's 10.26%. `--attention` is independently worth 1.16
-  points, but the two **do not stack** (combined 9.53%, worse than `dt` alone) —
-  they recover the same information. See `SUMMARY.md` Part 9 §10.
-
-  Not shipped: it widens the capture contract from 3 channels to 4. A timestamp
-  is channel 3 of the standard 7 and every tablet emits it, so the Drift
-  Prevention ban — written for channels the hardware cannot deliver — arguably
-  does not apply. That call belongs to the user, not to an agent.
+  Experiments showed that pressure dropout degraded discrimination both on standard
+  inputs (10.26% vs 12.73% with dropout) and on pressure-blind inputs (20.32% vs 23.32%).
+  It lost on both inputs at once, so no robustness argument is left for it.
+  Turning it back on needs a measurement that beats these numbers, not an appeal
+  to robustness.
+- **Inference:** if no pressure sensor is available, impute `P = 1.0` and set the
+  degraded-mode flag in the GUI.
+- **Tilt (azimuth and altitude) is not used, even though it helps.** On SVC2004
+  Task 2 (40 writers, seed 42, 3-channel control 19.55% at K=10), adding azimuth
+  and altitude reached 11.17%, 8.38 points better. It is banned under Drift
+  Prevention because the target tablet may not report it: tilt is not confirmed
+  on the XPPen Deco 640 (flagged below), and the user decided to wait until the
+  tablet is bought. Do not build for tilt before then. `button` is almost always
+  1.0 and carries no information.
+- `dt` is the time between two sampled points. SigComp2011 has no clock column,
+  but it samples at a fixed 200 Hz and records pen-up travel as `force = 0`, which
+  `load_sigcomp2011_file` drops. The length of the dropped run is the elapsed
+  time, so `dt` is a real measured duration in both pen corpora, not a constant that
+  only tags which corpus a sample came from. Over all 5295 signatures the two
+  corpora have the same median `dt` (0.1000) and only 0.364 pooled sd of
+  separation. Over six paired
+  seeds, `dt` improved pooled EER from 10.45% to 8.97% (t = 3.25). Attention
+  pooling alone is worth 1.16 points, but the two **do not stack** (9.53% together, worse
+  than `dt` alone), because they recover the same information.
+- **Training reads SVC2004 and DeepSignDB as float32, and every scorer reads them
+  exactly.** float32 cannot hold every millisecond past 2^24 ms, and SVC2004's
+  clock runs to 7.5 x 10^7 ms, so on most of its files training sees 10 ms steps
+  as 8, 12 or 16 ms. That rounding is the only noise the shipped `dt` recipe
+  trains with, and the `dt` gain above depends on it: retrained on exact
+  timestamps over six paired seeds, the recipe reads 11.76% in-domain against
+  8.97% (worse on every seed), no better than `xyp`, and ±2 ms of explicit jitter
+  came within noise of 8.97% without passing its adoption rule.
+  `TEMPORAL_TRAIN_FLOAT32_PARSE` in `config/settings.py` holds the training read;
+  with it, seed 45 retrains to the shipped `temporal_lstm.pth` tensor for tensor.
+  Never turn it off without a six-seed retrain that beats these numbers. Scorers
+  keep the exact read, which is what the tablet sends;
+  `scripts/benchmark.py --float32-parse` exists only so
+  `tools/reproduce_release.py` can reproduce the releases scored before this
+  split.
 
 - **`supports_extra_channel()` in `src/data/parsers.py` is the single authority**
   on which corpus can supply which channel, and `build_writer_samples` raises
@@ -233,12 +259,16 @@ to the **4** channels the model takes — `X, Y, Pressure, dt`, i.e. `[L, 4]`.
 Widening the _captured_ contract beyond those four is banned under Drift
 Prevention. Deriving further features from them inside the model is not.
 
-**The contract moved from 3 to 4 on 2026-08-19.** `dt` was admitted because it is
-worth 1.49 pooled EER points at t = 3.25 over six paired seeds, and because a
-timestamp is channel 3 of the standard 7 that every digitizer already reports —
-the Drift Prevention ban exists for channels the hardware cannot deliver, which
-this is not. `src/capture/` is still unimplemented; whatever driver lands there
-must emit `[L, 4]`, and a 3-channel capture path will not feed a shipped model.
+**The temporal capture contract is 4 channels, `[L, 4]`:** `X, Y, Pressure, dt`.
+`dt` is worth 1.49 pooled EER points (t = 3.25 over six paired seeds), and a
+timestamp is one of the standard channels every digitizer already reports. Any
+driver must emit `[L, 4]`; a 3-channel capture path cannot feed a shipped model.
+`src/capture/tablet.py` (Windows, PyQt5 tablet events) emits `[L, 4]`, but nothing
+calls it yet and it cannot feed the model as written. It has three known bugs: it
+normalizes with its own placeholder instead of `parsers.normalize_trajectory()`,
+it does not resample to 100 Hz (see Device timing and pressure below), and it stops recording at the first pen lift, so a
+signature with several strokes keeps only the first one. Fix all three before
+connecting it to `verify()`.
 
 | Device channel          | Fate                                                                     |
 | ----------------------- | ------------------------------------------------------------------------ |
@@ -282,9 +312,9 @@ S_final = α · S_spatial + (1 − α) · S_temporal
 
 ## Capture Contract (for the capture and GUI layers)
 
-Moved here from the README on 2026-08-08: it is a contract between teams, not
-user documentation. Every rule below is a documented assumption the training data
-satisfies, so a violation puts the probe in a distribution the model never saw.
+This section defines the boundary contract between capture and verification modules.
+Every rule below represents a data distribution assumption guaranteed during training;
+violating these rules degrades verification accuracy.
 
 Both gates are **enforced in `verify()`** — a failing probe is dropped from
 fusion, not merely flagged. A single-branch verification whose only probe fails
@@ -320,11 +350,11 @@ Gate on these proxies, never on the file's DPI tag.
 
 ### Temporal gate — `trajectory_gate()`
 
-The capture layer **must call `parsers.normalize_trajectory()`**. Until
-2026-08-05 nothing checked, and the failure was silent *and* confident: on one
-SigComp writer the same signature scored **0.9370 → Genuine** normalized and
-**0.4888 → Forged** in raw tablet units — a genuine user rejected with no
-`degraded` flag and no error.
+The capture layer **must call `parsers.normalize_trajectory()`**. Nothing used to
+check this, and the failure was silent and confident: on one SigComp writer the
+same signature scored **0.9370 (Genuine)** when normalized and **0.4888 (Forged)**
+in raw tablet units. A genuine user was rejected with no `degraded` flag and no
+error.
 
 | gate | rule | constant |
 | --- | --- | --- |
@@ -340,24 +370,52 @@ scale, so no per-device configuration is needed. A flat `P = 1.0` **passes**:
 that is the legitimate pressure-blind device, reported as `degraded`, not
 rejected.
 
-**The width check is the one that bit.** Between the `dt` contract landing on
-2026-08-19 and 2026-08-31 the gate still required exactly 3 columns while the
-shipped weights required 4, so the temporal branch could not be reached through
-`verify()` at all: the parser emitted `[L, 4]`, `embed()` accepted it, and the
-gate refused it. A temporal-only call raised; a multimodal call silently dropped
-to spatial-only. Deriving the width from config rather than a literal is what
-prevents that recurring the next time the contract moves.
+**The width check is the one that failed before.** After the contract moved to 4
+channels, the gate still required exactly 3 columns while the shipped weights
+required 4. The temporal branch could not be reached through `verify()` at all:
+the parser emitted `[L, 4]`, `embed()` accepted it, and the gate refused it. A
+temporal-only call raised, and a multimodal call silently fell back to
+spatial-only. The gate now reads the width from `TEMPORAL_INPUT_FEATURES`, never
+from a literal, so the next contract change cannot break it the same way.
 
 ### Trajectory format
 
 | requirement | value |
 | --- | --- |
 | Shape | `[L, 4]` float32 — X, Y, Pressure, dt. Width follows `TEMPORAL_INPUT_FEATURES` |
-| Sample rate | **100 Hz** (10 ms). Faster devices must be decimated |
-| Pressure | scaled to [0, 1] by a **fixed device maximum**, never the file's own max |
+| Sample rate | **100 Hz** (10 ms). Resample by timestamp onto a 10 ms grid; never decimate by an integer factor |
+| Pressure | scaled to [0, 1] by the **maximum the device reports**, never 1023 by default and never the file's own max |
 | Pen-up samples | dropped (`P = 0`) |
 | X / Y | raw device units in; `normalize_trajectory` z-scores them per signature |
 | No pressure sensor | `P` imputes to 1.0 and `degraded` is set |
+
+### Device timing and pressure (for the capture team)
+
+Measured 2026-10-21 on e-BioSign DS1 (inside DeepSignDB): the same 65 people signed on
+five devices, so the device was the only thing that changed. Three of the devices sample at
+200 Hz, and each stamps time differently: one sends bursts of samples under a single
+timestamp, one has a millisecond counter that wraps every second, one is clean. Their
+pressure maxima were 833, 1023 and 511. Through integer decimation the model saw intervals
+of 0 to 32 ms instead of 10 ms. Repairing the clock and resampling by timestamp lowered pen
+EER by 0.9 to 2.8 points on four of the five devices; scaling pressure by each device's own
+maximum lowered it by up to 1.4 more. The rate itself mattered less: a 125 Hz device ended
+level with the 200 Hz ones, and only a 64 Hz device stayed worst. Matching specifications
+did not mean matching signals.
+
+Rules for `src/capture/`, for the XPPen and any later device:
+
+- Resample X, Y and P onto an exact 10 ms grid by timestamp (linear interpolation). Do not
+  decimate by an integer factor: that is exact only for a clean clock at a multiple of 100 Hz.
+- Repair the clock first. Unwrap a counter that wraps, spread samples that share one
+  timestamp evenly up to the next timestamp, and treat a backward step or a jump of more than
+  1 s as one sample period.
+- A grid point is pen-down only when its nearest real sample is pen-down and lies within two
+  sample periods. Otherwise it is pen-up and dropped.
+- Scale pressure by the maximum the driver reports for the device.
+- Enrol and verify on the same device model. References from one device scored probes from
+  another at 13 to 42% EER even after every repair (24 to 69% before).
+- On the first XPPen recordings, log the raw timestamp intervals and the pressure maximum, and
+  check them against these rules before any threshold is set from them.
 
 ### High-Level Service Contract: `SignatureService` (for GUI & Backend Teams)
 
@@ -380,8 +438,91 @@ The verification engine provides three explicit operational modes:
 | **`"unimodal"`** | `probe_trajectory` + `reference_temporal`<br>*OR*<br>`probe_image` + `reference_spatial` | Runs single-branch verification (`spatial_only` or `temporal_only`). Flagged as `degraded: True` because it relies on one modality. |
 | **`"temporal-multi"`** | `probe_trajectory` + `reference_temporal` + `reference_spatial` | **Single-action digitizer verification.** The user signs once on the tablet. The engine extracts the temporal embedding, auto-renders the spatial stroke image ($1.8\text{ ms}$), extracts the spatial embedding, and evaluates late fusion. Routing: `multimodal`. |
 
-**A spatial probe is scored only against references of the same origin.** Measured 2026-09-18 on 20 paired SigComp2011 writers: rendered probe against rendered references 22.9% EER, scanned against scanned 24.5%, rendered probe against scanned references **57.4%**, scanned probe against rendered references **54.1%**, both worse than chance. A render sits about 3.6 times further from its own scan than two scans of one writer sit from each other, so across that gap the spatial score carries no identity. Enforced in `SignatureService.verify()` since 2026-09-19: every `enroll_*` helper returns `"spatial_origin"` (`"render"` from `enroll_from_tablet`, `"scan"` from `enroll_multimodal` and spatial `enroll_unimodal`), `verify()` requires `reference_spatial_origin` whenever spatial references are passed and raises rather than guessing, and on a mismatch it drops the spatial branch (routing `temporal_only`, `degraded: True`, a reason naming both origins); a unimodal spatial call with mismatched references raises. **The database therefore stores `spatial_origin` next to each spatial template, alongside `model_version`.** A user who must be verifiable both by tablet and by scan is enrolled through both paths and holds two spatial reference sets.
+**A spatial probe is scored only against references of the same origin.** Measured
+on 20 paired SigComp2011 writers: rendered probe against rendered references 22.9%
+EER, scanned against scanned 24.5%, rendered probe against scanned references
+**57.4%**, scanned probe against rendered references **54.1%**. The last two are
+worse than chance. A render sits about 3.6 times further from its own scan than
+two scans of one writer sit from each other, so across that gap the spatial score
+says nothing about identity. `SignatureService.verify()` enforces this. Every
+`enroll_*` helper returns `"spatial_origin"` (`"render"` from `enroll_from_tablet`,
+`"scan"` from `enroll_multimodal` and spatial `enroll_unimodal`). `verify()`
+requires `reference_spatial_origin` whenever spatial references are passed, and
+raises instead of guessing. On a mismatch it drops the spatial branch (routing
+`temporal_only`, `degraded: True`, and a reason naming both origins). A unimodal
+spatial call with mismatched references raises. **The database therefore stores
+`spatial_origin` next to each spatial template, with `model_version`.** A user who
+must be verified both by tablet and by scan enrolls through both paths and holds
+two spatial reference sets.
 | **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
+
+**Several signings at verification (a toggle for the GUI).** `config.settings.VERIFICATION_SIGNINGS`
+(default 1) is how many signings of each kind the app asks for at verification; the GUI may
+offer 1 or 2 as an option. Pass them as lists: `probe_trajectory=[t1, t2]`,
+`probe_image=[img1, img2]`, in every mode. Each branch scores the **mean** of its signings
+against the references, and the thresholds are unchanged. Every signing must pass its input
+gate; if one fails, that branch is dropped exactly as a failed single probe is (`degraded`,
+with `"<branch>, signing <n>: ..."` in `reasons`), so ask for that signing again. Never
+accept on the better of two signings: a forger would get two tries. Measured 2026-10-21, pen,
+K = 5, 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06%
+to 13.70% a session later and from 8.42% to 6.04% at the same sitting.
+
+**Step-up verification (a contract for the GUI team; off until the GUI handles it).** With
+`config.settings.VERIFICATION_STEP_UP = True`, a verification that fuses paper and tablet
+(routing `multimodal`) can return a third decision, `SIGN_AGAIN` (`"Sign again"`, import it
+from `src.verification`), besides `"Genuine"` and `"Forged"`. The flow:
+
+1. Ask for one signing of each kind and call `service.verify()` as today.
+2. On `"Genuine"` or `"Forged"`, stop: the verdict is final.
+3. On `"Sign again"`, keep the first signings, ask for one more signing of each kind, and call
+   `service.verify()` again with both as lists, first signing first:
+   `probe_image=[img1, img2]`, `probe_trajectory=[t1, t2]`. That call returns only `"Genuine"`
+   or `"Forged"`, and its verdict is final.
+
+Rules:
+
+- Never ask a third time. Under step-up, `verify()` raises on more than two signings of a
+  kind, and on different paper and tablet counts.
+- On `"Sign again"`, show a neutral request to sign once more. Never show the score or say how
+  close the signing was: a forger would learn how near they came.
+- Log one verification event per visit, with its final verdict; `"Sign again"` is not a verdict.
+  Today `src/gui/verification.py` (around line 150) styles every decision other than `"Genuine"`
+  as a rejection and logs it, and `src/gui/dashboard.py` counts `"Genuine"` events: change both
+  before turning the setting on.
+- A signing that fails its input gate is a capture retry, as in the rule above, not a step. If a
+  kind is dropped, the other kind decides alone at its own threshold, with no step-up.
+- Keep `VERIFICATION_SIGNINGS = 1` while step-up is on. It applies to fused decisions only,
+  `temporal-multi` included (its scan-calibrated thresholds stand in there as
+  `DECISION_THRESHOLD` already does); pen-only and scan-only verification keep their single
+  thresholds.
+
+Measured on 132 BiosecurID-SONOF writers three sessions after enrolment, with the three
+thresholds in `config/settings.py` calibrated for forgers who repeat their first attempt (the
+worst case for false accepts): forgeries passed stay at 5% over both steps. Of the signers asked
+again, 36.5% of genuine signers pass and under 1% of forgers. Overall 11.4% of genuine signers are
+refused against 15.7% for one signing at the same 5%, and 18% of them sign twice. Not measured: a
+forger who tries harder after being asked again.
+
+**Adding confirmed signings to the references (for the database and GUI teams).** A person's
+signature drifts over months, and references from one sitting fall behind it: on 132
+BiosecurID-SONOF writers enrolled at one sitting, the product refused 19.5% of genuine signers
+three sessions later at the shipped threshold, against 4.4% at the same sitting. References
+from several occasions follow the drift. After a verification that was accepted **and** in
+which the employee confirmed the person's identity, append that visit's embeddings (from the
+same `verify()` inputs, re-embedded with `enroll_*`) to the person's stored references. The
+model side needs no change: `verify()` takes any number of references. Measured on SONOF:
+references from three occasions lowered the fused EER from 8.38% to 6.68%, and adding accepted
+signatures lowered FRR from 13.90% to 8.07% while FAR at the same threshold rose from 4.57% to
+6.31%.
+
+- Add only results with `decision == "Genuine"`, `degraded == False`, and the employee's
+  confirmation. Never add a rejected, degraded or unconfirmed signing: an added forgery would
+  stay in the references.
+- Store embeddings only, as at enrolment, with the date and `spatial_origin` of each one.
+- Cap the set per modality (the measured arms held 6 to 8) and drop the oldest added signing
+  first. The cap is not measured beyond that.
+- This does not help the first visit after enrolment, which still faces the whole gap; it helps
+  every visit after a confirmed one.
 
 **Returns:**
 ```python
@@ -495,6 +636,8 @@ cryptography, matplotlib, scikit-learn, Pillow, sqlite3 (stdlib)
 | `src/gui/`      | PyQt5 application UI, user interaction                  | Direct model training, database schema  |
 | `scripts/`      | Training and evaluation entry points                    | Core library logic (import from `src/`) |
 | `config/`       | Centralized hyperparameters and constants               | Runtime logic                           |
+| `assets/screenshots/` | Hand-made screenshots shown in the README, for every team | Generated figures. Never put screenshots in `docs/` (gitignored) |
+| `results/`      | Figures written by code through `RESULTS_DIR`           | Hand-made images                        |
 
 ---
 
@@ -511,25 +654,23 @@ Scopes: models, data, database, capture, gui, config, scripts
 
 ---
 
-## Run-to-run spread: do not call a sub-point difference an improvement
+## Run-to-run variance and significance testing
 
-**The noise floor is per branch. They are not close. Never carry one to the other.**
+**Each branch has its own noise floor, and they are far apart. Never use one branch's number for the other.**
 
-### Spatial — roughly 0.7 EER points
+### Spatial branch (~0.7 EER points)
 
-**Measured 2026-08-09.** The same spatial configuration (margin 2.0), same writer
-split, seeds 42 and 43, scored **8.59%** and **9.27%** pooled. Bengali swung 1.7
-points between the two.
+The same spatial configuration on the same writer split, with seeds 42 and 43,
+scored 8.59% and 9.27% pooled. Bengali moved 1.7 points between the two.
+**Before claiming a spatial arm beat another**, the gap must be more than one
+point, or the arm must run with two seeds and the same `--split-seed`, so both are
+scored on the same held-out writers.
 
-Every one of these earlier "improvements" is inside it and none is individually
-proven: compact to wide (0.53), wide to augment+LR (0.55), augment+LR to pair
-diversity (0.65), pair diversity to random impostors (0.48). The cumulative
-12.31% to 8.59% is real; the individual steps are not.
+### Temporal branch (~2.6 EER points pooled)
 
-### Temporal — roughly **2.6 EER points pooled**, and **3.5 on sigcomp_Dutch**
-
-**Measured 2026-08-10.** The same temporal configuration, `--split-seed 42` so the
-held-out writers are identical, training seeds 42/43/44:
+The temporal branch trains on 62 writers against about 300 for spatial, so its
+spread between seeds is much wider. Same configuration, `--split-seed 42`, training
+seeds 42, 43 and 44:
 
 | seed | pooled | svc | Dutch | Chinese |
 | --- | --- | --- | --- | --- |
@@ -538,50 +679,26 @@ held-out writers are identical, training seeds 42/43/44:
 | 44 | 12.18% | 16.95% | 7.72% | 7.14% |
 | **range** | **2.57** | 1.10 | **3.48** | 1.24 |
 
-The temporal branch trains on **62 writers** against spatial's 301, and tests
-sigcomp_Dutch on 15, so it is far noisier. The 0.7 figure was measured on spatial
-and **was wrongly applied to twelve temporal arms on 2026-08-10** before this was
-checked; most of those arms were ranked inside noise and their verdicts do not
-stand. A single temporal run at 9.61% is a lucky draw from a distribution whose
-mean is about **10.9%** — which also makes the shipped 10.26% an ordinary draw
-rather than a special one.
+sigcomp_Dutch is tested on only 15 writers and is much noisier than the table
+shows: a six-seed control spans **6.90 points** there (3.42% to 10.32%). Treat any
+Dutch-only claim under about 5 points as unmeasurable.
 
-**Before claiming any temporal arm beat another (revised 2026-08-19):** run
-**six seeds, paired by seed, against a control re-run under current code.**
+**Before claiming a temporal arm beat another**, run **six seeds, paired by seed,
+against a control re-run under current code.**
 
-Three seeds is not enough, and the "3 points or 3 seeds" rule above did real
-damage. On 2026-08-19 it produced three wrong readings on a single arm — a
-claimed variance collapse (F = 42.6 at three seeds, F = 1.20 at six), a claimed
-Chinese regression (+1.29, which vanished to −0.01), and a dismissal of a Dutch
-effect that turned out to be real in variance. Only the pooled result survived,
-and it *grew* with more seeds. Worse, the rule had already caused two genuine
-~1.2–1.5 point effects to be rejected: `dt`, and attention pooling, which was
-deleted from the codebase outright on a 1.12-point gap.
-
-Two further corrections to the table above:
-
-- **sigcomp_Dutch is much noisier than 3.48.** A 6-seed control spans **6.90
-  points** there (3.42% to 10.32%). Treat any Dutch-only claim under ~5 points as
-  unmeasurable.
-- **A seed is reproducible under identical code and data; a different number
-  means something else changed.** Seed 42 scored 9.61% on 2026-08-10 and 10.62%
-  on 2026-08-19 because the recipe moved between those sessions, not because the
-  GPU did: on 2026-09-20 the shipped temporal seeds retrained a month later
-  matched their weights tensor for tensor. The spatial branch did not reproduce
-  until 2026-09-21 (the adaptive avg/max pool CUDA backward used atomic adds;
-  replaced by sliced pools in `src/models/siamese.py`), and `scripts/train.py`
-  now sets `torch.use_deterministic_algorithms(True)` so any future
-  non-deterministic kernel raises instead of drifting. The rule stands for the
-  original reason: **never compare a new arm against numbers recorded in an
-  earlier session**; re-run the control under current code, because the seed
-  spread (about 0.7 points) is real even when each seed is a fixed point.
-
-Runs cost ~12 minutes each with early stopping, so six seeds is ~75 minutes.
-There is no longer a cost argument for three.
-
-**Before claiming any spatial arm beat another:** the gap must exceed one point, or
-the arm must be run at two seeds with `--split-seed` held fixed so the comparison
-is on identical held-out writers.
+- Three seeds is not enough. At three seeds one arm gave three wrong readings at
+  once (a variance drop of F = 42.6 that was F = 1.20 at six seeds, and a Chinese
+  regression that vanished). The same rule had earlier rejected two real effects
+  of 1.2 to 1.5 points: `dt`, and attention pooling, which was deleted from the
+  code on a 1.12-point gap.
+- Never compare a new arm against numbers from an earlier session. Re-run the
+  control under the current code.
+- `scripts/train.py` sets `torch.use_deterministic_algorithms(True)`, so a
+  non-deterministic kernel raises an error instead of silently changing results. A
+  seed is reproducible under the same code and data, but the spread between seeds
+  (about 0.7 points) is still real.
+- A run takes about 12 minutes with early stopping, so six seeds is about 75
+  minutes. There is no cost argument for three.
 
 ## Evaluation Protocol
 
@@ -597,10 +714,8 @@ is on identical held-out writers.
 
 ### Two thresholding protocols — never mix them
 
-Every EER here can be computed two ways, and they are **different measurements**
-that differ by 2-3x on the same model. Added 2026-08-18, after a comparison
-against published SVC2004 numbers turned out to be comparing protocols rather
-than models.
+Equal Error Rate (EER) can be computed under two standard protocols, which answer
+different questions and yield substantially different numbers on the same model:
 
 | protocol | how | what it answers |
 | --- | --- | --- |
@@ -653,8 +768,8 @@ uniformity would have halved the apparent pen speed for 180 of 376 sampled files
 
 ### Licensed Datasets
 
-Some corpora are held under a signed agreement rather than published. DeepSignDB
-is the first. For any such dataset:
+Some corpora are held under a signed agreement rather than published: DeepSignDB
+and BiosecurID-SONOF. For any such dataset:
 
 - **Never commit it, nor anything derived from it** — no signature files, no
   cached features, no embedding dumps. `data/` being gitignored is the safety net,
@@ -663,12 +778,13 @@ is the first. For any such dataset:
   whitelist allows that specific user. DeepSignDB permits only `u1010`, `u1013`,
   `u1028` (Development) and `u0103`, `u0145` (Evaluation).
 - **Carry its required citations** into anything public. DeepSignDB clause 4.5
-  names four, listed under ⚖ in the README bibliography.
+  names four, listed under ⚖ in the README bibliography. BiosecurID-SONOF clause
+  4.4 names one (Galbally et al., Pattern Recognition 48, 2015).
 - **Treat derived weights as research-only.** The published release weights are
   trained on open corpora; licensed-data weights stay local. See the README's
   Model Weights section.
-- **Record the expiry.** DeepSignDB's agreement runs to 25 July 2028, after which
-  all copies are destroyed.
+- **Record the expiry.** DeepSignDB's agreement runs to 25 July 2028 and
+  BiosecurID-SONOF's to 14 October 2028, after which all copies are destroyed.
 
 The clause-by-clause reading lives in DATASET_LICENSES.md. This is the
 operational summary; that file is the authority if the two ever disagree.
@@ -682,22 +798,23 @@ difference in EER a direct measurement of what pressure contributes.
 
 | Run              | Dataset              | Channel 3                                        | Pressure dropout                                     | Role                                                                                        |
 | ---------------- | -------------------- | ------------------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **A — baseline** | `data/svc2004_task1` | `P = 1.0` imputed (4-col source)                 | Disabled — it is a no-op when every P is already 1.0 | Pressure-blind control. Also the honest lower bound for any device that reports no pressure |
-| **B — headline** | `data/svc2004_task2` | Real pressure, scaled to `[0, 1]` (7-col source) | **Active at `PRESSURE_DROPOUT_RATE`**                | The shipped temporal model — matches the capture device's channel set                       |
+| **A — baseline** | `data/svc2004_task1` | `P = 1.0` imputed (4-col source)                 | Off (it does nothing when every P is already 1.0)    | Pressure-blind control. Also the honest lower bound for any device that reports no pressure |
+| **B — headline** | `data/svc2004_task2` | Real pressure, scaled to `[0, 1]` (7-col source) | **Off** (`PRESSURE_DROPOUT_RATE = 0`), measured harmful | The shipped temporal model — matches the capture device's channel set                       |
 
 Rules:
 
 - **Run B is the deployed model.** Run A exists to quantify the delta and to
   bound degraded-mode performance; it is never the shipped weights.
-- **Both runs were executed 2026-07-29** on the same 20/10/10 writer split,
-  seed 42, K=5: Run A (pressure-blind) **23.62% ± 2.18**, Run B (real pressure)
-  **21.32% ± 1.50**. Pressure is worth roughly 2.3 EER points, though on 10 test
-  writers that sits near one standard deviation — directionally consistent at
-  K=10 (22.02% vs 19.55%) but not a tight measurement.
+- Both runs were measured on the same 20/10/10 writer split (seed 42, K=5): Run A
+  (pressure-blind) **23.62% ± 2.18**, Run B (real pressure) **21.32% ± 1.50**.
+  Pressure is worth about 2.3 EER points, but with only 10 test writers that is
+  close to one standard deviation. The direction is the same at K=10 (22.02% vs
+  19.55%), but it is not a precise measurement.
 - Both runs use the **same `--seed`**, so the writer split is identical and the
   two EERs are directly comparable. A different seed invalidates the comparison.
 - Report both EERs side by side. Do **not** report only the better number.
-- Pressure dropout stays on for Run B. It is what keeps Run B usable when a
-  device reports no pressure at inference — without it, the degraded path falls
-  outside the model's learned distribution.
+- Pressure dropout is off for Run B too. It was meant to keep Run B usable on a
+  device with no pressure, but it lost even on that input (pressure-blind EER
+  went from 23.32% to 20.32% when it was removed; see Temporal Branch above). A
+  device without pressure gets a flat `P = 1.0` and the `degraded` flag instead.
 - Weights are written to distinct filenames so Run A cannot overwrite Run B.

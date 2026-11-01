@@ -328,6 +328,181 @@ class TestVerify:
         os.unlink(path)
 
 
+class TestSeveralSignings:
+    """
+    `VERIFICATION_SIGNINGS` > 1: the app asks for several signings of each kind and
+    `verify()` scores their mean. Measured 2026-10-21 on BiosecureDS2 (140 writers,
+    K = 5, references from one session): two signings took the pen EER from 16.06% to
+    13.70% a session later and from 8.42% to 6.04% at the same sitting. At a fixed
+    threshold averaging can only lower FAR, which is why the thresholds are shared.
+    """
+
+    def _temporal(self):
+        model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
+                                embedding_dim=128).eval()
+        references = [embed(model, _valid_trajectory(seed=1), "temporal")]
+        return model, references, _valid_trajectory(seed=2), _valid_trajectory(seed=3)
+
+    def test_the_score_is_the_mean_of_the_signings(self):
+        model, references, first, second = self._temporal()
+        one = verify(temporal=(model, references, first))["confidence"]
+        two = verify(temporal=(model, references, second))["confidence"]
+        assert one != pytest.approx(two), "the two signings must score differently"
+
+        both = verify(temporal=(model, references, [first, second]))
+        assert both["confidence"] == pytest.approx((one + two) / 2)
+
+    def test_one_signing_in_a_list_matches_a_single_probe(self):
+        model, references, first, _ = self._temporal()
+        assert (verify(temporal=(model, references, [first]))
+                == verify(temporal=(model, references, first)))
+
+    def test_a_failed_signing_drops_its_whole_branch(self):
+        """
+        Averaging only the signings that pass would let a forger hand in one
+        careful forgery and one scribble and be scored on the forgery alone.
+        """
+        smodel = SpatialSiamese(embedding_dim=512).eval()
+        good, bad = _sharp_signature_image(), _blank_image()
+        srefs = [embed(smodel, good, "spatial")]
+        tmodel, trefs, first, second = self._temporal()
+
+        result = verify(spatial=(smodel, srefs, [good, bad]),
+                        temporal=(tmodel, trefs, [first, second]))
+
+        assert result["routing"] == "temporal_only"
+        assert result["degraded"] is True
+        assert any("signing 2" in r for r in result["reasons"])
+        os.unlink(good)
+        os.unlink(bad)
+
+    def test_an_empty_list_of_signings_raises(self):
+        model, references, _, _ = self._temporal()
+        with pytest.raises(ValueError, match="at least one signing"):
+            verify(temporal=(model, references, []))
+
+    def test_rendered_spatial_probes_follow_several_trajectories(self):
+        smodel = SpatialSiamese(embedding_dim=512).eval()
+        path = _sharp_signature_image()
+        srefs = [embed(smodel, path, "spatial")]
+        tmodel, trefs, first, second = self._temporal()
+
+        result = verify(spatial=(smodel, srefs, None),
+                        temporal=(tmodel, trefs, [first, second]),
+                        auto_render_spatial=True)
+
+        assert result["routing"] == "multimodal"
+        os.unlink(path)
+
+    def test_the_default_is_one_signing(self):
+        from config.settings import VERIFICATION_SIGNINGS
+        assert VERIFICATION_SIGNINGS == 1
+
+
+class TestStepUp:
+    """
+    Step-up verification (`VERIFICATION_STEP_UP`): one signing of each kind first. A fused
+    score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is rejected, and
+    anything between asks for one more signing of each kind, whose mean with the first must
+    reach STEP_UP_TWO. Measured on 132 BiosecurID-SONOF writers three sessions after
+    enrolment: 11.4% of genuine signers refused at 5% of forgeries passed, against 15.7% for
+    one signing; of those asked again, 36.5% of genuine signers pass and under 1% of forgers.
+    """
+
+    @staticmethod
+    def _reference_at(probe_embedding, target):
+        # S = 1 / (1 + d)  ->  d = 1/S - 1, placed on a single axis.
+        offset = np.zeros_like(probe_embedding)
+        offset[0] = 1.0 / target - 1.0
+        return [probe_embedding + offset]
+
+    def _setup(self, target):
+        """Both branches score `target`, so the fused score is `target` as well."""
+        smodel = SpatialSiamese(embedding_dim=512).eval()
+        tmodel = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
+        path, trajectory = _sharp_signature_image(), _valid_trajectory(seed=2)
+        spatial = (smodel, self._reference_at(embed(smodel, path, "spatial"), target), path)
+        temporal = (tmodel, self._reference_at(embed(tmodel, trajectory, "temporal"), target), trajectory)
+        return spatial, temporal
+
+    def _verify(self, target, signings=1, step_up=True):
+        (smodel, srefs, path), (tmodel, trefs, trajectory) = self._setup(target)
+        image = path if signings == 1 else [path] * signings
+        tablet = trajectory if signings == 1 else [trajectory] * signings
+        try:
+            return verify(spatial=(smodel, srefs, image), temporal=(tmodel, trefs, tablet),
+                          step_up=step_up)
+        finally:
+            os.unlink(path)
+
+    def test_a_first_signing_too_close_to_call_asks_for_another(self):
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+        from src.verification import SIGN_AGAIN
+
+        result = self._verify((STEP_UP_REJECT + STEP_UP_ACCEPT) / 2)
+
+        assert result["decision"] == SIGN_AGAIN
+        assert result["routing"] == "multimodal"
+        assert any("one more signing" in r for r in result["reasons"])
+
+    def test_a_clear_first_signing_is_decided_at_once(self):
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+
+        assert self._verify(min(STEP_UP_ACCEPT + 0.02, 0.99))["decision"] == "Genuine"
+        assert self._verify(STEP_UP_REJECT / 2)["decision"] == "Forged"
+
+    def test_the_second_round_decides_the_mean_against_its_own_threshold(self):
+        # The score sits above STEP_UP_TWO but below both other bars: the one band where the
+        # first signing alone asks again and a plain two-signing verify() rejects. A literal
+        # would leave the band whenever a threshold is re-set, and the test would pass anyway.
+        from config.settings import DECISION_THRESHOLD, STEP_UP_ACCEPT, STEP_UP_REJECT, STEP_UP_TWO
+        from src.verification import SIGN_AGAIN
+        assert STEP_UP_REJECT < STEP_UP_TWO < min(STEP_UP_ACCEPT, DECISION_THRESHOLD)
+        target = (STEP_UP_TWO + min(STEP_UP_ACCEPT, DECISION_THRESHOLD)) / 2
+
+        assert self._verify(target)["decision"] == SIGN_AGAIN
+        assert self._verify(target, signings=2)["decision"] == "Genuine"
+        assert self._verify(target, signings=2, step_up=False)["decision"] == "Forged"
+        assert self._verify((STEP_UP_REJECT + STEP_UP_TWO) / 2, signings=2)["decision"] == "Forged"
+
+    def test_there_is_never_a_third_signing(self):
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+        with pytest.raises(ValueError, match="third"):
+            self._verify((STEP_UP_REJECT + STEP_UP_ACCEPT) / 2, signings=3)
+
+    def test_paper_and_tablet_need_the_same_number_of_signings(self):
+        (smodel, srefs, path), (tmodel, trefs, trajectory) = self._setup(0.6)
+        try:
+            with pytest.raises(ValueError, match="same number"):
+                verify(spatial=(smodel, srefs, path), temporal=(tmodel, trefs, [trajectory, trajectory]),
+                       step_up=True)
+        finally:
+            os.unlink(path)
+
+    def test_a_single_branch_keeps_its_own_threshold(self):
+        """The three thresholds were calibrated on fused scores only."""
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT
+        (_, _, path), temporal = self._setup((STEP_UP_REJECT + STEP_UP_ACCEPT) / 2)
+        os.unlink(path)
+
+        result = verify(temporal=temporal, step_up=True)
+
+        assert result["routing"] == "temporal_only"
+        assert result["decision"] in ("Genuine", "Forged")
+
+    def test_it_is_off_until_the_gui_handles_sign_again(self, monkeypatch):
+        import src.verification as verification
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT, VERIFICATION_SIGNINGS, VERIFICATION_STEP_UP
+        assert VERIFICATION_STEP_UP is False
+        if VERIFICATION_STEP_UP:
+            assert VERIFICATION_SIGNINGS == 1, "step-up starts from one signing of each kind"
+        target = (STEP_UP_REJECT + STEP_UP_ACCEPT) / 2
+
+        assert self._verify(target, step_up=None)["decision"] in ("Genuine", "Forged")
+        monkeypatch.setattr(verification, "VERIFICATION_STEP_UP", True)
+        assert self._verify(target, step_up=None)["decision"] == verification.SIGN_AGAIN
+
+
 def _embedded_writer(genuine, forged):
     return {"genuine": np.asarray(genuine, dtype=np.float32),
             "forged": np.asarray(forged, dtype=np.float32)}
@@ -463,9 +638,14 @@ class TestThresholdFollowsRouting:
         return raw
 
     def test_dropped_temporal_branch_does_not_move_the_spatial_verdict(self):
-        # 0.70 sits above SPATIAL_DECISION_THRESHOLD and below DECISION_THRESHOLD,
-        # which is the only band where the two disagree.
-        model, references, path = self._spatial_at_score(0.70)
+        # The score sits halfway between SPATIAL_DECISION_THRESHOLD and
+        # DECISION_THRESHOLD, the only band where the two disagree. A literal
+        # (0.70 once) leaves the band whenever either threshold is re-set, and the
+        # test then passes with the bug back in.
+        from config.settings import DECISION_THRESHOLD, SPATIAL_DECISION_THRESHOLD
+        assert SPATIAL_DECISION_THRESHOLD != DECISION_THRESHOLD
+        model, references, path = self._spatial_at_score(
+            (SPATIAL_DECISION_THRESHOLD + DECISION_THRESHOLD) / 2)
         temporal_model = TemporalSiamese(
             input_features=TEMPORAL_INPUT_FEATURES, embedding_dim=128).eval()
         dead_probe = self._rejected_trajectory()
@@ -528,8 +708,8 @@ class TestSpatialArrayInputsAreCanonicalized:
     """
 
     def _model(self):
-        from config.settings import MODEL_WEIGHTS_DIR
-        return load_model("spatial", os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+        from config.settings import SPATIAL_WEIGHTS_PATH
+        return load_model("spatial", SPATIAL_WEIGHTS_PATH)
 
     def test_raw_scan_array_matches_the_same_scan_on_disk(self):
         """

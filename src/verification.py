@@ -1,22 +1,11 @@
 """
 Integration Facade — Signature Verification System
 
-Primary operational abstraction linking backend inference models with application components.
-GUI views and database operations import directly from this layer, decoupling downstream consumers
-from tensor formatting, distance calculations, and model execution mechanics.
+This module provides the main application programming interface for signature
+verification and enrollment. It connects high-level application code (GUI and
+database services) with the underlying neural network models.
 
-Typical enrollment workflow (persisting embeddings only — ISO/IEC 24745:2022 standard):
-
-    model = load_model("spatial", "models/weights/spatial_cnn.pth")
-    blob = embedding_to_bytes(embed(model, "sig.png", "spatial"))   # 2048 bytes
-    # ... Database layer encrypts `blob` payload via AES-256-GCM prior to storage
-
-Typical verification workflow:
-
-    refs = [bytes_to_embedding(b) for b in stored_blobs]
-    result = verify(spatial=(model, refs, probe_path))
-    # {"decision": "Genuine", "confidence": 91.4,
-    #  "routing": "spatial_only", "degraded": True}
+Enrollment stores continuous embedding vectors in binary format (ISO/IEC 24745:2022).
 """
 
 import os
@@ -32,43 +21,38 @@ from config.settings import (
     TEMPORAL_DECISION_THRESHOLD,
     PRESSURE_IMPUTATION_VALUE,
     INFERENCE_NUM_THREADS,
+    SPATIAL_INPUT_SIZE,
+    TEMPORAL_INPUT_FEATURES,
+    VERIFICATION_STEP_UP,
+    STEP_UP_REJECT,
+    STEP_UP_ACCEPT,
+    STEP_UP_TWO,
 )
 from src.data.dataset import as_spatial_input, quality_gate, trajectory_gate
 from src.data.renderer import render_trajectory_to_image
 from src.models.siamese import FusionEngine, SpatialSiamese, TemporalSiamese
 
-# Vector representations are serialized as raw little-endian float32 arrays. 512-d spatial → 2048 B,
-# 128-d temporal → 512 B. Encrypted byte structures rely on this layout; altering data types invalidates stored templates.
+# Embeddings are stored as raw float32 arrays (512-d spatial = 2048 bytes, 128-d temporal = 512 bytes).
 EMBEDDING_DTYPE = np.float32
 
 
 def load_model(branch, weights_path, device="cpu"):
     """
-    Instantiate and initialize a trained model branch for evaluation.
+    Load a trained model checkpoint for inference.
 
-    Maps parameters to CPU by default to ensure GPU-trained weights evaluate cleanly
-    on CPU deployment environments. The returned model is set to `.eval()` mode.
+    Sets thread counts to prevent CPU contention and initializes the model in eval mode.
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights not found: {weights_path}")
 
-    # Bound the thread pools before any forward pass. Torch and OpenCV each size
-    # themselves to every logical CPU independently, which is fine on an idle box
-    # and costs 4-7x on a contended one. Set once at load, not per call.
     torch.set_num_threads(INFERENCE_NUM_THREADS)
     cv2.setNumThreads(INFERENCE_NUM_THREADS)
 
-    # `weights_only=True` refuses to unpickle arbitrary objects. These checkpoints
-    # are downloaded from Releases by the install instructions, so a plain
-    # `torch.load` would execute whatever a substituted .pth carried. Every
-    # artifact this repo ships is a plain tensor state_dict and loads unchanged.
     state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
 
     if branch == "spatial":
-        # Model architecture is reconstructed directly from checkpoint metadata to match original parameters.
         model = SpatialSiamese.from_state_dict(state_dict)
     elif branch == "temporal":
-        # Reconstruction reads channel parameters and state dict parameters from stored weights.
         model = TemporalSiamese.from_state_dict(state_dict)
     else:
         raise ValueError(f"Unknown branch '{branch}' — expected 'spatial' or 'temporal'")
@@ -78,15 +62,16 @@ def load_model(branch, weights_path, device="cpu"):
 
 def embed(model, sample, branch, device="cpu"):
     """
-    Transform raw input sample into continuous feature vector embedding.
+    Generate an embedding vector from an input signature sample.
 
     Args:
-        sample: Image file path for `spatial` branch, or normalized [L, 3] trajectory array for `temporal`.
-        branch: Modality identifier ('spatial' or 'temporal').
-        device: Target execution device.
+        model: Loaded PyTorch Siamese model or ensemble wrapper.
+        sample: Image path / array for spatial, or normalized trajectory for temporal.
+        branch: Modality name ('spatial' or 'temporal').
+        device: Execution device ('cpu' or 'cuda').
 
     Returns:
-        float32 numpy array — 512-d for spatial, 128-d for temporal.
+        Numpy float32 embedding vector.
     """
     if branch == "spatial":
         tensor = torch.from_numpy(_as_spatial_input(sample)).unsqueeze(0)
@@ -101,91 +86,36 @@ def embed(model, sample, branch, device="cpu"):
 
 def _as_spatial_input(sample):
     """
-    Bring a spatial sample to the model's [1, H, W] contract, or refuse it.
-
-    Thin serving-side wrapper over `src.data.dataset.as_spatial_input`, which
-    holds the rule and the reasoning. It is shared with the training loader on
-    purpose: two copies of "which kind of array is this" would drift, and a
-    train/serve disagreement about what an array means is invisible in every
-    number either side reports.
-
-    Three inputs are legitimate here and only one of them is already canonical:
-
-    * a path — read, resized and inverted by `preprocess_image`;
-    * a **raw scan array** (paper bright, ink dark, any size) — same treatment;
-    * a **rendered trajectory**, which `render_trajectory_to_image` already
-      emits at SPATIAL_INPUT_SIZE with inverted polarity, so it passes straight
-      through. Sending it through `preprocess_image` would invert it a second
-      time and hand the model a photographic negative.
-
-    A **raw** `[L, C]` trajectory is refused rather than rasterized on the
-    caller's behalf (`allow_trajectory=False`). `verify()` and the enrolment
-    helpers render explicitly, and AGENTS.md pins the image argument to a scan,
-    so accepting one silently here would widen the serving contract.
-
-    Anything else raises. Accepting it quietly is the defect this function
-    exists to close: `SpatialSiamese` pools adaptively, so a wrong-sized,
-    un-inverted uint8 scan yields a perfectly plausible 512-d embedding with no
-    exception — and enrolment then writes that template to the database. The
-    inversion alone is worth 4.86% to 0.00% EER on CEDAR, so a silent miss here
-    is not cosmetic.
+    Validate and format a spatial input sample into a [1, H, W] array.
+    Rejects raw trajectories to prevent unintended modality conversion.
     """
     return as_spatial_input(sample, allow_trajectory=False)
 
 
 def embedding_to_bytes(embedding):
-    """
-    Convert vector array representation into contiguous byte payload for encrypted storage.
-
-    Accepts numpy array or PyTorch tensor representations.
-    """
+    """Convert an embedding array or tensor to a contiguous binary bytes object."""
     if isinstance(embedding, torch.Tensor):
         embedding = embedding.detach().cpu().numpy()
     return np.ascontiguousarray(embedding, dtype=EMBEDDING_DTYPE).tobytes()
 
 
 def bytes_to_embedding(blob):
-    """
-    Reconstruct numpy feature vector from binary byte buffer.
-
-    Returns a writable array copy to prevent read-only buffer mutation errors.
-    """
+    """Reconstruct a float32 numpy embedding vector from a binary byte buffer."""
     return np.frombuffer(blob, dtype=EMBEDDING_DTYPE).copy()
 
 
 def similarity_from_distance(distance):
     """
-    Convert an L2 embedding distance into a bounded similarity score.
-
-    Uses reciprocal scaling S = 1 / (1 + d), mapping [0, inf) to (0, 1]. This
-    formula is part of the project contract and cannot be swapped for an exponential
-    or cosine form without recalibrating every enrolled reference in the database:
-    a stored template enrolled under one curve cannot match probes under another.
-
-    Fixed on 2026-08-18 (P-006): evaluate.py previously defined its own private
-    function whose reciprocal denominator held an extra factor of 2. The training
-    loss and the verification facade agreed with each other and disagree with
-    evaluate.py, so a model benchmarked at one reported threshold could never be
-    deployed with it. Single authority now lives here in src/verification.py.
-
-    Never subtract: 1.0 - distance / margin clips at margin and creates a hard floor
-    where all impostors beyond margin receive score 0.0, which destroys the ranking
-    information evaluate.py needs to sweep thresholds across the tail. Reciprocal
-    preserves ordering at every distance.
-
-    Never tune: `similarity_from_distance` is not a hyperparameter. Moving it moves
-    the scale every score is reported on, so a test score that 'improved' under a
-    calibrated threshold would have kept its old numeric value while silently
-    describing a different score distribution.
+    Convert Euclidean distance d into a similarity score S between 0.0 and 1.0.
+    Uses the reciprocal formula S = 1 / (1 + distance).
     """
     return 1.0 / (1.0 + distance)
 
 
 def _nearest_reference_score(references, probe_embedding):
     """
-    Compute similarity match score between probe embedding and enrolled references.
-
-    Evaluates minimum distance (nearest-reference matching) across registered templates.
+    Compute similarity between a probe embedding and a set of enrolled references.
+    Uses nearest-neighbor matching (minimum distance to enrolled templates).
     """
     if references is None or len(references) == 0:
         raise ValueError(
@@ -200,23 +130,15 @@ def _nearest_reference_score(references, probe_embedding):
 
 
 def _pressure_is_imputed(trajectory):
-    """Check whether input sequence uses flat imputed pressure values."""
+    """Check if the trajectory uses fixed constant pressure values."""
     trajectory = np.asarray(trajectory, dtype=np.float32)
     return bool(np.allclose(trajectory[:, 2], PRESSURE_IMPUTATION_VALUE))
 
 
 def _gate_enrollment_sample(sample, modality, index):
     """
-    Refuse an enrolment sample that `verify()` would refuse as a probe.
-
-    `verify()` gates every probe it scores, but the three `enroll_*` methods
-    called `embed()` directly and gated nothing, so a blank scan or a trajectory
-    still in raw device units became a stored template. A bad template is worse
-    than a bad probe: the probe is rejected once and the user retries, whereas
-    the template silently corrupts every future comparison against that identity,
-    and the diagnostic points at whatever probe happened to arrive rather than at
-    the reference it was measured against. `as_spatial_input` already rejected
-    grossly wrong *shapes*; nothing checked *content*.
+    Validate an enrollment sample against quality gates before storing it.
+    Prevents bad or corrupt references from entering the enrolled identity set.
     """
     if modality == "spatial":
         passed, details = quality_gate(sample)
@@ -232,20 +154,74 @@ def _gate_enrollment_sample(sample, modality, index):
             f"— recapture it. See the README's Capture Contract.")
 
 
-def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True):
+def _signings(probe, modality):
+    """One probe, or the list of signings of one kind the app collected (VERIFICATION_SIGNINGS)."""
+    probes = list(probe) if isinstance(probe, (list, tuple)) else [probe]
+    if not probes:
+        raise ValueError(f"{modality}: a list of probes needs at least one signing.")
+    return probes
+
+
+# The third decision of step-up verification (VERIFICATION_STEP_UP): the first signing was too
+# close to call, so the GUI asks for one more signing of each kind and calls verify() with both.
+SIGN_AGAIN = "Sign again"
+
+
+def _step_up_round(spatial_probes, temporal_probes):
+    """1 for the first signing of each kind, 2 for the first and the one asked for."""
+    if len(spatial_probes) != len(temporal_probes):
+        raise ValueError(
+            "Step-up verification needs the same number of paper and tablet signings; got "
+            f"{len(spatial_probes)} paper and {len(temporal_probes)} tablet.")
+    if len(spatial_probes) > 2:
+        raise ValueError(
+            "Step-up verification asks for one more signing at most, never a third; got "
+            f"{len(spatial_probes)} signings of each kind.")
+    return len(spatial_probes)
+
+
+def _branch_score(model, references, probe, modality, gate, fallback, device):
     """
-    Perform signature verification evaluating probe inputs against enrolled references.
+    Mean nearest-reference score over the signings, or None and the gate messages.
+
+    If any signing fails its gate the whole branch is dropped: averaging only the
+    signings that pass would let a forger hand in one careful forgery and one
+    scribble and be scored on the forgery alone.
+    """
+    probes = _signings(probe, modality)
+    errors = []
+    for index, sample in enumerate(probes):
+        passed, details = gate(sample)
+        if not passed:
+            label = modality if len(probes) == 1 else f"{modality}, signing {index + 1}"
+            errors.append(f"{label}: {details.get('error', fallback)}")
+    if errors:
+        return None, probes, errors
+    scores = [_nearest_reference_score(references, embed(model, sample, modality, device))
+              for sample in probes]
+    return float(np.mean(scores)), probes, []
+
+
+def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True,
+           step_up=None):
+    """
+    Verify a signature probe against enrolled reference templates.
 
     Args:
-        spatial: Optional tuple of (model, reference_embeddings, probe_image_path/array).
+        spatial: Optional tuple of (model, reference_embeddings, probe_image).
         temporal: Optional tuple of (model, reference_embeddings, probe_trajectory).
-        engine: FusionEngine instance for combining branch scores.
-        device: Execution device ('cpu').
-        auto_render_spatial: If True and spatial probe is absent while temporal trajectory
-            is present, auto-render the spatial stroke image from the trajectory.
+            Either probe may be a list of several signings of that kind; the branch
+            score is then their mean, and the same thresholds apply.
+        engine: Optional FusionEngine instance.
+        device: Device to run inference on.
+        auto_render_spatial: If True, renders temporal trajectory into image if spatial probe is missing.
+        step_up: Step-up verification; None reads VERIFICATION_STEP_UP. It applies to the
+            default fused decision only. One signing of each kind is accepted at
+            STEP_UP_ACCEPT, rejected below STEP_UP_REJECT, and anything between returns
+            SIGN_AGAIN; two signings of each kind are then decided at STEP_UP_TWO.
 
-    Returns dictionary containing verification verdict:
-        {"decision": str, "confidence": float, "routing": str, "degraded": bool}
+    Returns:
+        Dictionary with decision, confidence score, routing mode, and degraded flags.
     """
     if auto_render_spatial and spatial is not None and temporal is not None:
         s_model, s_references, *s_probe_parts = spatial
@@ -253,40 +229,36 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
         if s_probe is None:
             _, _, t_probe = temporal
             if t_probe is not None:
-                s_probe = render_trajectory_to_image(t_probe)
+                s_probe = ([render_trajectory_to_image(t) for t in t_probe]
+                           if isinstance(t_probe, (list, tuple))
+                           else render_trajectory_to_image(t_probe))
                 spatial = (s_model, s_references, s_probe)
 
     if spatial is None and temporal is None:
         raise ValueError("At least one modality must be provided to verify().")
+    if step_up is None:
+        step_up = VERIFICATION_STEP_UP
 
     spatial_score = None
     temporal_score = None
-    quality_failed = False
     pressure_imputed = False
     gate_errors = []
 
     if spatial is not None:
         model, references, probe = spatial
-        # Screen spatial image inputs against quality criteria before feature extraction.
-        passed, details = quality_gate(probe)
-        quality_failed = not passed
-        if not passed:
-            gate_errors.append(f"spatial: {details.get('error', 'failed the quality gate')}")
-        if passed:
-            spatial_score = _nearest_reference_score(
-                references, embed(model, probe, "spatial", device))
+        spatial_score, spatial_probes, errors = _branch_score(
+            model, references, probe, "spatial", quality_gate, "failed the quality gate", device)
+        gate_errors.extend(errors)
 
     if temporal is not None:
         model, references, probe = temporal
-        # Screen temporal trajectory points against normalization and sequence gates.
-        passed, details = trajectory_gate(probe)
-        quality_failed = quality_failed or not passed
-        if passed:
-            pressure_imputed = _pressure_is_imputed(probe)
-            temporal_score = _nearest_reference_score(
-                references, embed(model, probe, "temporal", device))
-        else:
-            gate_errors.append(f"temporal: {details.get('error', 'failed the input gate')}")
+        temporal_score, probes, errors = _branch_score(
+            model, references, probe, "temporal", trajectory_gate, "failed the input gate", device)
+        gate_errors.extend(errors)
+        if temporal_score is not None:
+            pressure_imputed = any(_pressure_is_imputed(sample) for sample in probes)
+
+    quality_failed = bool(gate_errors)
 
     if spatial_score is None and temporal_score is None:
         raise ValueError(
@@ -295,16 +267,14 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
             + "\n  ".join(gate_errors or ["no probe was supplied"])
             + "\nSee the README's Capture Contract.")
 
-    # Threshold follows the routing the gates actually produced, never the shape of
-    # the request. Selecting it up-front from which arguments were *passed* meant a
-    # probe that ended up scored `spatial_only` — because the trajectory failed its
-    # gate — was still compared against the fused DECISION_THRESHOLD. The fused bar
-    # is the highest of the three, so the error ran one way only: a genuine signer
-    # whose tablet timed out was rejected where the same image submitted alone was
-    # accepted, at identical reported confidence.
+    # Select operational threshold based on available modality routing.
+    step_up_round = None
     if engine is None:
         if spatial_score is not None and temporal_score is not None:
             threshold = DECISION_THRESHOLD
+            if step_up:
+                step_up_round = _step_up_round(spatial_probes, probes)
+                threshold = STEP_UP_ACCEPT if step_up_round == 1 else STEP_UP_TWO
         elif spatial_score is not None:
             threshold = SPATIAL_DECISION_THRESHOLD
         else:
@@ -313,15 +283,19 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
+    # Below STEP_UP_ACCEPT on a first signing: the same fused score against the floor.
+    if step_up_round == 1 and result["decision"] == "Forged":
+        floor = FusionEngine(alpha=ALPHA_DEFAULT, threshold=STEP_UP_REJECT)
+        if floor.fuse(spatial_score=spatial_score, temporal_score=temporal_score)["decision"] == "Genuine":
+            result["decision"] = SIGN_AGAIN
 
     if quality_failed:
         result["degraded"] = True
 
-    # `degraded: True` on its own cannot tell the GUI whether evidence was dropped
-    # for a blurry image, an undersized bounding box, an unnormalized trajectory or
-    # imputed pressure. The gate already produced that string; carry it out instead
-    # of discarding it on every path except total failure.
     result["reasons"] = list(gate_errors)
+    if result["decision"] == SIGN_AGAIN:
+        result["reasons"].append("step-up: the first signing is too close to call; ask for one more "
+                                 "signing of each kind and call verify() again with both")
     if pressure_imputed:
         result["reasons"].append("temporal: pressure imputed to "
                                  f"{PRESSURE_IMPUTATION_VALUE} — device reported none")
@@ -331,10 +305,7 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
 class TemporalEnsemble:
     """
-    Model wrapper ensembling multiple TemporalSiamese checkpoints.
-
-    Evaluates a trajectory across N models and returns their mean embedding.
-    Conforms to the `.encode(tensor)` interface expected by embed().
+    Ensemble wrapper that averages embeddings across multiple TemporalSiamese checkpoints.
     """
 
     def __init__(self, models: list):
@@ -343,7 +314,6 @@ class TemporalEnsemble:
     def encode(self, tensor: torch.Tensor) -> torch.Tensor:
         embs = [m.encode(tensor) for m in self.models]
         return torch.stack(embs, dim=0).mean(dim=0)
-
 
     def __len__(self) -> int:
         return len(self.models)
@@ -361,21 +331,8 @@ def load_temporal_ensemble(
     device: str = "cpu",
 ) -> TemporalEnsemble | None:
     """
-    Load temporal ensemble from multiple seed checkpoints if available.
-
-    If ensemble checkpoints are missing, return None and fall back to single model.
-    This makes the ensemble optional for CI testing and environments holding only
-    the public release weights.
-
-    Args:
-        temporal_lstm_path: Path to the shipped temporal_lstm.pth or weights directory.
-        ensemble_seeds: List or tuple of seed numbers for ensemble members
-            (defaults to TEMPORAL_ENSEMBLE_SEEDS from config.settings).
-        device: Target device ('cpu').
-
-    Returns:
-        TemporalEnsemble wrapper (usable both as a model wrapper and as a sequence of models)
-        if all ensemble checkpoints exist, None otherwise.
+    Load an ensemble of temporal checkpoints from multiple random seeds.
+    Returns None if any checkpoint file in the ensemble is missing.
     """
     from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
                                  TEMPORAL_ENSEMBLE_TEMPLATE)
@@ -395,7 +352,6 @@ def load_temporal_ensemble(
         for seed in seeds
     ]
     if not all(os.path.exists(p) for p in paths):
-        # Ensemble member missing — fall back to single shipped model
         return None
 
     models = [load_model("temporal", p, device=device) for p in paths]
@@ -404,27 +360,13 @@ def load_temporal_ensemble(
 
 class SignatureService:
     """
-    High-level operational service for Signature Verification and Enrollment.
+    Main service interface for signature enrollment and verification.
 
-    Designed for frontend (GUI) and backend (API/Database) developers to perform
-    enrollment and verification without handling raw PyTorch tensors, model loading,
-    or embedding byte serialization.
-
-    Supports three verification modes:
-      1. 'unimodal': Evaluates either an image probe OR a trajectory probe alone.
-      2. 'temporal-multi': Evaluates a digitizer trajectory by extracting dynamics
-         and auto-rendering the spatial stroke image, running full late fusion.
-      3. 'multimodal': Evaluates both an independent paper scan/photo AND a digitizer
-         trajectory under late fusion.
-
-    `use_temporal_ensemble=True` scores the temporal branch across the six `dt`
-    seeds and returns their mean embedding, which leaves the 128-d width and every
-    stored template unchanged. Measured on 120 unseen DeepSignDB writers under one
-    shared K=5 draw: 4.82% EER against 6.92% for a single member. (Averaging the
-    per-model scores instead reaches 4.53%, but that cannot be expressed through
-    the `.encode()` interface `embed()` calls.) Those numbers are threshold-free
-    EER on one draw and are NOT comparable to the calibrated 25-split figures in
-    SUMMARY.md; they establish the ordering of the arms, not an operating point.
+    Provides three operational verification modes:
+      1. unimodal: Verify using either an image probe OR a trajectory probe.
+      2. temporal-multi: Verify using a tablet trajectory by evaluating temporal
+         dynamics and auto-rendering the spatial stroke image for fusion.
+      3. multimodal: Verify using both a scanned image and a tablet trajectory.
     """
 
     def __init__(
@@ -434,10 +376,10 @@ class SignatureService:
         device: str = "cpu",
         use_temporal_ensemble: bool = False,
     ):
-        from config.settings import MODEL_WEIGHTS_DIR
+        from config.settings import SPATIAL_WEIGHTS_PATH, TEMPORAL_WEIGHTS_PATH
         self.device = device
-        self.spatial_weights = spatial_weights or os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
-        self.temporal_weights = temporal_weights or os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
+        self.spatial_weights = spatial_weights or SPATIAL_WEIGHTS_PATH
+        self.temporal_weights = temporal_weights or TEMPORAL_WEIGHTS_PATH
         self.use_temporal_ensemble = use_temporal_ensemble
         self._spatial_model = None
         self._temporal_model = None
@@ -457,19 +399,22 @@ class SignatureService:
                 self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
         return self._temporal_model
 
-    def _load_temporal_ensemble(self):
+    def warm_up(self) -> None:
         """
-        Load every ensemble member, or refuse.
+        Load both models and run a blank sample through each.
 
-        Falling back to the single model when a member is missing was the
-        original behaviour, and it fails in the worst direction: the caller asked
-        for an ensemble, got one model, and nothing said so. The member weights
-        are gitignored and absent from the v0.8.0 release, so on any machine
-        holding only the release that fallback is the *normal* path, not an edge
-        case — the service would quietly run at single-model accuracy while its
-        own flag claimed otherwise. Part 9 §12 records four serving defects with
-        exactly this shape.
+        Call it once when the app opens, on a background thread, so the first Enter
+        pays neither the model load nor the first forward pass's kernel setup.
+        Calling it again does not reload the models.
         """
+        width, height = SPATIAL_INPUT_SIZE
+        embed(self.spatial_model, np.zeros((1, height, width), dtype=np.float32),
+              "spatial", self.device)
+        embed(self.temporal_model, np.zeros((64, TEMPORAL_INPUT_FEATURES), dtype=np.float32),
+              "temporal", self.device)
+
+    def _load_temporal_ensemble(self):
+        """Load all temporal ensemble checkpoints or raise an error if any are missing."""
         from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
                                      TEMPORAL_ENSEMBLE_TEMPLATE)
 
@@ -500,7 +445,6 @@ class SignatureService:
                   "accident.")
         return ensemble
 
-
     def _ensure_embeddings(self, refs: list[bytes | np.ndarray] | None) -> list[np.ndarray]:
         if not refs:
             return []
@@ -514,21 +458,12 @@ class SignatureService:
 
     def enroll_from_tablet(self, trajectories: list[np.ndarray]) -> dict[str, list[bytes]]:
         """
-        Enroll a user who signs K times on a digitizer tablet (e.g. XPPen Deco 640).
-
-        Extracts 128-d temporal embeddings from trajectories, automatically renders
-        each stroke to a canonical 155x220 spatial image, and extracts 512-d spatial
-        embeddings.
-
-        Returns:
-            {"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}
-            ready for SQLite BLOB storage.
+        Enroll a user from tablet signature trajectories.
+        Generates both temporal embeddings and auto-rendered spatial embeddings.
         """
         if not trajectories:
             raise ValueError("No trajectories provided for enrollment.")
 
-        # Gate the whole batch first. Enrolling the samples that happened to
-        # precede a bad one leaves a half-built identity behind on the raise.
         for index, traj in enumerate(trajectories):
             _gate_enrollment_sample(traj, "temporal", index)
 
@@ -556,9 +491,6 @@ class SignatureService:
     ) -> dict[str, list[bytes]]:
         """
         Enroll a user with separate paper scans/photos and digitizer trajectories.
-
-        Returns:
-            {"spatial_embeddings": [bytes...], "temporal_embeddings": [bytes...]}
         """
         if len(images) != len(trajectories):
             raise ValueError(
@@ -592,9 +524,6 @@ class SignatureService:
     ) -> dict[str, list[bytes] | str]:
         """
         Enroll a user in a single modality ('spatial' or 'temporal').
-
-        Returns:
-            {"embeddings": [bytes...], "modality": modality}
         """
         if modality not in ("spatial", "temporal"):
             raise ValueError(f"Unknown modality '{modality}'. Expected 'spatial' or 'temporal'.")
@@ -621,6 +550,7 @@ class SignatureService:
         "they will be verified, or store both kinds of reference.")
 
     @classmethod
+
     def _checked_spatial_origin(cls, origin):
         if origin not in cls._SPATIAL_ORIGINS:
             raise ValueError(
@@ -632,7 +562,7 @@ class SignatureService:
         return origin
 
     def _temporal_only_after_origin_mismatch(self, ref_t, probe_trajectory, probe_origin, reference_origin):
-        """Score the temporal branch alone and say why the spatial branch was dropped."""
+        """Fall back to temporal verification when spatial reference origin does not match probe origin."""
         result = verify(
             temporal=(self.temporal_model, ref_t, probe_trajectory),
             device=self.device,
@@ -646,35 +576,26 @@ class SignatureService:
     def verify(
         self,
         mode: str,
-        probe_trajectory: np.ndarray | None = None,
-        probe_image: str | np.ndarray | None = None,
+        probe_trajectory: np.ndarray | list[np.ndarray] | None = None,
+        probe_image: str | np.ndarray | list[str | np.ndarray] | None = None,
         reference_spatial: list[bytes | np.ndarray] | None = None,
         reference_temporal: list[bytes | np.ndarray] | None = None,
         reference_spatial_origin: str | None = None,
     ) -> dict:
         """
-        Verify a signature probe against enrolled reference templates under the specified mode.
+        Verify a signature probe against enrolled reference templates.
 
         Args:
-            mode: 'unimodal', 'temporal-multi', or 'multimodal'.
-            probe_trajectory: Optional [L, 4] trajectory array (X, Y, P, dt).
-            probe_image: Optional image file path or numpy array.
-            reference_spatial: List of enrolled spatial reference templates (bytes or numpy).
-            reference_temporal: List of enrolled temporal reference templates (bytes or numpy).
-            reference_spatial_origin: How the spatial references were made, 'scan' or
-                'render'. Required whenever reference_spatial is used; every enroll_*
-                helper returns it as "spatial_origin", so store it with the templates
-                and pass it back. Never guessed: a spatial probe scored against
-                references of the other origin measured worse than chance (2026-09-18,
-                20 paired SigComp2011 writers: render probe vs scan references 57.4%
-                EER, scan probe vs render references 54.1%, against 22.9% and 24.5%
-                for matched pairs). On a mismatch the spatial branch is dropped and
-                the verdict is temporal-only with `degraded: True` and a reason; a
-                unimodal spatial call with mismatched references has no evidence left
-                and raises.
+            mode: Operational mode ('unimodal', 'temporal-multi', or 'multimodal').
+            probe_trajectory: Optional [L, 4] trajectory array (X, Y, P, dt), or a list
+                of them when the app asks for several signings (VERIFICATION_SIGNINGS).
+            probe_image: Optional image path or array, or a list of them.
+            reference_spatial: List of enrolled spatial reference templates.
+            reference_temporal: List of enrolled temporal reference templates.
+            reference_spatial_origin: Source type of spatial references ('scan' or 'render').
 
         Returns:
-            {"decision": "Genuine"|"Forged", "confidence": float, "routing": str, "degraded": bool, "reasons": list[str]}
+            Dictionary with verification decision, confidence percentage, routing, and degraded status.
         """
         ref_s = self._ensure_embeddings(reference_spatial)
         ref_t = self._ensure_embeddings(reference_temporal)
@@ -688,8 +609,6 @@ class SignatureService:
                 raise ValueError("Mode 'temporal-multi' requires both reference_temporal and reference_spatial.")
 
             if origin != "render":
-                # The probe will be a render of the tablet stroke; scanned references
-                # are a different image domain and the spatial score would be noise.
                 return self._temporal_only_after_origin_mismatch(
                     ref_t, probe_trajectory, probe_origin="render", reference_origin=origin)
             return verify(
@@ -739,4 +658,3 @@ class SignatureService:
 
         else:
             raise ValueError(f"Unknown mode '{mode}'. Expected 'unimodal', 'temporal-multi', or 'multimodal'.")
-

@@ -25,6 +25,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
+    SEED,
     ALPHA_GRID_STEP, TARGET_ACCURACY, TARGET_FAR, TARGET_FRR,
     BATCH_SIZE, NUM_WORKERS, RESULTS_DIR,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
@@ -650,7 +651,7 @@ def parse_args(argv=None):
                         help="Output directory for plots")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=SEED,
                         help="Must match the training seed to reproduce the same split")
     parser.add_argument("--split-ratios", type=float, nargs=3, default=None,
                         metavar=("TRAIN", "VAL", "TEST"),
@@ -792,16 +793,9 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
     """
     model = load_branch_model(branch, weights_path, device)
 
-    # τ is tuned on validation ONLY (AGENTS.md). Picking it on test would be
-    # reporting the best-case threshold rather than an honest operating point.
-    #
-    # It is tuned under the **enrolment** protocol, because that is what
-    # `src/verification.py` deploys. Tuning on pair scores — which this did until
-    # 2026-08-04 — puts τ below the deployed distribution: taking a minimum over
-    # K references shrinks every distance, genuine more than impostor, so the
-    # whole score distribution shifts up. At the old pair-tuned τ=0.7143 the
-    # deployed operating point was FAR 19.32%/FRR 2.65% spatial and
-    # FAR 25.00%/FRR 2.18% temporal — a system that barely rejected anything.
+    # τ is tuned on validation only. Picking it on test would report
+    # an overly optimistic threshold rather than a realistic operating point.
+    # It is tuned using the enrollment protocol to match production deployment.
     val_genuine, val_impostor = enrolled_split_scores(
         model, branch, writer_samples, val_ids, args, device, desc="val (tune τ)")
     _, threshold = compute_eer(val_genuine, val_impostor)
@@ -875,12 +869,8 @@ def main(argv=None):
     writer_samples = build_writer_samples(
         args.data_dir, None if channels in (None, "xyp") else channels)
 
-    # Re-derives the exact partition training used — same writer list, same seed,
-    # same ratios, same pinned holdout. The last two used to be unreachable here:
-    # this comment claimed to reproduce training's partition while reading the
-    # ratios straight from config and ignoring pin_holdout entirely, so a model
-    # trained with either flag was scored against a DIFFERENT split — quietly
-    # reporting EER over writers it had trained on.
+    # Re-derive the exact partition training used: same writer list, same seed,
+    # same ratios, and same holdout set.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
         TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
     if args.holdout_writers:
@@ -893,8 +883,7 @@ def main(argv=None):
 
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
-    # Refuse a partition the checkpoint was not trained under (Part 9 §27);
-    # checkpoints older than 2026-09-19 carry no record and are not checked.
+    # Ensure evaluation partition matches the checkpoint's split record.
     record = check_split_against_record(args.weights, train_ids, test_ids, max_gap_ms=MAX_GAP_MS)
     print("Split record: matches the checkpoint" if record else
           "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")

@@ -5,12 +5,12 @@ Read-only inspection script for signatures.db.
 Decrypts and prints every stored user, their reference embeddings
 (spatial/temporal), and the full audit log — for debugging only.
  
-Run from the same folder as your DatabaseManager module:
-    python view_database.py
+Run from the repository root:
+    python -m tools.view_database
 """
- 
+
 import sqlite3
-from backend.database import DatabaseManager
+from src.database.db_manager import DatabaseManager
  
  
 def print_section(title):
