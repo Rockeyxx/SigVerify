@@ -142,7 +142,14 @@ def make_sheet(path, dpi=300):
     for n, (t, b, l, r) in enumerate(sheet_boxes(h, w, margin=0.0), start=1):
         cv2.rectangle(img, (l + 10, t + 10), (r - 10, b - 10), (210, 210, 210), 2)
         cv2.putText(img, str(n), (l + 18, t + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (210, 210, 210), 2)
-    cv2.imwrite(str(path), img)
+    if str(path).lower().endswith(".pdf"):
+        # Front and back of one paper, each page exactly A4 at this DPI, with no margins, so
+        # the grid fills the page as split_sheet expects. Print two-sided, flip on long edge.
+        from PIL import Image
+        page = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        page.save(str(path), save_all=True, append_images=[page.copy()], resolution=dpi)
+    else:
+        cv2.imwrite(str(path), img)
 
 
 class CaptureSession(QWidget):
@@ -442,12 +449,15 @@ class CaptureSession(QWidget):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--make-sheet", metavar="PNG", help="write the printable paper sheet and exit")
+    ap.add_argument("--make-sheet", metavar="PNG|PDF",
+                    help="write the printable paper sheet and exit (.pdf: front and back, A4)")
     ap.add_argument("--root", default=INHOUSE_DIR, help="data folder (default: INHOUSE_DIR)")
     args = ap.parse_args()
     if args.make_sheet:
         make_sheet(args.make_sheet)
-        print(f"sheet written to {args.make_sheet}: print at 100% on A4, scan the full page")
+        two_sided = ", two-sided (flip on long edge)" if args.make_sheet.lower().endswith(".pdf") else ""
+        print(f"sheet written to {args.make_sheet}: print at 100% (actual size) on A4{two_sided}; "
+              "scan each full page, front first")
         return
     app = QApplication(sys.argv)
     window = CaptureSession(root=args.root)

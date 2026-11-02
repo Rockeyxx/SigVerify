@@ -250,3 +250,16 @@ def test_the_ink_crop_keeps_a_faint_broken_signature_and_drops_shadow_and_page_e
 def test_a_box_with_only_shadow_and_page_edge_has_no_signature():
     assert cs.ink_box(_phone_box(signature=False)) is None
     assert cs.ink_crop(_phone_box(signature=False)) is None
+
+
+def test_a_pdf_sheet_is_two_full_a4_pages_for_double_sided_printing(tmp_path):
+    import re
+    pdf = tmp_path / "sheet.pdf"
+    cs.make_sheet(pdf)
+    data = pdf.read_bytes()
+    assert data.startswith(b"%PDF")
+    boxes = [tuple(float(v) for v in m) for m in
+             re.findall(rb"/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]", data)]
+    assert len(boxes) == 2                                                   # front and back
+    for w, h in boxes:                                                       # A4 is 595 x 842 pt
+        assert abs(w - 595.3) < 1.5 and abs(h - 841.9) < 1.5                # the grid fills the page
