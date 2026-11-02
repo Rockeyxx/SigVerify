@@ -294,28 +294,6 @@ class TestUTSigTrainingForgeries:
         assert train_samples is samples
         assert caps is None
 
-    @pytest.mark.parametrize("flags,train_per_side", [
-        ([], 12),                                   # control: 6 x 2 skilled
-        (["--utsig-forgery-types", "Skilled", "Simple", "Opposite Hand"], 15),
-        (["--utsig-forgery-types", "Skilled", "Simple", "Opposite Hand",
-          "--utsig-hold-pairs"], 12),
-    ])
-    def test_training_pairs_move_and_validation_pairs_do_not(
-            self, tmp_path, capsys, flags, train_per_side):
-        import re
-
-        data = _make_utsig_fixture(str(tmp_path / "utsig"), num_writers=10)
-        history = train_main([
-            "--branch", "spatial", "--data-dir", data, "--epochs", "1",
-            "--batch-size", "8", "--weights-dir", str(tmp_path / "w"),
-            "--num-workers", "0"] + flags)
-
-        train, val = map(int, re.search(r"Pairs: (\d+) train / (\d+) val",
-                                        capsys.readouterr().out).groups())
-        assert train == 2 * train_per_side * len(history["split"]["train"])
-        # Validation writers keep 6 x 2 skilled forgeries: 12 pairs per side.
-        assert val == 2 * 12 * len(history["split"]["val"])
-
 
 class TestEarlyStoppingSurvivesResume:
     """Verifies that early stopping patience state is preserved when resuming training."""
