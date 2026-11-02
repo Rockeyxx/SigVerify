@@ -342,6 +342,7 @@ class TestEarlyStoppingSurvivesResume:
         # Saved after the stall was counted; a stale record resumes one epoch behind.
         assert state == {"counter": 1, "best_loss": 0.30}
 
+    @pytest.mark.slow  # real training loop; skipped by default, run in CI
     def test_main_hands_the_saved_counter_to_the_resumed_run(self, tmp_path):
         import torch
 

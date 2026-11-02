@@ -92,6 +92,7 @@ class TestTrainOnlyCorpus:
                            "--batch-size", "8", "--num-workers", "0",
                            "--weights-dir", str(tmp_path / name)] + extra)
 
+    @pytest.mark.slow  # real training loop; skipped by default, run in CI
     def test_listed_writers_join_training_and_the_base_split_does_not_move(self, tmp_path):
         sonof = _sonof_scans(str(tmp_path / "biosecurid_sonof"))
         base = self._run(tmp_path, "base", [])["split"]
