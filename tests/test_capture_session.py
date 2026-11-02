@@ -263,3 +263,20 @@ def test_a_pdf_sheet_is_two_full_a4_pages_for_double_sided_printing(tmp_path):
     assert len(boxes) == 2                                                   # front and back
     for w, h in boxes:                                                       # A4 is 595 x 842 pt
         assert abs(w - 595.3) < 1.5 and abs(h - 841.9) < 1.5                # the grid fills the page
+
+
+def test_choosing_a_box_shows_that_box_large_and_follows_replace_and_delete(app, tmp_path):
+    session = cs.CaptureSession(root=tmp_path)
+    session.start("P07", operator="op")
+    session.stage = "paper"
+    saved = session.save_paper([_inked_sheet(tmp_path)] * 2)
+    session.paper_list.setCurrentIndex(4)
+    assert session.shown == saved[4] and not session.selected.pixmap().isNull()
+    before = session.selected.pixmap().toImage()
+    new = tmp_path / "new.png"
+    cv2.imwrite(str(new), np.zeros((50, 80, 3), np.uint8))
+    session.replace_paper(saved[4], new)
+    assert session.shown == saved[4]                                        # selection kept
+    assert session.selected.pixmap().toImage() != before                    # and redrawn
+    session.delete_paper(saved[4])
+    assert session.paper_list.count() == len(saved) - 1 and session.shown == saved[5]

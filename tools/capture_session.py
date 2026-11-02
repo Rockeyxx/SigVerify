@@ -212,6 +212,10 @@ class CaptureSession(QWidget):
         for w in (self.paper_list, self.btn_delete, self.btn_replace, self.btn_undo):
             edit.addWidget(w)
         self.edit_widgets = (self.paper_list, self.btn_delete, self.btn_replace, self.btn_undo)
+        # The box chosen in paper_list, shown large (scan | ink crop) beside the labelled grid.
+        self.selected = QLabel()
+        self.shown = None
+        self.paper_list.currentIndexChanged.connect(self._show_selected)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -219,7 +223,10 @@ class CaptureSession(QWidget):
         layout.addWidget(self.capture)
         layout.addLayout(buttons)
         layout.addLayout(edit)
-        layout.addWidget(self.preview)
+        views = QHBoxLayout()
+        views.addWidget(self.preview)
+        views.addWidget(self.selected)
+        layout.addLayout(views)
         self._show_buttons()
 
     # --- flow ---------------------------------------------------------------
@@ -397,14 +404,39 @@ class CaptureSession(QWidget):
                 self._say(f"Not replaced: {exc}")
 
     def _refresh_paper(self):
-        """List and preview what the last paper import saved: the ink crop the model sees,
-        or the raw box where no signature was found."""
+        """List what the last paper import saved, keep the chosen box chosen, and redraw the
+        labelled grid and the large view of that box."""
+        keep = self.paper_list.currentIndex()
+        self.paper_list.blockSignals(True)
         self.paper_list.clear()
         self.paper_list.addItems([t[0].name for t in self.paper_saved])
-        crops = [cv2.imread(str(ink_path(t[0]) if ink_path(t[0]).exists() else t[0]))
-                 for t in self.paper_saved]
+        if self.paper_saved:
+            self.paper_list.setCurrentIndex(min(max(keep, 0), len(self.paper_saved) - 1))
+        self.paper_list.blockSignals(False)
+        self._show_selected(self.paper_list.currentIndex())
+
+    def _show_selected(self, i):
+        """Frame box i in the grid and show it large: the scan beside its ink crop."""
         self.preview.clear()
-        self._preview([c for c in crops if c is not None])
+        self.selected.clear()
+        self.shown = None
+        if not 0 <= i < len(self.paper_saved):
+            return
+        path = self.paper_saved[i][0]
+        self.shown = path
+        labels = [("copy" if role == "forgercopy" else f"a{attempt}" if role == "forgery"
+                   else f"{index:02d}") for _, role, index, attempt in self.paper_saved]
+        tiles = []
+        for p, *_ in self.paper_saved:
+            img = cv2.imread(str(ink_path(p) if ink_path(p).exists() else p))
+            tiles.append(img if img is not None else np.full((120, 240, 3), 255, np.uint8))
+        self._preview(tiles, labels, highlight=i)
+        raw = cv2.imread(str(path))
+        ink = cv2.imread(str(ink_path(path))) if ink_path(path).exists() else None
+        big = np.hstack([_tile(raw, 420, 260, "scan"),
+                         _tile(ink, 420, 260, "ink crop (model sees)" if ink is not None
+                               else "no signature found")])
+        self.selected.setPixmap(_pixmap(big))
 
     def _save_tablet(self, events, role, index="", forger=None, attempt=""):
         path = signature_path(self.root, self.participant, "tablet", role,
@@ -435,16 +467,40 @@ class CaptureSession(QWidget):
         for w in self.edit_widgets:
             w.setVisible(self.stage == "done" and bool(self.paper_saved))
 
-    def _preview(self, crops):
-        thumbs = [cv2.resize(c, (240, 120)) for c in crops]
-        if not thumbs:
+    def _preview(self, crops, labels=None, highlight=None):
+        """The grid of boxes, 4 per row, each labelled; the highlighted one framed in red."""
+        if not crops:
             return
+        labels = labels or [""] * len(crops)
+        thumbs = [_tile(c, 240, 120, text, frame=(n == highlight))
+                  for n, (c, text) in enumerate(zip(crops, labels))]
         while len(thumbs) % 4:
             thumbs.append(np.full_like(thumbs[0], 255))
         grid = np.vstack([np.hstack(thumbs[i:i + 4]) for i in range(0, len(thumbs), 4)])
-        rgb = np.ascontiguousarray(cv2.cvtColor(grid, cv2.COLOR_BGR2RGB))
-        image = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1], QImage.Format_RGB888)
-        self.preview.setPixmap(QPixmap.fromImage(image.copy()))
+        self.preview.setPixmap(_pixmap(grid))
+
+
+def _tile(image, width, height, text="", frame=False):
+    """image fitted into a white width x height tile (aspect kept), with a caption, and a red
+    frame when chosen. A missing image gives an empty tile."""
+    tile = np.full((height, width, 3), 255, np.uint8)
+    if image is not None:
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        scale = min((width - 8) / image.shape[1], (height - 28) / image.shape[0])
+        w, h = max(1, int(image.shape[1] * scale)), max(1, int(image.shape[0] * scale))
+        x, y = (width - w) // 2, 22 + (height - 22 - h) // 2
+        tile[y:y + h, x:x + w] = cv2.resize(image, (w, h), interpolation=cv2.INTER_AREA)
+    cv2.putText(tile, text, (6, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.rectangle(tile, (0, 0), (width - 1, height - 1), (0, 0, 255) if frame else (200, 200, 200),
+                  4 if frame else 1)
+    return tile
+
+
+def _pixmap(bgr):
+    rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    image = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1], QImage.Format_RGB888)
+    return QPixmap.fromImage(image.copy())
 
 
 def main():

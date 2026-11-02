@@ -489,21 +489,31 @@ the audit log.
 
 ### Signature Capture
 
-Full pen-down to pen-up signature capture implemented via
-`src/capture/tablet.py`, using PyQt5 Tablet Events on the XPPen Deco 640.
+`src/capture/tablet.py` records the XPPen Deco 640 through PyQt5 tablet events and turns each
+signature into the `[L, 4]` array (x, y, pressure, dt) defined in `AGENTS.md`.
 
-![Screen before signature](assets/screenshots/Screen_before_sign.png)
-![Screen After signature](assets/screenshots/Screen_after_sign.png)
-![Tablet capture result](assets/screenshots/Tablet_capture_result.png)
+`tools/capture_session.py` is the data collection app built on it. One volunteer, one sitting:
+3 practice signatures (not saved), 12 tablet signatures with a break after 6, then the paper
+sheet. Print the sheet with `python tools/capture_session.py --make-sheet sheet.pdf` (A4, actual
+size, two-sided). The scan is cut into one image per box. Every tablet event, with hover and
+tilt, is saved as CSV. Each paper box is saved in colour, with its ink crop beside it, and the
+operator can delete or replace a box before ending the session. Files go to `data/inhouse/`,
+one manifest row each.
 
+![Capture session, signing on the tablet (example signature)](assets/screenshots/capture_session_signing.png)
+![Capture session, paper import with the ink crops (example signature)](assets/screenshots/capture_session_paper.png)
 
-The captured trajectory passes both quality gates (pre- and
-post-normalization) and produces the final `[L, 4]` array —
-X, Y, Pressure, dt — matching the capture contract defined in
-`AGENTS.md`.
+One full session on Linux (Hyprland, Wayland), one signer:
 
-**Status:** Windows path complete and tested. Linux (Arch) path is
-pending.
+| Measure | Result |
+| --- | --- |
+| Tablet signatures passing the input gate | 12 of 12 |
+| Tablet report interval, median | 4.0 ms (250 Hz) |
+| Points per signature on the 10 ms grid | 60 to 70 |
+| Paper boxes whose ink crop holds the whole signature | 13 of 13 (phone scan of folded A4; faint strokes show small gaps in 4) |
+
+**Status:** tested on Linux with the tablet. Windows ran the earlier capture widget; the current
+capture path is not yet tested there.
 
 ## Standards & Compliance
 
