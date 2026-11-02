@@ -26,7 +26,7 @@ class TestSignatureService:
         x = (t * np.cos(t)).astype(np.float32)
         y = (t * np.sin(t)).astype(np.float32)
         p = (0.3 + 0.6 * (np.sin(t) ** 2)).astype(np.float32)
-        dt = np.full(num_points, 0.01, dtype=np.float32)
+        dt = np.full(num_points, 0.1, dtype=np.float32)   # 10 ms of the 100 ms clip
         x = (x - x.mean()) / (x.std() + 1e-6)
         y = (y - y.mean()) / (y.std() + 1e-6)
         return np.stack([x, y, p, dt], axis=1)

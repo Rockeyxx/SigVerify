@@ -93,7 +93,9 @@ def render_trajectory_to_image(trajectory, target_size=SPATIAL_INPUT_SIZE,
     if trajectory.ndim != 2 or len(trajectory) < 2:
         return canvas[np.newaxis, :, :].astype(np.float32)
 
-    x, y, p = trajectory[:, 0], trajectory[:, 1], trajectory[:, 2]
+    # Pen trajectories grow y upward (SVC2004, SigComp2011, and XPPen captures once capture
+    # flips them); image rows grow downward, so y is negated before mapping (ENG_REPORT A4).
+    x, y, p = trajectory[:, 0], -trajectory[:, 1], trajectory[:, 2]
     dt = trajectory[:, 3] if trajectory.shape[1] > 3 else None
 
     min_x, min_y = float(x.min()), float(y.min())

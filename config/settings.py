@@ -136,6 +136,8 @@ TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
 MIN_TRAJECTORY_POINTS = 10              # Trajectories below 10 points lack sufficient detail
 MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean threshold
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
+TRAJECTORY_DT_MEDIAN_TOLERANCE = 0.10   # Median dt may sit at most 10% off one 10 ms grid step
+CAPTURE_DEVICE_MODEL = "XP-Pen Deco 640"  # Enrol and verify on this one tablet model (F23, ENG_REPORT G4)
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
 # The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.

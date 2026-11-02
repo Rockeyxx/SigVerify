@@ -23,6 +23,7 @@ from src.data.dataset import (
     trajectory_gate,
     writer_independent_split,
 )
+from src.data.parsers import MAX_GAP_MS
 
 
 class TestTrajectoryGate:
@@ -49,6 +50,26 @@ class TestTrajectoryGate:
 
     def test_normalized_trajectory_passes(self):
         passed, details = trajectory_gate(self._normalized())
+        assert passed, details
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    @pytest.mark.parametrize("step_ms", [1.0, 12.0])
+    def test_dt_on_the_wrong_grid_is_rejected(self, step_ms):
+        """A 1 ms grid (old fixtures) and a 12 ms one (250 Hz decimated by 3) both sit
+        inside [0, 1]; only the median shows they are not the 10 ms grid."""
+        traj = self._normalized()
+        traj[:, 3] = step_ms / MAX_GAP_MS
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "dt median" in details["error"]
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    def test_pen_lifts_do_not_move_the_dt_median(self):
+        traj = self._normalized()
+        traj[::10, 3] = 1.0   # one clipped pen lift every 10 samples
+        passed, details = trajectory_gate(traj)
         assert passed, details
 
     def test_raw_device_units_are_rejected(self):

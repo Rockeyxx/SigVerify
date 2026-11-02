@@ -60,6 +60,19 @@ class TestTrajectoryRenderer:
         assert passed, f"Rendered image failed quality gate: {details}"
 
 
+    def test_pen_y_up_renders_upright(self):
+        """Pen corpora store y growing upward (SVC2004, SigComp2011; ENG_REPORT A4),
+        so ink at high y must land in the top rows of the image."""
+        top = np.column_stack([np.linspace(-1, 1, 60), np.full(60, 1.0)])     # long line, high y
+        stub = np.column_stack([np.zeros(10), np.linspace(-1.0, -0.6, 10)])   # short stroke, low y
+        xy = np.vstack([top, stub]).astype(np.float32)
+        p = np.full((70, 1), 0.8, dtype=np.float32)
+        dt = np.full((70, 1), 0.1, dtype=np.float32)
+        dt[60] = 1.0                                                           # pen lift before the stub
+        img = render_trajectory_to_image(np.hstack([xy, p, dt]))[0]
+        rows = np.nonzero(img > 0.5)[0]
+        assert rows.mean() < img.shape[0] / 2
+
 class TestPenLiftFromTheClock:
     """
     A lift shows up as a gap in the clock, not only as vanishing pressure.
