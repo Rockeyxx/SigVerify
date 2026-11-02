@@ -89,6 +89,8 @@ _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
 _MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
                            re.IGNORECASE)
 _DEEPSIGN_FILE = re.compile(r"^u(\d+)_([gs])_.+\.txt$", re.IGNORECASE)
+# BiosecurID names carry their session ("u1202s0003_sg0001"); MCYT names carry none.
+_DEEPSIGN_SESSION = re.compile(r"_u\d+s(\d{4})_sg\d+\.txt$", re.IGNORECASE)
 
 
 def _require_dir(path, label):
@@ -131,9 +133,17 @@ def normalize_trajectory(xy, pressure, extra=None):
 
 
 def merge_datasets(target, incoming):
-    """Merge incoming writer samples into target dictionary, appending samples per writer."""
+    """Merge incoming writer samples into target dictionary, appending samples per writer.
+
+    "genuine_session", when either side has it, stays aligned with "genuine";
+    samples whose corpus records no session get None.
+    """
     for writer_id, record in incoming.items():
         existing = target.setdefault(writer_id, _new_writer())
+        if "genuine_session" in existing or "genuine_session" in record:
+            sessions = existing.get("genuine_session", [None] * len(existing["genuine"]))
+            sessions.extend(record.get("genuine_session", [None] * len(record["genuine"])))
+            existing["genuine_session"] = sessions
         existing["genuine"].extend(record["genuine"])
         existing["forged"].extend(record["forged"])
     return target
@@ -313,9 +323,12 @@ def parse_svc2004(root=SVC2004_DIR, extra_channels=None, float32_parse=False):
         writer_id = f"svc_{user}"
         label = "genuine" if sample <= 20 else "forged"
 
-        writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
-                                                           float32_parse))
+        record = writers.setdefault(writer_id, {**_new_writer(), "genuine_session": []})
+        record[label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
+                                               float32_parse))
+        if label == "genuine":
+            # Ten genuines per session, recorded about two weeks apart (D8).
+            record["genuine_session"].append(1 if sample <= 10 else 2)
 
     return writers
 
@@ -445,6 +458,36 @@ def parse_biosecurid_sonof_pairs(root=BIOSECURID_SONOF_DIR):
             raise FileNotFoundError(f"No scan for {filename}: expected u{scan_user:04d}{stem}")
         record = writers.setdefault(f"sonof_u{pen_user:04d}", _new_writer())
         record["genuine" if genuine else "forged"].append((scan, os.path.join(online, filename)))
+    return writers
+
+
+_SONOF_SCAN_FILE = re.compile(r"^u(\d{4})s\d{4}_sg(\d{4})([gf])\.png$", re.IGNORECASE)
+
+
+def parse_biosecurid_sonof_scans(root=BIOSECURID_SONOF_DIR):
+    """Parse the SONOF scans (OfflineReal) as an offline corpus.
+
+    Writer IDs follow the pen files (`sonof_u1001` is scan folder u0001), so a
+    writer list carries over to the fused pairs. A label that disagrees with its
+    slot raises, as in parse_biosecurid_sonof_pairs.
+    """
+    offline = os.path.join(root, "OfflineReal")
+    _require_dir(offline, "BiosecurID-SONOF OfflineReal")
+    writers = {}
+    for writer_dir in sorted(os.listdir(offline)):
+        full_dir = os.path.join(offline, writer_dir)
+        if not os.path.isdir(full_dir):
+            continue
+        for filename in sorted(os.listdir(full_dir)):
+            match = _SONOF_SCAN_FILE.match(filename)
+            if not match:
+                continue
+            genuine = int(match.group(2)) in SONOF_GENUINE_SLOTS
+            if genuine != (match.group(3).lower() == "g"):
+                raise ValueError(f"Scan {filename} carries the wrong label for its slot.")
+            record = writers.setdefault(
+                f"sonof_u{int(match.group(1)) + SONOF_ONLINE_ID_OFFSET:04d}", _new_writer())
+            record["genuine" if genuine else "forged"].append(os.path.join(full_dir, filename))
     return writers
 
 
@@ -626,10 +669,13 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
         writer_id = f"deepsign_{source}-{split_tag}_{int(match.group(1)):04d}"
         label = "genuine" if match.group(2).lower() == "g" else "forged"
 
-        writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(
+        record = writers.setdefault(writer_id, {**_new_writer(), "genuine_session": []})
+        record[label].append(
             load_deepsigndb_file(os.path.join(directory, filename), source,
                                  extra_channels, float32_parse))
+        if label == "genuine":
+            session = _DEEPSIGN_SESSION.search(filename)
+            record["genuine_session"].append(int(session.group(1)) if session else None)
 
     return writers
 
@@ -692,6 +738,8 @@ _PARSERS = {
     "sigcomp2011": parse_sigcomp2011,
     "sigcomp2011_offline": parse_sigcomp2011_offline,
     "deepsigndb": parse_deepsigndb,
+    # Scans only; the pen files are read through parse_biosecurid_sonof_pairs.
+    "biosecurid_sonof": parse_biosecurid_sonof_scans,
 }
 
 # Supported additional channels by dataset.

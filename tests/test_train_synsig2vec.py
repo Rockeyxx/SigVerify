@@ -5,6 +5,11 @@ Only `save_weights` is covered here. It is the piece a long run depends on: a
 1000-epoch run is ~2.7 hours, one has already been lost at epoch 90, and a
 checkpoint that is corrupt or absent is worth the same as no checkpoint at all.
 """
+import pytest
+
+# Closed experiment: skipped by default, run in CI (see pytest.ini).
+pytestmark = pytest.mark.archived
+
 import argparse
 import os
 

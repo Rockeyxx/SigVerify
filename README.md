@@ -523,12 +523,16 @@ Configuration control and the deviation log are in place; IEEE 730-2014's verifi
 
 Digitizer hardware requirements for deployment:
 
-| Specification       | Requirement           | System Handling                                              |
-| ------------------- | --------------------- | ------------------------------------------------------------ |
-| **Report Rate**     | $\ge 200\text{ Hz}$   | Decimated to 100 Hz model rate on ingest                     |
-| **Resolution**      | $\ge 2540\text{ LPI}$ | Coordinate normalization via per-signature z-score           |
-| **Pressure Levels** | $\ge 1024$ levels     | Scaled to $[0.0, 1.0]$; flat 1.0 imputation in degraded mode |
-| **Interface**       | USB HID               | Windows (Wintab), Linux (`evdev` / OpenTabletDriver)         |
+| Specification       | Requirement                                                   | System Handling                                                                                      |
+| ------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **Report Rate**     | $\ge 200\text{ Hz}$                                           | Resampled by timestamp onto a 10 ms grid (100 Hz model rate); never decimated by an integer factor   |
+| **Timestamp**       | One timestamp per sample, monotonic                           | Clock repaired before resampling: a wrapping counter is unwrapped, a burst sharing one timestamp is spread evenly |
+| **Resolution**      | $\ge 2540\text{ LPI}$                                         | Coordinate normalization via per-signature z-score                                                   |
+| **Pressure Levels** | $\ge 1024$ levels, with the maximum reported by the driver    | Scaled to $[0.0, 1.0]$ by the device's reported maximum; flat 1.0 imputation in degraded mode       |
+| **Device Model**    | The same model for enrolment and verification                 | Not supported across models: on the same 65 people, references from one tablet scored another's probes at 13 to 42% EER |
+| **Interface**       | USB HID                                                       | Windows (Wintab), Linux (`evdev` / OpenTabletDriver)                                                 |
+
+Matching specifications do not make tablets interchangeable. Three tablets rated at 200 Hz stamped time three different ways and reported pressure maxima of 833, 1023 and 511, so these rows are requirements on the capture path, not only on the hardware.
 
 ---
 
