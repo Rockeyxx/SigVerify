@@ -20,9 +20,9 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def _event(kind, x, y, pressure, ts):
+def _event(kind, x, y, pressure, ts, xtilt=0, ytilt=0):
     ev = QTabletEvent(kind, QPointF(x, y), QPointF(x, y), QTabletEvent.Stylus, QTabletEvent.Pen,
-                      pressure, 0, 0, 0.0, 0.0, 0, Qt.NoModifier, 1, Qt.LeftButton, Qt.LeftButton)
+                      pressure, xtilt, ytilt, 0.0, 0.0, 0, Qt.NoModifier, 1, Qt.LeftButton, Qt.LeftButton)
     ev.setTimestamp(int(ts))
     return ev
 
@@ -108,3 +108,20 @@ def test_ink_outside_the_box_is_not_recorded(app):
 def test_capture_info_names_device_os_and_qt_platform(app):
     info = SignatureCaptureWidget().capture_info()
     assert set(info) == {"device_model", "os", "qt_platform"}
+
+
+def test_canvas_keeps_every_event_with_tilt_for_the_logger(app):
+    widget = SignatureCaptureWidget()
+    widget.canvas.tabletEvent(_event(QEvent.TabletMove, 50, 50, 0.0, 990, xtilt=12, ytilt=-7))  # hover
+    _sign(widget.canvas, _strokes())
+    events = widget.canvas.raw_events
+    assert events[0][4] == 0.0 and events[0][5:7] == (12.0, -7.0)
+    assert len(events) == 1 + sum(len(s) + 1 for s in _strokes())   # every move plus each release
+    assert all(len(e) == 8 for e in events)
+
+
+def test_clearing_the_canvas_clears_the_raw_events(app):
+    widget = SignatureCaptureWidget()
+    _sign(widget.canvas, _strokes())
+    widget.canvas.clear_canvas()
+    assert widget.canvas.raw_events == []

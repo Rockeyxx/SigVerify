@@ -107,6 +107,9 @@ class DrawingCanvas(QWidget):
         # Raw pen-down samples per stroke: [(timestamp_ms, x, y, pressure), ...]
         self.completed_strokes_data = []
         self.current_stroke_data = []
+        # Every tablet event, for the research logger (tools/capture_session.py):
+        # (t_ms, kind, x, y, pressure, xtilt, ytilt, inside). Hover moves have pressure 0.
+        self.raw_events = []
 
     def tabletEvent(self, event: QTabletEvent):
         p = float(event.pressure())
@@ -117,6 +120,8 @@ class DrawingCanvas(QWidget):
         # Only samples inside the box count. Qt keeps sending a stroke to the canvas after the
         # pen leaves it, so leaving ends the stroke and coming back starts a new one (B10).
         inside = self.rect().contains(event.pos())
+        self.raw_events.append((ts_ms, int(et), x, y, p, float(event.xTilt()),
+                                float(event.yTilt()), int(inside)))
         if et == QTabletEvent.TabletPress:
             self._end_stroke()  # a press always starts a fresh stroke
         if et in (QTabletEvent.TabletPress, QTabletEvent.TabletMove):
@@ -162,6 +167,7 @@ class DrawingCanvas(QWidget):
         self.current_display_stroke.clear()
         self.completed_strokes_data.clear()
         self.current_stroke_data.clear()
+        self.raw_events.clear()
         self.update()
 
     def get_final_trajectory_tensor(self) -> np.ndarray:
