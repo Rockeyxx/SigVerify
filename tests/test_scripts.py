@@ -208,6 +208,32 @@ class TestPairBudget:
                               device_augment=True)
         assert train.dataset.device_augment and not val.dataset.device_augment
 
+    def test_tilt_hiding_reaches_only_the_training_loader(self):
+        from scripts.train import build_loader
+
+        writers = self._writers(n_writers=2, n_samples=6, temporal=True)
+        train, _ = build_loader(writers, sorted(writers), "temporal", 4, 0, True, 42,
+                                tilt_hide_prob=0.5)
+        val, _ = build_loader(writers, sorted(writers), "temporal", 4, 0, False, 42,
+                              tilt_hide_prob=0.5)
+        assert train.dataset.tilt_hide_prob == 0.5 and val.dataset.tilt_hide_prob == 0.0
+
+    @pytest.mark.parametrize("mode", ["dt_tilt0", "dt_tilt1", "dt_tilt_flag"])
+    def test_build_writer_samples_accepts_sigcomp_for_tilt_modes(self, mode):
+        from scripts.train import build_writer_samples
+        from config.settings import SIGCOMP2011_DIR
+        if not os.path.isdir(SIGCOMP2011_DIR):
+            pytest.skip("SigComp2011 not on disk")
+        samples = build_writer_samples([SIGCOMP2011_DIR], extra_channels=mode)
+        first = next(iter(samples.values()))["genuine"][0]
+        assert first.shape[1] == (7 if mode == "dt_tilt_flag" else 6)
+
+    def test_build_writer_samples_still_refuses_sigcomp_for_plain_tilt(self):
+        from scripts.train import build_writer_samples
+        from config.settings import SIGCOMP2011_DIR
+        with pytest.raises(ValueError, match="cannot supply"):
+            build_writer_samples([SIGCOMP2011_DIR], extra_channels="tilt")
+
     def test_the_new_augmentation_flags_parse(self):
         from scripts.train import parse_args
 

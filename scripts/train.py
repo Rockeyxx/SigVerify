@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config.settings import (
     SEED,
     TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS, TEMPORAL_INPUT_FEATURES,
+    TEMPORAL_TILT_HIDE_PROB, TILT_CHANNEL_MODES,
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     CONTRASTIVE_MARGIN, LEARNING_RATE, BATCH_SIZE,
     NUM_EPOCHS, WEIGHT_DECAY, MODEL_WEIGHTS_DIR,
@@ -285,7 +286,9 @@ def parse_args(argv=None):
                              "azimuth+altitude (SVC2004 only, and the XPPen reports "
                              "neither); 'dt' adds inter-sample time, measured from "
                              "SVC2004's clock and reconstructed on SigComp2011 from "
-                             "the pen-up runs it drops, so both corpora can supply it")
+                             "the pen-up runs it drops, so both corpora can supply it; "
+                             "dt_tilt0 / dt_tilt1 / dt_tilt_flag (research only, see "
+                             "AGENTS.md)")
     parser.add_argument("--pressure-dropout", type=float, default=None,
                         help="Override PRESSURE_DROPOUT_RATE for this run (temporal "
                              "branch only). A Task1 dataset still forces 0, since "
@@ -431,7 +434,8 @@ def _seed_worker(worker_id):
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
                  augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
                  augment_scale=1.0, pairs_per_writer=None, augment_params=None,
-                 device_augment=False, pair_caps=None, cross_session=False, triplet=False):
+                 device_augment=False, pair_caps=None, cross_session=False, triplet=False,
+                 tilt_hide_prob=0.0):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -491,7 +495,8 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
                                            augment_scale=augment_scale,
                                            seed=seed,
                                            device_augment=shuffle and device_augment,
-                                           negatives=negatives)
+                                           negatives=negatives,
+                                           tilt_hide_prob=tilt_hide_prob if shuffle else 0.0)
         collate = collate_temporal_pairs
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
@@ -843,7 +848,10 @@ def main(argv=None):
                                            device_augment=args.device_augment,
                                            pair_caps=pair_caps,
                                            cross_session=args.cross_session_positives,
-                                           triplet=args.triplet_weight > 0)
+                                           triplet=args.triplet_weight > 0,
+                                           tilt_hide_prob=(TEMPORAL_TILT_HIDE_PROB
+                                                           if args.temporal_channels == "dt_tilt_flag"
+                                                           else 0.0))
     val_loader, num_val = build_loader(writer_samples, val_ids, args.branch, args.batch_size,
                                        args.num_workers, False, args.seed,
                                        augment=args.augment,
@@ -939,7 +947,8 @@ def main(argv=None):
                       holdout_writers=args.holdout_writers,
                       train_only_dirs=args.train_only_data_dir,
                       input_size=SPATIAL_INPUT_SIZE if args.branch == "spatial" else None,
-                      max_gap_ms=MAX_GAP_MS if args.branch == "temporal" else None)
+                      max_gap_ms=MAX_GAP_MS if args.branch == "temporal" else None,
+                      temporal_channels=args.temporal_channels if args.branch == "temporal" else None)
     print(f"Split record: {split_record_path(weights_path)}")
     return {**history,
             "split": {"train": list(train_ids), "val": list(val_ids), "test": list(test_ids)}}

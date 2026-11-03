@@ -11,6 +11,9 @@ from config.settings import (MIN_BBOX_PIXELS, MIN_TRAJECTORY_POINTS,
                              SPATIAL_INPUT_SIZE, TEMPORAL_INPUT_FEATURES)
 from src.data.dataset import (
     pin_holdout,
+    save_split_record,
+    load_split_record,
+    check_split_against_record,
     SpatialSignatureDataset,
     TemporalSignatureDataset,
     collate_temporal_pairs,
@@ -1038,3 +1041,20 @@ class TestTiltHiding:
         ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=0.5)
         with pytest.raises(ValueError, match="7"):
             ds[0]
+
+
+class TestSplitRecordChannels:
+    def _save(self, tmp_path, mode):
+        w = os.path.join(tmp_path, "m.pth")
+        save_split_record(w, ["a"], ["b"], ["c"], ["d"], 42, temporal_channels=mode)
+        return w
+
+    def test_tilt_mode_is_recorded_and_dt_is_not(self, tmp_path):
+        assert load_split_record(self._save(tmp_path, "dt_tilt1"))["temporal_channels"] == "dt_tilt1"
+        assert "temporal_channels" not in load_split_record(self._save(tmp_path, "dt"))
+
+    def test_mismatched_mode_is_refused(self, tmp_path):
+        w = self._save(tmp_path, "dt_tilt1")
+        with pytest.raises(ValueError, match="dt_tilt1"):
+            check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt0")
+        assert check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt1")

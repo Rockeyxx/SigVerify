@@ -30,6 +30,7 @@ from torch.utils.data import Dataset
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
+    TILT_CHANNEL_MODES,
     SPATIAL_INPUT_SIZE,
     SPATIAL_SQUARE_PAD,
     MIN_BBOX_PIXELS,
@@ -337,7 +338,7 @@ def split_record_path(weights_path):
 
 def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, split_seed,
                       holdout_writers=None, input_size=None, max_gap_ms=None,
-                      train_only_dirs=None):
+                      train_only_dirs=None, temporal_channels=None):
     """Save the writer split record beside the trained model weights.
 
     train_only_dirs (corpora whose writers joined training after the split) is
@@ -355,6 +356,9 @@ def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, spl
     }
     if train_only_dirs:
         record["train_only_dirs"] = [str(d) for d in train_only_dirs]
+    if temporal_channels in TILT_CHANNEL_MODES:
+        # Only tilt modes record it, so every existing record keeps its shape.
+        record["temporal_channels"] = temporal_channels
     with open(split_record_path(weights_path), "w") as fh:
         json.dump(record, fh, indent=1)
     return record
@@ -370,7 +374,8 @@ def load_split_record(weights_path):
 
 
 def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True,
-                               input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None):
+                               input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None,
+                               temporal_channels=None):
     """Check that evaluation split matches the record saved during training.
 
     Ensures no training writer is evaluated as a test subject, and that
@@ -391,6 +396,12 @@ def check_split_against_record(weights_path, train_ids, test_ids, require_same_t
         raise ValueError(
             f"Refusing to score {weights_path} with MAX_GAP_MS={max_gap_ms:g}: it was "
             f"trained with {recorded_gap:g}. Set SIGVER_MAX_GAP_MS={recorded_gap:g} to score it.")
+    recorded_mode = record.get("temporal_channels")
+    if recorded_mode and temporal_channels is not None and recorded_mode != temporal_channels:
+        raise ValueError(
+            f"Refusing to score {weights_path} with --temporal-channels {temporal_channels}: "
+            f"it was trained as {recorded_mode}. A different fill loads cleanly and "
+            f"gives a plausible wrong number.")
     scoring = set(test_ids)
     leaked = sorted(scoring & set(record["train"]))
     if leaked:
