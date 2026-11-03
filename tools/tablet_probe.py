@@ -219,7 +219,10 @@ def run_qt(rows, meta, scale):
 def load(folder):
     def rows(name):
         out = []
-        for r in csv.DictReader(open(folder / name)):
+        path = folder / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"{path} is not a regular file the probe wrote")
+        for r in csv.DictReader(open(path)):  # skylos: ignore[SKY-D215] the probe's own CSV in the folder the operator passed, checked above
             out.append({k: (v if k == "step" else float(v)) for k, v in r.items()})
             out[-1].setdefault("step", "all")
         return out

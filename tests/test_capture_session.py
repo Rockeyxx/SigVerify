@@ -26,11 +26,11 @@ def test_a_bad_participant_code_is_refused(tmp_path):
 
 def test_raw_events_are_never_overwritten(tmp_path):
     path = tmp_path / "P07" / "x.csv"
-    cs.write_raw_events(path, [(1.0, 87, 2.0, 3.0, 0.5, 10.0, -4.0, 1)])
+    cs.write_raw_events(path, [(1.0, 87, 2.0, 3.0, 0.5, 10.0, -4.0, 1)], root=tmp_path)
     rows = list(csv.reader(open(path)))
     assert rows[0] == cs.RAW_FIELDS and len(rows) == 2
     with pytest.raises(FileExistsError):
-        cs.write_raw_events(path, [])
+        cs.write_raw_events(path, [], root=tmp_path)
 
 
 def test_manifest_has_one_header_and_one_row_per_file(tmp_path):
@@ -42,7 +42,8 @@ def test_manifest_has_one_header_and_one_row_per_file(tmp_path):
 
 def test_next_index_resumes_after_the_last_saved_genuine(tmp_path):
     for i in (1, 2, 3):
-        cs.write_raw_events(cs.signature_path(tmp_path, "P07", "tablet", "genuine", index=i), [])
+        cs.write_raw_events(cs.signature_path(tmp_path, "P07", "tablet", "genuine", index=i), [],
+                            root=tmp_path)
     assert cs.next_index(tmp_path, "P07", "tablet") == 4
 
 
@@ -280,3 +281,61 @@ def test_choosing_a_box_shows_that_box_large_and_follows_replace_and_delete(app,
     assert session.selected.pixmap().toImage() != before                    # and redrawn
     session.delete_paper(saved[4])
     assert session.paper_list.count() == len(saved) - 1 and session.shown == saved[5]
+
+
+def test_the_language_toggle_switches_the_prompt_and_buttons_to_arabic_and_back(app, tmp_path):
+    session = cs.CaptureSession(root=tmp_path)
+    session.start("P07", operator="op")
+    assert "Practice 1 of" in session.prompt.text()
+    session.btn_lang.click()
+    assert "تجربة 1 من" in session.prompt.text()                          # the shown prompt too
+    assert session.capture.btn_confirm.text() == "أوافق" and session.btn_start.text() == "ابدأ"
+    assert session.btn_lang.text() == "English"
+    session.btn_lang.click()
+    assert "Practice 1 of" in session.prompt.text() and session.capture.btn_confirm.text() == "I approve"
+
+
+def test_prompts_stay_arabic_as_the_session_moves_on(app, tmp_path):
+    session = cs.CaptureSession(root=tmp_path)
+    session.set_language("ar")
+    session.start("P07", operator="op")
+    for _ in range(CAMPAIGN_PRACTICE_SIGNINGS):
+        _sign_and_approve(session)
+    assert f"التوقيع 1 من {CAMPAIGN_GENUINE_PER_MODALITY}" in session.prompt.text()
+
+
+def test_forgery_mode_starts_from_the_form_in_arabic(app, tmp_path):
+    session = cs.CaptureSession(root=tmp_path)
+    session.set_language("ar")
+    session.code.setText("P07")
+    session.mode.setCurrentIndex(1)                                          # the forgery item
+    session.forger_code.setText("P02")
+    session.btn_start.click()
+    assert session.stage == "forgery" and session.forger == "P02"
+
+
+def test_an_arabic_prompt_sits_on_the_right(app, tmp_path):
+    from PyQt5.QtWidgets import QStyle
+    session = cs.CaptureSession(root=tmp_path)
+    shown = lambda: QStyle.visualAlignment(session.prompt.layoutDirection(), session.prompt.alignment())
+    assert shown() & Qt.AlignLeft
+    session.set_language("ar")
+    assert shown() & Qt.AlignRight
+
+
+def test_files_outside_the_data_folder_or_behind_a_symlink_are_refused(tmp_path):
+    root = tmp_path / "inhouse"
+    (root / "P07").mkdir(parents=True)
+    outside = tmp_path / "elsewhere.csv"
+    outside.write_text("keep")
+    link = root / "P07" / "P07_tablet_genuine_01.csv"
+    link.symlink_to(outside)
+    with pytest.raises(ValueError):                                        # a symlink in the folder
+        cs.write_raw_events(link, [], root=root)
+    with pytest.raises(ValueError):                                        # a path that escapes
+        cs.write_raw_events(root / ".." / "escape.csv", [], root=root)
+    assert outside.read_text() == "keep"
+    (root / "manifest.csv").symlink_to(outside)
+    with pytest.raises(ValueError):
+        cs.append_manifest(root, {"file": "x"})
+    assert outside.read_text() == "keep"

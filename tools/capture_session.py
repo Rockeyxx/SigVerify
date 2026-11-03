@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_FORGERY_ATTEMPTS,  # noqa: E402
                              CAMPAIGN_GENUINE_PER_MODALITY, CAMPAIGN_PRACTICE_SIGNINGS,
                              INHOUSE_DIR, SHEET_GRID, SHEET_MARGIN)
+from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtGui import QFont, QImage, QPixmap  # noqa: E402
 from PyQt5.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout,  # noqa: E402
                              QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
@@ -36,6 +37,79 @@ RAW_FIELDS = ["t_ms", "kind", "x", "y", "pressure", "xtilt", "ytilt", "inside"]
 MANIFEST_FIELDS = ["file", "participant", "modality", "role", "index", "forger", "attempt",
                    "operator", "os", "qt_platform", "device_model", "saved_at"]
 _EXT = {"tablet": "csv", "paper": "png"}
+
+# Every instruction the session window shows, in English and Arabic (the toggle switches them;
+# file names, participant codes and the captions drawn inside preview images stay English).
+TEXT = {
+    "en": {
+        "start_hint": "Enter the participant code and press Start.",
+        "bad_code": "Participant and forger codes look like P07.",
+        "practice_first": "Practice 1 of {n}: sign as you normally do. Nothing is saved.",
+        "practice_next": "Practice {i} of {n}. Nothing is saved.",
+        "genuine_first": "Signature {i} of {n}. Sign, look at it, then press I approve (or Redo).",
+        "genuine_next": "Signature {i} of {n}.",
+        "break": "Short break. Press Continue when ready.",
+        "forgery_first": ("Forger {forger} imitates {participant}: attempt 1 of {n}. "
+                          "Study the printed copy, then sign."),
+        "forgery_again": "Sign again: attempt {i} of {n}.",
+        "tablet_done": "Tablet done. Now import the scanned paper sheets.",
+        "tablet_done_forgery": ("Tablet done. Import the forger's paper sheet "
+                                "(boxes 1-{n} = attempts in order)."),
+        "paper_saved": ("Saved {n} paper signatures. Session done. Check the crops: delete or "
+                        "replace a bad one, or undo the whole import."),
+        "paper_saved_no_ink": ("Saved {n} paper signatures. Session done. No signature found in: "
+                               "{names}. Check the crops: delete or replace a bad one, or undo "
+                               "the whole import."),
+        "deleted": "Deleted {name}.",
+        "replaced": "Replaced {name}.",
+        "replaced_no_ink": "Replaced {name}. No signature found in it.",
+        "undone": "Paper import undone. Import the scanned sheets again.",
+        "not_saved": "Not saved: {error}",
+        "not_replaced": "Not replaced: {error}",
+        "canvas_hint": "Sign inside the box, then press I approve or Redo.",
+        "btn_start": "Start", "btn_approve": "I approve", "btn_redo": "Redo",
+        "btn_skip": "Skip practice", "btn_continue": "Continue",
+        "btn_paper": "Import scanned paper sheets...", "btn_end": "End / Next participant",
+        "btn_delete": "Delete", "btn_replace": "Replace...", "btn_undo": "Undo paper import",
+        "mode_genuine": "Genuine", "mode_forgery": "Forgery",
+        "ph_code": "Participant, e.g. P07", "ph_operator": "Operator", "ph_forger": "Forger, e.g. P02",
+        "dlg_sheets": "Scanned sheets, in order", "dlg_replace": "Image of this one signature",
+    },
+    "ar": {
+        "start_hint": "أدخل رمز المشارك ثم اضغط «ابدأ».",
+        "bad_code": "رمز المشارك أو المزوّر يكون مثل P07.",
+        "practice_first": "تجربة 1 من {n}: وقّع كما توقّع عادةً. لن يُحفظ شيء.",
+        "practice_next": "تجربة {i} من {n}. لن يُحفظ شيء.",
+        "genuine_first": "التوقيع {i} من {n}. وقّع، ثم انظر إليه، ثم اضغط «أوافق» (أو «إعادة»).",
+        "genuine_next": "التوقيع {i} من {n}.",
+        "break": "استراحة قصيرة. اضغط «متابعة» عندما تكون جاهزًا.",
+        "forgery_first": ("المزوّر {forger} يقلّد توقيع {participant}: المحاولة 1 من {n}. "
+                          "ادرس النسخة المطبوعة، ثم وقّع."),
+        "forgery_again": "وقّع مرة أخرى: المحاولة {i} من {n}.",
+        "tablet_done": "انتهى التوقيع على الجهاز اللوحي. الآن أدخل الصور.",
+        "tablet_done_forgery": ("انتهى التوقيع على الجهاز اللوحي. أدخل صورة ورقة المزوّر "
+                                "(المربعات 1-{n} هي المحاولات بالترتيب)."),
+        "paper_saved": ("عدد التوقيعات الورقية المحفوظة: {n}. انتهت الجلسة. راجع القصاصات: "
+                        "احذف قصاصة سيئة أو استبدلها، أو تراجع عن الإدخال كله."),
+        "paper_saved_no_ink": ("عدد التوقيعات الورقية المحفوظة: {n}. انتهت الجلسة. لم يُعثر على "
+                               "توقيع في: {names}. راجع القصاصات: احذف قصاصة سيئة أو استبدلها، "
+                               "أو تراجع عن الإدخال كله."),
+        "deleted": "حُذف {name}.",
+        "replaced": "استُبدل {name}.",
+        "replaced_no_ink": "استُبدل {name}. لم يُعثر فيه على توقيع.",
+        "undone": "أُلغي إدخال الصور. أدخل الصور مرة أخرى.",
+        "not_saved": "لم يُحفظ: {error}",
+        "not_replaced": "لم يُستبدل: {error}",
+        "canvas_hint": "وقّع داخل المربع، ثم اضغط «أوافق» أو «إعادة».",
+        "btn_start": "ابدأ", "btn_approve": "أوافق", "btn_redo": "إعادة",
+        "btn_skip": "تخطّي التجربة", "btn_continue": "متابعة",
+        "btn_paper": "إدخال الصور...", "btn_end": "إنهاء / المشارك التالي",
+        "btn_delete": "حذف", "btn_replace": "استبدال...", "btn_undo": "التراجع عن إدخال الصور",
+        "mode_genuine": "أصلي", "mode_forgery": "تزوير",
+        "ph_code": "رمز المشارك، مثل P07", "ph_operator": "المشغّل", "ph_forger": "رمز المزوّر، مثل P02",
+        "dlg_sheets": "الصور، بالترتيب", "dlg_replace": "صورة هذا التوقيع وحده",
+    },
+}
 
 
 def signature_path(root, participant, modality, role, index=None, forger=None, attempt=None):
@@ -62,21 +136,30 @@ def next_index(root, participant, modality):
     return max(taken, default=0) + 1
 
 
-def write_raw_events(path, events):
+def _check_inside(root, path):
+    """Every file this tool writes, reads back or deletes must be a plain path inside the data
+    folder: not a symlink, and not resolving outside root. Raises ValueError otherwise."""
+    path, base = Path(path), Path(root).resolve()
+    if path.is_symlink() or not path.resolve().is_relative_to(base):
+        raise ValueError(f"refusing {path}: not a plain file inside {base}")
+    return path
+
+
+def write_raw_events(path, events, root):
     """One tablet signature: every Qt tablet event the canvas saw (RAW_FIELDS: screen pixels,
     y down, pressure 0..1, Qt tilt). Mode "x" refuses to overwrite a saved signature."""
-    path = Path(path)
+    path = _check_inside(root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "x", newline="") as f:
+    with open(path, "x", newline="") as f:  # skylos: ignore[SKY-D215,SKY-D324] checked by _check_inside: inside the data folder, not a symlink
         csv.writer(f).writerows([RAW_FIELDS] + [list(e) for e in events])
 
 
 def append_manifest(root, row):
     """One row per saved file in <root>/manifest.csv; missing fields are left empty."""
-    path = Path(root) / "manifest.csv"
+    path = _check_inside(root, Path(root) / "manifest.csv")
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
-    with open(path, "a", newline="") as f:
+    with open(path, "a", newline="") as f:  # skylos: ignore[SKY-D215,SKY-D324] checked by _check_inside: inside the data folder, not a symlink
         writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS)
         if new:
             writer.writeheader()
@@ -85,13 +168,13 @@ def append_manifest(root, row):
 
 def remove_manifest_rows(root, files):
     """Drop the manifest rows whose file is in files (paths relative to root)."""
-    path = Path(root) / "manifest.csv"
+    path = _check_inside(root, Path(root) / "manifest.csv")
     if not path.exists():
         return
     files = {str(f) for f in files}
-    with open(path, newline="") as f:
+    with open(path, newline="") as f:  # skylos: ignore[SKY-D215,SKY-D325] checked by _check_inside: inside the data folder, not a symlink
         rows = [r for r in csv.DictReader(f) if r["file"] not in files]
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="") as f:  # skylos: ignore[SKY-D215,SKY-D324] checked by _check_inside above
         writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
@@ -103,10 +186,10 @@ def ink_path(path):
     return path.with_name(f"{path.stem}_ink.png")
 
 
-def save_ink(path):
+def save_ink(path, root):
     """Write ink_path(path) from the raw box. Returns False, and leaves no ink file, when no
     signature is found."""
-    ink_path(path).unlink(missing_ok=True)
+    _check_inside(root, ink_path(path)).unlink(missing_ok=True)
     crop = ink_crop(cv2.imread(str(path)))
     if crop is None:
         return False
@@ -161,19 +244,22 @@ class CaptureSession(QWidget):
         self.setWindowTitle("XPPen capture session")
         self.stage, self.index, self.attempt, self.practised = "idle", 0, 0, 0
         self.participant = self.operator = self.forger = None
+        self.lang, self._last = "en", ("start_hint", {})
 
-        self.code = QLineEdit(placeholderText="Participant, e.g. P07")
-        self.op = QLineEdit(placeholderText="Operator")
+        self.code = QLineEdit()
+        self.op = QLineEdit()
         self.mode = QComboBox()
-        self.mode.addItems(["Genuine", "Forgery"])
-        self.forger_code = QLineEdit(placeholderText="Forger, e.g. P02")
-        self.btn_start = QPushButton("Start")
+        self.mode.addItems(["", ""])                  # genuine, forgery; texts set by _retranslate
+        self.forger_code = QLineEdit()
+        self.btn_start = QPushButton()
         self.btn_start.clicked.connect(self._start_from_form)
+        self.btn_lang = QPushButton()                 # العربية / English
+        self.btn_lang.clicked.connect(self.toggle_language)
         form = QHBoxLayout()
-        for w in (self.code, self.op, self.mode, self.forger_code, self.btn_start):
+        for w in (self.code, self.op, self.mode, self.forger_code, self.btn_start, self.btn_lang):
             form.addWidget(w)
 
-        self.prompt = QLabel("Enter the participant code and press Start.")
+        self.prompt = QLabel()
         font = QFont()
         font.setPointSize(18)
         font.setBold(True)
@@ -181,18 +267,16 @@ class CaptureSession(QWidget):
         self.prompt.setWordWrap(True)
 
         self.capture = SignatureCaptureWidget()
-        self.capture.btn_confirm.setText("I approve")
-        self.capture.btn_reset.setText("Redo")
         self.capture.signature_confirmed.connect(self._on_signature)
         self.capture.setEnabled(False)
 
-        self.btn_skip = QPushButton("Skip practice")
+        self.btn_skip = QPushButton()
         self.btn_skip.clicked.connect(self._end_practice)
-        self.btn_continue = QPushButton("Continue")
+        self.btn_continue = QPushButton()
         self.btn_continue.clicked.connect(self.continue_after_break)
-        self.btn_paper = QPushButton("Import scanned paper sheets...")
+        self.btn_paper = QPushButton()
         self.btn_paper.clicked.connect(self._choose_sheets)
-        self.btn_end = QPushButton("End / Next participant")
+        self.btn_end = QPushButton()
         self.btn_end.clicked.connect(self.end_session)
         self.preview = QLabel()
         buttons = QHBoxLayout()
@@ -202,11 +286,11 @@ class CaptureSession(QWidget):
         # Editing the paper import: one box (delete / replace) or the whole import (undo).
         self.paper_saved = []                     # [(path, role, index, attempt)] of the last import
         self.paper_list = QComboBox()
-        self.btn_delete = QPushButton("Delete")
+        self.btn_delete = QPushButton()
         self.btn_delete.clicked.connect(lambda: self._edit_selected(self.delete_paper))
-        self.btn_replace = QPushButton("Replace...")
+        self.btn_replace = QPushButton()
         self.btn_replace.clicked.connect(self._choose_replacement)
-        self.btn_undo = QPushButton("Undo paper import")
+        self.btn_undo = QPushButton()
         self.btn_undo.clicked.connect(self.undo_paper)
         edit = QHBoxLayout()
         for w in (self.paper_list, self.btn_delete, self.btn_replace, self.btn_undo):
@@ -227,6 +311,7 @@ class CaptureSession(QWidget):
         views.addWidget(self.preview)
         views.addWidget(self.selected)
         layout.addLayout(views)
+        self._retranslate()
         self._show_buttons()
 
     # --- flow ---------------------------------------------------------------
@@ -237,26 +322,24 @@ class CaptureSession(QWidget):
         self.participant, self.operator, self.forger = participant, operator, forger
         if forger:
             self.stage, self.attempt = "forgery", 1
-            self._say(f"Forger {forger} imitates {participant}: attempt 1 of "
-                      f"{CAMPAIGN_FORGERY_ATTEMPTS}. Study the printed copy, then sign.")
+            self._say("forgery_first", forger=forger, participant=participant,
+                      n=CAMPAIGN_FORGERY_ATTEMPTS)
         else:
             self.stage, self.practised = "practice", 0
-            self._say(f"Practice 1 of {CAMPAIGN_PRACTICE_SIGNINGS}: sign as you normally do. "
-                      "Nothing is saved.")
+            self._say("practice_first", n=CAMPAIGN_PRACTICE_SIGNINGS)
         self.capture.setEnabled(True)
         self._show_buttons()
 
     def continue_after_break(self):
         self.stage = "genuine"
         self.capture.setEnabled(True)
-        self._say(f"Signature {self.index} of {CAMPAIGN_GENUINE_PER_MODALITY}.")
+        self._say("genuine_next", i=self.index, n=CAMPAIGN_GENUINE_PER_MODALITY)
         self._show_buttons()
 
     def _end_practice(self):
         self.stage = "genuine"
         self.index = next_index(self.root, self.participant, "tablet")
-        self._say(f"Signature {self.index} of {CAMPAIGN_GENUINE_PER_MODALITY}. "
-                  "Sign, look at it, then press I approve (or Redo).")
+        self._say("genuine_first", i=self.index, n=CAMPAIGN_GENUINE_PER_MODALITY)
         self._show_buttons()
 
     def _on_signature(self, _tensor):
@@ -266,27 +349,26 @@ class CaptureSession(QWidget):
             if self.practised >= CAMPAIGN_PRACTICE_SIGNINGS:
                 self._end_practice()
             else:
-                self._say(f"Practice {self.practised + 1} of {CAMPAIGN_PRACTICE_SIGNINGS}. "
-                          "Nothing is saved.")
+                self._say("practice_next", i=self.practised + 1, n=CAMPAIGN_PRACTICE_SIGNINGS)
         elif self.stage == "genuine":
             self._save_tablet(events, "genuine", index=self.index)
             self.index += 1
             if self.index > CAMPAIGN_GENUINE_PER_MODALITY:
-                self._to_paper("Tablet done. Now import the scanned paper sheets.")
+                self._to_paper("tablet_done")
             elif self.index == CAMPAIGN_BREAK_AFTER + 1:
                 self.stage = "break"
                 self.capture.setEnabled(False)
-                self._say("Short break. Press Continue when ready.")
+                self._say("break")
             else:
-                self._say(f"Signature {self.index} of {CAMPAIGN_GENUINE_PER_MODALITY}.")
+                self._say("genuine_next", i=self.index, n=CAMPAIGN_GENUINE_PER_MODALITY)
         elif self.stage == "forgery":
             self._save_tablet(events, "forgery", forger=self.forger, attempt=self.attempt)
             self.attempt += 1
             if self.attempt > CAMPAIGN_FORGERY_ATTEMPTS:
-                self._to_paper(f"Tablet done. Import the forger's paper sheet "
-                               f"(boxes 1-{CAMPAIGN_FORGERY_ATTEMPTS} = attempts in order).")
+                self._to_paper("tablet_done_forgery", n=CAMPAIGN_FORGERY_ATTEMPTS)
             else:
-                self._say(f"Sign again: attempt {self.attempt} of {CAMPAIGN_FORGERY_ATTEMPTS}.")
+                self._say("forgery_again", i=self.attempt, n=CAMPAIGN_FORGERY_ATTEMPTS)
+        self.capture.label.setText(self._t("canvas_hint"))   # the widget wrote "Accepted!" there
         self._show_buttons()
 
     def save_paper(self, sheet_paths):
@@ -309,28 +391,29 @@ class CaptureSession(QWidget):
                 raise FileExistsError(path)
         no_ink = []
         for crop, (path, role, index, attempt) in zip(crops, targets):
-            path.parent.mkdir(parents=True, exist_ok=True)
+            _check_inside(self.root, path).parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(path), crop)
             self._manifest(path, "paper", role, index=index, attempt=attempt)
-            if not save_ink(path):
+            if not save_ink(path, self.root):
                 no_ink.append(path.stem)
         self.stage = "done"
         self.paper_saved = list(targets)
-        warning = f" No signature found in: {', '.join(no_ink)}." if no_ink else ""
-        self._say(f"Saved {len(targets)} paper signatures. Session done.{warning} Check the "
-                  "crops: delete or replace a bad one, or undo the whole import.")
+        if no_ink:
+            self._say("paper_saved_no_ink", n=len(targets), names=", ".join(no_ink))
+        else:
+            self._say("paper_saved", n=len(targets))
         self._refresh_paper()
         self._show_buttons()
         return [t[0] for t in targets]
 
     def delete_paper(self, path):
         """Remove one imported paper signature and its manifest row."""
-        path = Path(path)
-        path.unlink(missing_ok=True)
-        ink_path(path).unlink(missing_ok=True)
+        path = _check_inside(self.root, path)
+        path.unlink(missing_ok=True)  # skylos: ignore[SKY-D215] checked by _check_inside: inside the data folder, not a symlink
+        _check_inside(self.root, ink_path(path)).unlink(missing_ok=True)
         remove_manifest_rows(self.root, [path.relative_to(self.root)])
         self.paper_saved = [t for t in self.paper_saved if t[0] != path]
-        self._say(f"Deleted {path.name}.")
+        self._say("deleted", name=path.name)
         self._refresh_paper()
 
     def replace_paper(self, path, image_path):
@@ -341,22 +424,22 @@ class CaptureSession(QWidget):
         if image is None:
             raise ValueError(f"cannot read {image_path}")
         _, role, index, attempt = next(t for t in self.paper_saved if t[0] == path)
-        cv2.imwrite(str(path), image)
+        cv2.imwrite(str(_check_inside(self.root, path)), image)
         remove_manifest_rows(self.root, [path.relative_to(self.root)])
         self._manifest(path, "paper", role, index=index, attempt=attempt)
-        found = save_ink(path)
-        self._say(f"Replaced {path.name}." + ("" if found else " No signature found in it."))
+        found = save_ink(path, self.root)
+        self._say("replaced" if found else "replaced_no_ink", name=path.name)
         self._refresh_paper()
 
     def undo_paper(self):
         """Delete the whole last paper import, so the sheets can be imported again."""
         for path, *_ in self.paper_saved:
-            path.unlink(missing_ok=True)
-            ink_path(path).unlink(missing_ok=True)
+            _check_inside(self.root, path).unlink(missing_ok=True)
+            _check_inside(self.root, ink_path(path)).unlink(missing_ok=True)
         remove_manifest_rows(self.root, [t[0].relative_to(self.root) for t in self.paper_saved])
         self.paper_saved = []
         self.stage = "paper"
-        self._say("Paper import undone. Import the scanned sheets again.")
+        self._say("undone")
         self._refresh_paper()
         self._show_buttons()
 
@@ -370,25 +453,25 @@ class CaptureSession(QWidget):
         self.capture.reset_capture()
         self.capture.setEnabled(False)
         self._refresh_paper()
-        self._say("Enter the participant code and press Start.")
+        self._say("start_hint")
         self._show_buttons()
 
     # --- helpers ------------------------------------------------------------
     def _start_from_form(self):
-        forger = self.forger_code.text().strip() if self.mode.currentText() == "Forgery" else ""
+        forger = self.forger_code.text().strip() if self.mode.currentIndex() == 1 else ""
         try:
             self.start(self.code.text().strip(), self.op.text().strip(), forger or None)
-        except ValueError as exc:
-            self._say(str(exc))
+        except ValueError:
+            self._say("bad_code")
 
     def _choose_sheets(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Scanned sheets, in order", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff)")
+            self, self._t("dlg_sheets"), "", "Images (*.png *.jpg *.jpeg *.tif *.tiff)")
         if paths:
             try:
                 self.save_paper(paths)
             except (ValueError, FileExistsError) as exc:
-                self._say(f"Not saved: {exc}")
+                self._say("not_saved", error=exc)
 
     def _edit_selected(self, action, *args):
         if self.paper_list.currentIndex() >= 0 and self.paper_saved:
@@ -396,12 +479,12 @@ class CaptureSession(QWidget):
 
     def _choose_replacement(self):
         image, _ = QFileDialog.getOpenFileName(
-            self, "Image of this one signature", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff)")
+            self, self._t("dlg_replace"), "", "Images (*.png *.jpg *.jpeg *.tif *.tiff)")
         if image:
             try:
                 self._edit_selected(self.replace_paper, image)
             except ValueError as exc:
-                self._say(f"Not replaced: {exc}")
+                self._say("not_replaced", error=exc)
 
     def _refresh_paper(self):
         """List what the last paper import saved, keep the chosen box chosen, and redraw the
@@ -441,7 +524,7 @@ class CaptureSession(QWidget):
     def _save_tablet(self, events, role, index="", forger=None, attempt=""):
         path = signature_path(self.root, self.participant, "tablet", role,
                               index=index or None, forger=forger, attempt=attempt or None)
-        write_raw_events(path, events)
+        write_raw_events(path, events, self.root)
         self._manifest(path, "tablet", role, index=index, attempt=attempt)
 
     def _manifest(self, path, modality, role, index="", attempt=""):
@@ -451,13 +534,46 @@ class CaptureSession(QWidget):
             "attempt": attempt, "operator": self.operator,
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), **self.capture.capture_info()})
 
-    def _to_paper(self, text):
+    def _to_paper(self, key, **values):
         self.stage = "paper"
         self.capture.setEnabled(False)
-        self._say(text)
+        self._say(key, **values)
 
-    def _say(self, text):
-        self.prompt.setText(text)
+    # --- language -----------------------------------------------------------
+    def set_language(self, lang):
+        """Show every instruction in lang ("en" or "ar"), including the prompt already shown."""
+        self.lang = lang
+        self._retranslate()
+
+    def toggle_language(self):
+        self.set_language("ar" if self.lang == "en" else "en")
+
+    def _t(self, key, **values):
+        return TEXT[self.lang][key].format(**values)
+
+    def _say(self, key, **values):
+        self._last = (key, values)
+        self.prompt.setText(self._t(key, **values))
+
+    def _retranslate(self):
+        for widget, key in ((self.btn_start, "btn_start"), (self.capture.btn_confirm, "btn_approve"),
+                            (self.capture.btn_reset, "btn_redo"), (self.btn_skip, "btn_skip"),
+                            (self.btn_continue, "btn_continue"), (self.btn_paper, "btn_paper"),
+                            (self.btn_end, "btn_end"), (self.btn_delete, "btn_delete"),
+                            (self.btn_replace, "btn_replace"), (self.btn_undo, "btn_undo")):
+            widget.setText(self._t(key))
+        for field, key in ((self.code, "ph_code"), (self.op, "ph_operator"),
+                           (self.forger_code, "ph_forger")):
+            field.setPlaceholderText(self._t(key))
+        self.mode.setItemText(0, self._t("mode_genuine"))
+        self.mode.setItemText(1, self._t("mode_forgery"))
+        self.btn_lang.setText("English" if self.lang == "ar" else "العربية")
+        rtl = self.lang == "ar"
+        self.prompt.setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
+        self.prompt.setAlignment(Qt.AlignLeading | Qt.AlignVCenter)   # right in Arabic, left in English
+        self.capture.label.setText(self._t("canvas_hint"))
+        key, values = self._last
+        self._say(key, **values)
 
     def _show_buttons(self):
         self.btn_skip.setVisible(self.stage == "practice")
