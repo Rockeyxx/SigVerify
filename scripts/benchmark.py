@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
     SEED,
-    TEMPORAL_CHANNELS,
+    TEMPORAL_CHANNELS, TEMPORAL_CHANNEL_WIDTHS,
     BATCH_SIZE, CONTRASTIVE_MARGIN, NUM_WORKERS,
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
@@ -160,7 +160,7 @@ def parse_args(argv=None):
                              "recovers its channel count from the checkpoint but the "
                              "parser cannot, so a mismatch is a loud shape error here "
                              "rather than a plausible wrong number")
-    parser.add_argument("--temporal-channels", choices=["xyp", "tilt", "dt"],
+    parser.add_argument("--temporal-channels", choices=sorted(TEMPORAL_CHANNEL_WIDTHS),
                         default=TEMPORAL_CHANNELS,
                         help="Must match the channels the weights were trained on. "
                              "The model recovers its own width from the checkpoint, "
@@ -312,7 +312,8 @@ def main(argv=None):
     # Ensure evaluation partition matches the checkpoint's split record.
     record = check_split_against_record(args.weights, train_ids, test_ids,
                                         require_same_test=not args.writers,
-                                        max_gap_ms=MAX_GAP_MS)
+                                        max_gap_ms=MAX_GAP_MS,
+                                        temporal_channels=getattr(args, "temporal_channels", None))
     print("Split record: matches the checkpoint" if record else
           "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")
     if record and record.get("input_size"):

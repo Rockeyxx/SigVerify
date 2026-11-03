@@ -167,8 +167,9 @@ class TestTheDisambiguationRule:
     **column count**, which is the one property whose two admissible ranges
     cannot overlap:
 
-    * a trajectory carries `TEMPORAL_CHANNEL_WIDTHS` columns — 3, 4 or 5, and
-      widening past that is banned outright under AGENTS.md Drift Prevention;
+    * a trajectory carries `TEMPORAL_CHANNEL_WIDTHS` columns, 3 to 7. Widths 6
+      and 7 are the research-only tilt modes; the capture contract stays 4
+      under AGENTS.md Drift Prevention;
     * a scan is at least `MIN_BBOX_PIXELS` (64) wide, because the ink bounding
       box cannot exceed the canvas and anything under that floor already fails
       `quality_gate`.

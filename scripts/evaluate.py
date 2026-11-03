@@ -673,7 +673,8 @@ def parse_args(argv=None):
                              "move a training writer into the scored split.")
     parser.add_argument("--temporal-channels", default=TEMPORAL_CHANNELS,
                         choices=sorted(TEMPORAL_CHANNEL_WIDTHS),
-                        help="Temporal channel mode: 'xyp' (3ch), 'dt' (4ch), or 'tilt' (5ch)")
+                        help="Temporal channel mode: 'xyp' (3ch), 'dt' (4ch), or 'tilt' (5ch); "
+                             "dt_tilt0 / dt_tilt1 / dt_tilt_flag (research only, see AGENTS.md)")
     parser.add_argument("--alpha-sweep", action="store_true", help="Run α grid search")
     args = parser.parse_args(argv)
     if args.split_seed is None:
