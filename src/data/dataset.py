@@ -740,7 +740,7 @@ class TemporalSignatureDataset(Dataset):
     """PyTorch Dataset loading temporal signature trajectory pairs for Siamese training."""
 
     def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42,
-                 device_augment=False, negatives=None):
+                 device_augment=False, negatives=None, tilt_hide_prob=0.0):
         self.pairs = pairs
         self.labels = labels
         # Triplet arms only: one skilled forgery of each pair's writer.
@@ -748,8 +748,24 @@ class TemporalSignatureDataset(Dataset):
         self.augment = augment
         self.augment_scale = augment_scale
         self.device_augment = device_augment
+        # dt_tilt_flag research arm only; 0 draws nothing, so other recipes cannot move.
+        self.tilt_hide_prob = tilt_hide_prob
         self._seed = seed
         self._rng = np.random.default_rng(seed)
+
+    def _maybe_hide_tilt(self, sequence):
+        """Hide real tilt (cols 4-5) and clear `present` (col 6) with tilt_hide_prob."""
+        if not self.tilt_hide_prob:
+            return sequence
+        sequence = np.asarray(sequence)
+        if sequence.shape[1] != 7:
+            raise ValueError(f"tilt hiding needs the 7-wide dt_tilt_flag layout, "
+                             f"got width {sequence.shape[1]}")
+        if sequence[0, 6] != 1.0 or self._rng.random() >= self.tilt_hide_prob:
+            return sequence
+        hidden = sequence.copy()
+        hidden[:, 4:7] = 0.0
+        return hidden
 
     def _augment(self, sequence):
         """Perturb a trajectory with scaled augmentation parameters."""
@@ -771,6 +787,8 @@ class TemporalSignatureDataset(Dataset):
             # Each side as if captured on its own tablet inside the spec.
             seq1 = augment_device(seq1, self._rng)
             seq2 = augment_device(seq2, self._rng)
+        seq1 = self._maybe_hide_tilt(seq1)
+        seq2 = self._maybe_hide_tilt(seq2)
         item = (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),
@@ -783,4 +801,5 @@ class TemporalSignatureDataset(Dataset):
             negative = self._augment(negative)
         if self.device_augment:
             negative = augment_device(negative, self._rng)
+        negative = self._maybe_hide_tilt(negative)
         return item + (torch.tensor(negative, dtype=torch.float32),)

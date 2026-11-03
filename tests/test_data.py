@@ -990,3 +990,51 @@ class TestDeviceAugmentation:
         out = augment_device(self._traj(), np.random.default_rng(1), pressure_levels=1024)
         steps = out[:, 2] * 1023
         assert np.allclose(steps, np.round(steps), atol=1e-3)
+
+
+class TestTiltHiding:
+    @staticmethod
+    def _seq(present=1.0, width=7):
+        n = 20
+        cols = [np.linspace(0, 1, n), np.linspace(1, 0, n), np.full(n, 0.5),
+                np.full(n, 0.1), np.full(n, 0.3), np.full(n, 0.6)]
+        if width == 7:
+            cols.append(np.full(n, present))
+        return np.column_stack(cols).astype(np.float32)
+
+    def test_prob_one_hides_tilt_and_flag(self):
+        seq = self._seq()
+        a, b, _ = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=1.0)[0]
+        for side in (a, b):
+            assert torch.equal(side[:, 4:], torch.zeros(len(seq), 3))
+            assert torch.equal(side[:, :4], torch.tensor(seq[:, :4]))
+
+    def test_prob_zero_is_identity_and_draws_nothing(self):
+        seq = self._seq()
+        ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0])
+        before = ds._rng.bit_generator.state
+        a, _, _ = ds[0]
+        assert ds._rng.bit_generator.state == before
+        assert torch.equal(a, torch.tensor(seq))
+
+    def test_absent_tilt_is_never_touched(self):
+        seq = self._seq(present=0.0)
+        a, _, _ = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=1.0)[0]
+        assert torch.equal(a, torch.tensor(seq))
+
+    def test_same_seed_same_pattern(self):
+        seq = self._seq()
+        pairs = [(seq, seq.copy())] * 20
+
+        def pattern():
+            ds = TemporalSignatureDataset(pairs, [1.0] * 20, tilt_hide_prob=0.5, seed=7)
+            return [float(ds[i][0][0, 6]) for i in range(20)]
+        first = pattern()
+        assert first == pattern()
+        assert 0.0 in first and 1.0 in first
+
+    def test_refuses_non_flag_width(self):
+        seq = self._seq(width=6)
+        ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=0.5)
+        with pytest.raises(ValueError, match="7"):
+            ds[0]
