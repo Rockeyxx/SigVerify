@@ -119,9 +119,25 @@ def test_the_arabic_toggle_translates_and_right_aligns(app):
 def test_the_window_uses_the_gui_theme(app):
     from src.gui.styles import STYLE
     d = CollectDialog(count=1)
-    assert d.styleSheet() == STYLE
+    assert d.styleSheet().startswith(STYLE)
     assert d.btn_confirm.property("role") == "primary"
-    assert d.btn_restart.property("role") == "ghost"
     assert d.btn_lang.property("role") == "ghost"
-    assert d.counter.property("role") == "title"
+
+
+def test_start_over_is_a_visible_button(app):
+    """'ghost' has no background, so Start over read as plain text: it gets the lighter panel colour."""
+    from src.gui.styles import ACCENT, PRIMARY_LIGHT
+    d = CollectDialog(count=1)
+    assert d.btn_restart.property("role") == "secondary"
+    rule = (f'QPushButton[role="secondary"] {{ background-color: {PRIMARY_LIGHT}; '
+            f'border: 1px solid {ACCENT}; }}')
+    assert rule in d.styleSheet()
     assert d.done.property("role") == "status-success"
+
+
+def test_the_instructions_are_large(app):
+    """The signer reads them standing at the tablet: the theme's large roles, not 'muted' 12 px."""
+    d = CollectDialog(count=5)
+    assert d.counter.property("role") == "hero-title"          # 28 px in STYLE
+    assert d.capture.label.property("role") == "title"         # 20 px in STYLE
+    assert 'QLabel[role="status-success"] { font-size: 24px; }' in d.styleSheet()

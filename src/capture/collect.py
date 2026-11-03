@@ -6,7 +6,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from src.capture.tablet import SignatureCaptureWidget
-from src.gui.styles import STYLE
+from src.gui.styles import ACCENT, ACCENT_DARK, PRIMARY_LIGHT, STYLE
 
 TEXT = {
     "en": {
@@ -42,19 +42,27 @@ class CollectDialog(QDialog):
             raise ValueError(f"count must be at least 1, got {count}")
         self.count, self.lang, self.signatures = count, lang, []
         self.setModal(True)
-        self.setStyleSheet(STYLE)            # same look outside the app; the app applies it too
+        # The app theme (same look outside the app), plus a larger "Thank you" and a lighter
+        # Start over button ('ghost' has no background, so it read as plain text).
+        self.setStyleSheet(
+            STYLE
+            + 'QLabel[role="status-success"] { font-size: 24px; }'
+            + f'QPushButton[role="secondary"] {{ background-color: {PRIMARY_LIGHT}; '
+              f'border: 1px solid {ACCENT}; }}'
+            + f'QPushButton[role="secondary"]:hover {{ background-color: {ACCENT_DARK}; }}')
 
-        self.counter = _role(QLabel(), "title")
+        self.counter = _role(QLabel(), "hero-title")
         self.capture = SignatureCaptureWidget(self)
         self.capture.signature_confirmed.connect(self._on_signature)
         self.done = _role(QLabel(), "status-success")
         self.btn_confirm = _role(QPushButton(), "primary")
         self.btn_confirm.clicked.connect(self.confirm)
-        self.btn_restart = _role(QPushButton(), "ghost")
+        self.btn_restart = _role(QPushButton(), "secondary")
         self.btn_restart.clicked.connect(self.start_over)
         self.btn_lang = _role(QPushButton(), "ghost")
         self.btn_lang.clicked.connect(self.toggle_language)
-        _role(self.capture.label, "muted")
+        _role(self.capture.label, "title")       # the instruction, read standing at the tablet
+        self.capture.label.setWordWrap(True)
 
         top = QHBoxLayout()
         top.addWidget(self.counter, 1)
