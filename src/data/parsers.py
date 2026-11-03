@@ -30,6 +30,7 @@ from config.settings import (
     SIGCOMP2011_DIR,
     SVC2004_DIR,
     TEMPORAL_SAMPLE_PERIOD_MS,
+    TILT_CHANNEL_MODES,
     UTSIG_DIR,
 )
 
@@ -257,6 +258,19 @@ def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
     return writers
 
 
+def _tilt_mode_extra(dt, tilt, mode):
+    """[L,1] dt plus [L,2] tilt (None -> the mode's fill), plus `present` in flag mode."""
+    n = len(dt)
+    present = tilt is not None
+    if tilt is None:
+        tilt = np.full((n, 2), TILT_CHANNEL_MODES[mode], dtype=np.float32)
+    columns = [np.asarray(dt, dtype=np.float32).reshape(n, 1),
+               np.asarray(tilt, dtype=np.float32)]
+    if mode == "dt_tilt_flag":
+        columns.append(np.full((n, 1), 1.0 if present else 0.0, dtype=np.float32))
+    return np.column_stack(columns)
+
+
 def load_svc2004_file(path, extra_channels=None, float32_parse=False):
     """Load an SVC2004 signature file into a normalized trajectory array.
 
@@ -282,16 +296,20 @@ def load_svc2004_file(path, extra_channels=None, float32_parse=False):
             f"'{extra_channels}' — only 7-column Task2 files can."
         )
     if extra_channels:
+        gaps = np.zeros(len(rows), dtype=np.float32)
+        gaps[1:] = np.diff(rows[:, 2])
+        dt = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        tilt = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
+                                rows[:, 5] / SVC_ALTITUDE_MAX])
         if extra_channels == "tilt":
-            extra = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
-                                     rows[:, 5] / SVC_ALTITUDE_MAX])
+            extra = tilt
         elif extra_channels == "dt":
-            gaps = np.zeros(len(rows), dtype=np.float32)
-            gaps[1:] = np.diff(rows[:, 2])
-            extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+            extra = dt
+        elif extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(dt, tilt, extra_channels)
         else:
-            raise ValueError(f"Unknown extra_channels '{extra_channels}' "
-                             "— expected 'tilt', 'dt' or None")
+            raise ValueError(f"Unknown extra_channels '{extra_channels}' — expected one of "
+                             f"'tilt', 'dt', {', '.join(map(repr, TILT_CHANNEL_MODES))} or None")
 
     return normalize_trajectory(xy, pressure, extra)
 
@@ -390,11 +408,13 @@ def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCO
         )
 
     extra = None
-    if extra_channels == "dt":
+    if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
         # Compute elapsed time between pen-down samples based on sampling period.
         gaps = np.zeros(len(pen_down), dtype=np.float32)
         gaps[1:] = np.diff(pen_down) * SIGCOMP_SAMPLE_MS
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        if extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(extra, None, extra_channels)
     elif extra_channels is not None:
         raise ValueError(
             f"{corpus} cannot supply '{extra_channels}' — the archive ships "
@@ -622,11 +642,13 @@ def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False)
         )
 
     extra = None
-    if extra_channels == "dt":
+    if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
         # Calculate time delta between consecutive samples.
         gaps = np.zeros(len(rows), dtype=np.float32)
         gaps[1:] = np.diff(rows[:, 2])
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        if extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(extra, None, extra_channels)
     elif extra_channels is not None:
         raise ValueError(
             f"DeepSignDB cannot supply '{extra_channels}' — only 'dt' is "
@@ -744,10 +766,10 @@ _PARSERS = {
 
 # Supported additional channels by dataset.
 EXTRA_CHANNEL_SUPPORT = {
-    "svc2004": frozenset({"tilt", "dt"}),
-    "svc2004_task2": frozenset({"tilt", "dt"}),
-    "sigcomp2011": frozenset({"dt"}),
-    "deepsigndb": frozenset({"dt"}),
+    "svc2004": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
+    "svc2004_task2": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
+    "sigcomp2011": frozenset({"dt", *TILT_CHANNEL_MODES}),
+    "deepsigndb": frozenset({"dt", *TILT_CHANNEL_MODES}),
 }
 
 

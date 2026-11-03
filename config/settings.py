@@ -160,7 +160,15 @@ INK_CROP_PAD = 0.08                     # Margin around the ink, as a fraction o
 # Capture hardware must supply timestamps (channel 3 of standard 7-channel tablet data).
 TEMPORAL_CHANNELS = "dt"                # "xyp" for the legacy 3-channel weights
 # Input feature dimension per channel mode. Used to build model input width dynamically.
-TEMPORAL_CHANNEL_WIDTHS = {"xyp": 3, "dt": 4, "tilt": 5}
+TEMPORAL_CHANNEL_WIDTHS = {"xyp": 3, "dt": 4, "tilt": 5,
+                           # Research only (AGENTS.md exception): dt + tilt, with a fill
+                           # value for corpora without tilt. The fill is in the name
+                           # because a checkpoint records its width, not its fill.
+                           "dt_tilt0": 6, "dt_tilt1": 6, "dt_tilt_flag": 7}
+# Tilt mode -> fill value for corpora that carry no tilt.
+TILT_CHANNEL_MODES = {"dt_tilt0": 0.0, "dt_tilt1": 1.0, "dt_tilt_flag": 0.0}
+# dt_tilt_flag only: chance a training-side SVC2004 sequence has its tilt hidden.
+TEMPORAL_TILT_HIDE_PROB = 0.5
 TEMPORAL_INPUT_FEATURES = TEMPORAL_CHANNEL_WIDTHS[TEMPORAL_CHANNELS]
 TEMPORAL_EMBEDDING_DIM = 128
 TEMPORAL_HIDDEN_SIZE = 256

@@ -24,6 +24,7 @@ from config.settings import (
     UTSIG_DIR,
 )
 from src.data.parsers import (
+    EXTRA_CHANNEL_SUPPORT,
     MAX_GAP_MS,
     SIGCOMP_DECIMATION,
     deepsigndb_source,
@@ -935,6 +936,67 @@ class TestTemporalGapChannel:
         writers = parse_sigcomp2011(root, extra_channels="dt")
 
         assert writers["sigcomp_Dutch_001"]["genuine"][0].shape[1] == 4
+
+
+class TestTiltChannelModes:
+    """dt + tilt modes: real tilt on SVC2004 Task 2, the mode's fill elsewhere."""
+
+    _write_hwr = TestTemporalGapChannel._write_hwr
+    _write_svc_task2 = TestTemporalGapChannel._write_svc_task2
+    DECIMATED_FORCE = TestTemporalGapChannel.DECIMATED_FORCE
+
+    @pytest.mark.parametrize("mode,width", [("dt_tilt0", 6), ("dt_tilt1", 6), ("dt_tilt_flag", 7)])
+    def test_svc_carries_real_dt_and_tilt(self, tmp_path, mode, width):
+        svc = os.path.join(tmp_path, "U1S1.TXT")
+        self._write_svc_task2(svc, [0, 10, 50, 60, 70])
+        out = load_svc2004_file(svc, extra_channels=mode)
+        dt = load_svc2004_file(svc, extra_channels="dt")
+        tilt = load_svc2004_file(svc, extra_channels="tilt")
+        assert out.shape == (5, width)
+        np.testing.assert_array_equal(out[:, :4], dt)
+        np.testing.assert_array_equal(out[:, 4:6], tilt[:, 3:5])
+        if mode == "dt_tilt_flag":
+            np.testing.assert_array_equal(out[:, 6], 1.0)
+
+    @pytest.mark.parametrize("mode,fill,width", [("dt_tilt0", 0.0, 6), ("dt_tilt1", 1.0, 6),
+                                                 ("dt_tilt_flag", 0.0, 7)])
+    def test_sigcomp_fills_tilt(self, tmp_path, mode, fill, width):
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+        out = load_sigcomp2011_file(path, extra_channels=mode)
+        dt = load_sigcomp2011_file(path, extra_channels="dt")
+        assert out.shape == (len(dt), width)
+        np.testing.assert_array_equal(out[:, :4], dt)
+        np.testing.assert_array_equal(out[:, 4:6], fill)
+        if mode == "dt_tilt_flag":
+            np.testing.assert_array_equal(out[:, 6], 0.0)
+
+    @pytest.mark.parametrize("mode,fill,width", [("dt_tilt0", 0.0, 6), ("dt_tilt1", 1.0, 6),
+                                                 ("dt_tilt_flag", 0.0, 7)])
+    def test_deepsigndb_fills_tilt(self, tmp_path, mode, fill, width):
+        path = tmp_path / "u0240_g_synthetic.txt"
+        rows = [f"{100 + i} {200 + i} {70_000_000 + 10 * i} 1 1500 700 500" for i in range(50)]
+        path.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        out = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels=mode)
+        dt = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels="dt")
+        assert out.shape == (len(dt), width)
+        np.testing.assert_array_equal(out[:, :4], dt)
+        np.testing.assert_array_equal(out[:, 4:6], fill)
+        if mode == "dt_tilt_flag":
+            np.testing.assert_array_equal(out[:, 6], 0.0)
+
+    def test_sigcomp_still_refuses_plain_tilt(self, tmp_path):
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+        with pytest.raises(ValueError, match="tilt"):
+            load_sigcomp2011_file(path, extra_channels="tilt")
+
+    def test_settings_and_support_agree(self):
+        from config.settings import TEMPORAL_CHANNEL_WIDTHS, TILT_CHANNEL_MODES
+        assert set(TILT_CHANNEL_MODES) <= set(TEMPORAL_CHANNEL_WIDTHS)
+        for corpus, modes in EXTRA_CHANNEL_SUPPORT.items():
+            if "dt" in modes:
+                assert set(TILT_CHANNEL_MODES) <= modes, corpus
 
 
 class TestLoadNfi2009File:
