@@ -339,3 +339,12 @@ def test_files_outside_the_data_folder_or_behind_a_symlink_are_refused(tmp_path)
     with pytest.raises(ValueError):
         cs.append_manifest(root, {"file": "x"})
     assert outside.read_text() == "keep"
+
+
+def test_redo_keeps_the_box_hint_in_arabic(app, tmp_path):
+    """The widget's Redo writes its own English line; the session must put the Arabic hint back."""
+    session = cs.CaptureSession(root=tmp_path)
+    session.set_language("ar")
+    session.start("P07", operator="op")
+    session.capture.btn_reset.click()
+    assert session.capture.label.text() == cs.TEXT["ar"]["canvas_hint"]

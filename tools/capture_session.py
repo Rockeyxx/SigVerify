@@ -268,6 +268,9 @@ class CaptureSession(QWidget):
 
         self.capture = SignatureCaptureWidget()
         self.capture.signature_confirmed.connect(self._on_signature)
+        # Redo writes the widget's own English line; ours runs after it (connection order).
+        self.capture.btn_reset.clicked.connect(
+            lambda: self.capture.label.setText(self._t("canvas_hint")))
         self.capture.setEnabled(False)
 
         self.btn_skip = QPushButton()
