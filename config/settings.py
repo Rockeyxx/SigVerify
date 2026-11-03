@@ -50,6 +50,7 @@ DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 # (OfflineReal/) of the same signing. **Restricted License Dataset**, as DeepSignDB:
 # evaluation and calibration only; no weight trained on it ships.
 BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
+INHOUSE_DIR = os.path.join(DATA_DIR, "inhouse")      # XPPen campaign: <participant>/ + manifest.csv
 
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
@@ -136,6 +137,23 @@ TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
 MIN_TRAJECTORY_POINTS = 10              # Trajectories below 10 points lack sufficient detail
 MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean threshold
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
+TRAJECTORY_DT_MEDIAN_TOLERANCE = 0.10   # Median dt may sit at most 10% off one 10 ms grid step
+CAPTURE_DEVICE_MODEL = "XP-Pen Deco 640"  # Enrol and verify on this one tablet model (F23, ENG_REPORT G4)
+CAMPAIGN_GENUINE_PER_MODALITY = 12      # Genuine signatures per volunteer on tablet and on paper
+CAMPAIGN_PRACTICE_SIGNINGS = 3          # Tablet practice signatures first; never saved
+CAMPAIGN_BREAK_AFTER = 6                # Short break after this many tablet genuines
+CAMPAIGN_FORGERY_ATTEMPTS = 2           # A forger's attempts per victim; "Sign again" before the 2nd
+SHEET_GRID = (4, 2)                     # Paper sheet boxes: rows, columns (8 per A4 sheet)
+SHEET_MARGIN = 0.05                     # Fraction of each box cut away, so the printed border stays out
+# Ink crop for scanned paper boxes (tools/capture_session.py, ENG_REPORT A6). The app's crop_to_ink
+# drops faint ballpoint strokes; this one scores ink against the local paper, so shadows cancel.
+INK_BACKGROUND_KERNEL = 51              # Median blur size (px) that estimates the paper under the ink
+INK_MIN_CONTRAST = 18                   # Ink is at least this much darker than its local paper (0-255)
+INK_MIN_SATURATION = 20                 # ...and coloured: grey shadows, creases and page edges are not
+INK_HUE_RANGE = (95, 165)               # Blue ballpoint, OpenCV hue 0-179
+INK_CLUSTER_GAP = 61                    # Ink pieces closer than this (px) belong to one signature
+INK_MIN_PIXELS = 200                    # Fewer ink pixels than this: no signature in the box
+INK_CROP_PAD = 0.08                     # Margin around the ink, as a fraction of its longer side
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
 # The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.

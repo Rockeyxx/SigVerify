@@ -49,8 +49,10 @@ from config.settings import (
     TEMPORAL_DEVICE_AUG_RATE_HZ, TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA,
     TEMPORAL_DEVICE_AUG_PRESSURE_GAIN, TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS,
     SPATIAL_SPLIT_RATIOS,
+    TEMPORAL_SAMPLE_PERIOD_MS, TRAJECTORY_DT_MEDIAN_TOLERANCE,
 )
 from src.data.renderer import render_trajectory_to_image
+from src.data.parsers import MAX_GAP_MS
 
 # Channel names used in gate error messages, based on configured temporal features.
 _CHANNEL_NAMES = {
@@ -294,6 +296,17 @@ def trajectory_gate(trajectory):
             return False, {**details, "error":
                             "dt outside [0, 1] — it is the inter-sample gap clipped at "
                             "100 ms and scaled, not a raw timestamp."}
+        # One grid step is TEMPORAL_SAMPLE_PERIOD_MS of the MAX_GAP_MS clip (0.1 for 10 of 100 ms).
+        # Pen lifts are a minority of points, so the median sits on the step.
+        step = TEMPORAL_SAMPLE_PERIOD_MS / MAX_GAP_MS
+        median_dt = float(np.median(trajectory[:, 3]))
+        details["dt_median"] = round(median_dt, 4)
+        if abs(median_dt - step) > TRAJECTORY_DT_MEDIAN_TOLERANCE * step:
+            return False, {**details, "error":
+                            f"dt median {median_dt:.4f} is a {median_dt * MAX_GAP_MS:.1f} ms "
+                            f"grid, expected {step:.4f} ({TEMPORAL_SAMPLE_PERIOD_MS:.0f} ms). "
+                            "Resample by timestamp onto the 10 ms grid (AGENTS.md, "
+                            "Device timing and pressure)."}
 
     return True, details
 
