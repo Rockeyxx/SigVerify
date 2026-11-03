@@ -54,6 +54,8 @@ class CollectDialog(QDialog):
         self.counter = _role(QLabel(), "hero-title")
         self.capture = SignatureCaptureWidget(self)
         self.capture.signature_confirmed.connect(self._on_signature)
+        # Redo writes the widget's own English line; ours runs after it (connection order).
+        self.capture.btn_reset.clicked.connect(lambda: self.capture.label.setText(self._t("hint")))
         self.done = _role(QLabel(), "status-success")
         self.btn_confirm = _role(QPushButton(), "primary")
         self.btn_confirm.clicked.connect(self.confirm)

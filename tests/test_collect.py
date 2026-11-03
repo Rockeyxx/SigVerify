@@ -141,3 +141,10 @@ def test_the_instructions_are_large(app):
     assert d.counter.property("role") == "hero-title"          # 28 px in STYLE
     assert d.capture.label.property("role") == "title"         # 20 px in STYLE
     assert 'QLabel[role="status-success"] { font-size: 24px; }' in d.styleSheet()
+
+
+def test_redo_keeps_the_instruction_in_the_chosen_language(app):
+    """The widget's Redo writes its own English line; in Arabic the Arabic hint must come back."""
+    d = CollectDialog(count=5, lang="ar")
+    d.capture.btn_reset.click()
+    assert d.capture.label.text() == collect.TEXT["ar"]["hint"]
