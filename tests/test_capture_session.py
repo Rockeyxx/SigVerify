@@ -683,3 +683,14 @@ def test_an_unreadable_scan_is_refused_by_name(tmp_path):
     bad.write_text("not an image")
     with pytest.raises(ValueError, match="bad.png"):
         cs.read_sheets([bad])
+
+
+def test_a_pale_stretch_of_stroke_does_not_cut_the_signature_in_two():
+    """A scan app's whitening leaves thin ink nearly grey (P03, saturation about 14): the pale
+    stretch must still join the two strong ends, or only the bigger end is kept."""
+    box = np.full((500, 1000, 3), 255, np.uint8)
+    cv2.line(box, (100, 250), (300, 250), (200, 60, 20), 4)                  # strong blue
+    cv2.line(box, (300, 250), (600, 250), (170, 160, 160), 3)                # pale, saturation 15
+    cv2.line(box, (600, 250), (720, 250), (200, 60, 20), 4)                  # strong blue
+    _, _, left, right = cs.ink_box(box)
+    assert left < 100 and right > 720
