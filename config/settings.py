@@ -144,6 +144,7 @@ CAMPAIGN_PRACTICE_SIGNINGS = 3          # Tablet practice signatures first; neve
 CAMPAIGN_BREAK_AFTER = 6                # Short break after this many tablet genuines
 CAMPAIGN_FORGERY_ATTEMPTS = 2           # A forger's attempts per victim; "Sign again" before the 2nd
 SHEET_GRID = (4, 2)                     # Paper sheet boxes: rows, columns (8 per A4 sheet)
+SHEET_DPI = 300                         # Printed sheet and scanned PDFs are drawn at this resolution
 SHEET_MARGIN = 0.05                     # Fraction of each box cut away, so the printed border stays out
 # Ink crop for scanned paper boxes (tools/capture_session.py, ENG_REPORT A6). The app's crop_to_ink
 # drops faint ballpoint strokes; this one scores ink against the local paper, so shadows cancel.

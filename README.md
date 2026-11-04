@@ -497,8 +497,10 @@ signature into the `[L, 4]` array (x, y, pressure, dt) defined in `AGENTS.md`.
 sheet. Print the sheet with `python tools/capture_session.py --make-sheet sheet.pdf` (A4, actual
 size, two-sided). The scan is cut into one image per box. Every tablet event, with hover and
 tilt, is saved as CSV. Each paper box is saved in colour, with its ink crop beside it, and the
-operator can delete or replace a box before ending the session. Files go to `data/inhouse/`,
-one manifest row each.
+operator can delete or replace a box before ending the session. The paper can also be imported
+later. Starting a code, or a forger and volunteer pair, that already has files opens a menu to
+continue the tablet, import or review the paper, redo tablet signatures, or delete. Files go to
+`data/inhouse/`, one manifest row each.
 
 ![Capture session, signing on the tablet (example signature)](assets/screenshots/capture_session_signing.png)
 ![Capture session, paper import with the ink crops (example signature)](assets/screenshots/capture_session_paper.png)

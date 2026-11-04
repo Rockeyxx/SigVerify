@@ -1,10 +1,12 @@
 """The research logger: helpers (names, raw CSV, manifest, sheet grid) and the session flow."""
 import csv
 import os
+import shutil
 
 import cv2
 import numpy as np
 import pytest
+from PIL import Image
 
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_GENUINE_PER_MODALITY,
                              CAMPAIGN_PRACTICE_SIGNINGS, SHEET_GRID)
@@ -348,3 +350,336 @@ def test_redo_keeps_the_box_hint_in_arabic(app, tmp_path):
     session.start("P07", operator="op")
     session.capture.btn_reset.click()
     assert session.capture.label.text() == cs.TEXT["ar"]["canvas_hint"]
+
+
+# --- operator menu: a code (or forger + victim) that already has saved files ---------------
+
+def _saved_tablet_files(root, participant, numbers, forger=None):
+    """Tablet files with manifest rows, as an earlier session would have left them."""
+    for n in numbers:
+        kind = dict(role="forgery", forger=forger, attempt=n) if forger else \
+            dict(role="genuine", index=n)
+        path = cs.signature_path(root, participant, "tablet", **kind)
+        cs.write_raw_events(path, [], root=root)
+        cs.append_manifest(root, {"file": str(path.relative_to(root)), "participant": participant,
+                                  "modality": "tablet", "role": kind["role"]})
+
+
+def _all_genuine():
+    return range(1, CAMPAIGN_GENUINE_PER_MODALITY + 1)
+
+
+def _session(tmp_path, participant="P07", forger=None, confirm=True, typed=""):
+    session = cs.CaptureSession(root=tmp_path)
+    session._confirm = lambda _text: confirm
+    session._typed = lambda _text: typed
+    session.start(participant, operator="op", forger=forger)
+    return session
+
+
+def _shown(widget):
+    return not widget.isHidden()
+
+
+def _sheet(tmp_path):
+    sheet = tmp_path / "sheet.png"
+    cs.make_sheet(sheet)
+    return sheet
+
+
+def test_next_index_fills_a_deleted_number_first(tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 2, 4])
+    assert cs.next_index(tmp_path, "P07", "tablet") == 3
+
+
+def test_saved_tablet_lists_extras_and_keeps_forgers_apart(tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 13, 14])
+    _saved_tablet_files(tmp_path, "P07", [1], forger="P02")
+    _saved_tablet_files(tmp_path, "P07", [1, 2], forger="P03")
+    assert [t[2] for t in cs.saved_tablet(tmp_path, "P07")] == [1, 13, 14]
+    assert [t[3] for t in cs.saved_tablet(tmp_path, "P07", "P03")] == [1, 2]
+
+
+def test_replacing_raw_events_swaps_the_file_and_leaves_no_temp(tmp_path):
+    path = cs.signature_path(tmp_path, "P07", "tablet", "genuine", index=1)
+    cs.write_raw_events(path, [], root=tmp_path)
+    cs.replace_raw_events(path, [(1.0, 87, 2.0, 3.0, 0.5, 10.0, -4.0, 1)], root=tmp_path)
+    assert len(list(csv.reader(open(path)))) == 2
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
+def test_a_new_code_goes_straight_to_practice_without_a_menu(app, tmp_path):
+    assert _session(tmp_path).stage == "practice"
+
+
+def test_a_code_with_twelve_signatures_opens_the_menu_and_signs_nothing(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", _all_genuine())
+    session = _session(tmp_path)
+    assert session.stage == "menu" and not session.capture.isEnabled()
+    assert f"{CAMPAIGN_GENUINE_PER_MODALITY}/{CAMPAIGN_GENUINE_PER_MODALITY}" in session.prompt.text()
+    assert _shown(session.btn_paper) and _shown(session.btn_redo_tablet)
+    assert not _shown(session.btn_tablet_continue) and not _shown(session.btn_review)
+
+
+def test_extra_signatures_show_in_the_count_and_can_be_deleted(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", range(1, 15))
+    session = _session(tmp_path)
+    assert f"14/{CAMPAIGN_GENUINE_PER_MODALITY}" in session.prompt.text()
+    session.tablet_pick.setCurrentIndex(14)                     # 0 is "all"; 14 is the 14th file
+    session.btn_delete_tablet.click()
+    assert [t[2] for t in cs.saved_tablet(tmp_path, "P07")] == list(range(1, 14))
+    assert "P07/P07_tablet_genuine_14.csv" not in _manifest_files(tmp_path)
+    assert session.stage == "menu"
+
+
+def test_declining_a_delete_keeps_the_signature(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 2])
+    session = _session(tmp_path, confirm=False)
+    session.btn_delete_tablet.click()
+    assert len(cs.saved_tablet(tmp_path, "P07")) == 2
+
+
+def test_import_from_the_menu_needs_no_signing_and_ends_on_the_check(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", _all_genuine())
+    session = _session(tmp_path)
+    saved = session.save_paper([_sheet(tmp_path)] * 2)
+    assert all(p.exists() for p in saved) and session.stage == "done"
+    assert len(cs.saved_tablet(tmp_path, "P07")) == CAMPAIGN_GENUINE_PER_MODALITY
+
+
+def test_the_tablet_can_end_now_and_the_paper_come_later(app, tmp_path):
+    session = cs.CaptureSession(root=tmp_path)
+    session.start("P07", operator="op")
+    session.stage = "paper"
+    session._show_buttons()
+    assert _shown(session.btn_end)
+    session.btn_end.click()
+    assert session.stage == "idle" and session.participant is None
+
+
+def test_import_after_a_deleted_box_fills_only_that_box(app, tmp_path):
+    session, saved = _imported(tmp_path)
+    session.end_session()
+    kept = saved[1].read_bytes()
+    saved[0].unlink()
+    cs.remove_manifest_rows(tmp_path, [saved[0].relative_to(tmp_path)])
+    session = _session(tmp_path)
+    assert _shown(session.btn_paper)
+    assert session.save_paper([tmp_path / "sheet.png"] * 2) == [saved[0]]
+    assert saved[0].exists() and saved[1].read_bytes() == kept
+    assert len(_manifest_files(tmp_path)) == len(saved)
+
+
+def test_a_complete_paper_set_refuses_a_second_import(app, tmp_path):
+    session, _ = _imported(tmp_path)
+    with pytest.raises(FileExistsError):
+        session.save_paper([tmp_path / "sheet.png"] * 2)
+
+
+def test_review_opens_the_saved_paper_for_editing(app, tmp_path):
+    session, saved = _imported(tmp_path)
+    session.end_session()
+    session = _session(tmp_path)
+    session.btn_review.click()
+    assert session.stage == "done" and session.paper_list.count() == len(saved)
+    assert _shown(session.btn_replace)
+    session.paper_list.setCurrentIndex(1)
+    session.btn_delete.click()
+    assert not saved[1].exists()
+
+
+def test_declining_keeps_the_box_and_the_whole_import(app, tmp_path):
+    session, saved = _imported(tmp_path)
+    session._confirm = lambda _text: False
+    session.btn_delete.click()
+    session.btn_undo.click()
+    assert all(p.exists() for p in saved)
+
+
+def test_continue_fills_the_gap_and_never_makes_a_thirteenth(app, tmp_path):
+    numbers = [n for n in _all_genuine() if n != 5]
+    _saved_tablet_files(tmp_path, "P07", numbers)
+    session = _session(tmp_path)
+    session.btn_tablet_continue.click()
+    session.btn_skip.click()
+    assert session.index == 5
+    _sign_and_approve(session)
+    assert [t[2] for t in cs.saved_tablet(tmp_path, "P07")] == list(_all_genuine())
+    assert session.stage == "paper"
+
+
+def test_finishing_the_tablet_with_paper_complete_returns_to_the_menu(app, tmp_path):
+    session, saved = _imported(tmp_path)
+    session.end_session()
+    _saved_tablet_files(tmp_path, "P07", [n for n in _all_genuine() if n != 1])
+    session = _session(tmp_path)
+    session.btn_tablet_continue.click()
+    session.btn_skip.click()
+    _sign_and_approve(session)
+    assert session.stage == "menu"
+
+
+def test_redoing_one_signature_replaces_it_only_on_approval(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", _all_genuine())
+    session = _session(tmp_path)
+    path = cs.saved_tablet(tmp_path, "P07")[2][0]
+    old = path.read_bytes()
+    session.tablet_pick.setCurrentIndex(3)
+    session.btn_redo_tablet.click()
+    assert session.stage == "redo" and session.capture.isEnabled()
+    assert path.read_bytes() == old                              # nothing lost before approval
+    _sign_and_approve(session)
+    assert path.read_bytes() != old and session.stage == "menu"
+    assert len(cs.saved_tablet(tmp_path, "P07")) == CAMPAIGN_GENUINE_PER_MODALITY
+    assert _manifest_files(tmp_path).count(str(path.relative_to(tmp_path))) == 1
+
+
+def test_redoing_all_walks_every_signature_and_can_stop_midway(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 2, 3])
+    session = _session(tmp_path)
+    session.btn_redo_tablet.click()                              # 0 = all
+    assert len(session.redo) == CAMPAIGN_GENUINE_PER_MODALITY
+    _sign_and_approve(session)
+    assert _shown(session.btn_end)
+    session.btn_end.click()
+    assert session.stage == "idle"
+    assert len(cs.saved_tablet(tmp_path, "P07")) == 3            # the rest stayed as they were
+
+
+def test_deleting_a_person_needs_the_code_typed_and_removes_all_their_data(app, tmp_path):
+    session, saved = _imported(tmp_path)
+    session.end_session()
+    _saved_tablet_files(tmp_path, "P07", _all_genuine())
+    _saved_tablet_files(tmp_path, "P07", [1], forger="P02")      # someone forged them
+    _saved_tablet_files(tmp_path, "P09", [1, 2])                 # another volunteer
+    _saved_tablet_files(tmp_path, "P09", [1], forger="P07")      # they forged someone
+    wrong = _session(tmp_path, typed="P09")
+    wrong.btn_delete_all.click()
+    assert saved[0].exists()
+    right = _session(tmp_path, typed="P07")
+    right.btn_delete_all.click()
+    assert not (tmp_path / "P07").exists() and right.stage == "idle"
+    assert not list(tmp_path.glob("*/*byP07*"))
+    assert sorted(_manifest_files(tmp_path)) == ["P09/P09_tablet_genuine_01.csv",
+                                                 "P09/P09_tablet_genuine_02.csv"]
+
+
+def test_a_victim_with_all_genuines_can_still_be_forged_without_a_menu(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", _all_genuine())
+    assert _session(tmp_path, forger="P02").stage == "forgery"
+
+
+def test_a_forger_with_saved_attempts_opens_the_same_menu(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 2], forger="P02")
+    session = _session(tmp_path, forger="P02")
+    assert session.stage == "menu" and "P02" in session.prompt.text()
+    assert _shown(session.btn_paper) and not _shown(session.btn_tablet_continue)
+    saved = session.save_paper([_sheet(tmp_path)])
+    assert [p.name for p in saved] == ["P07_paper_forgery_byP02_a1.png",
+                                       "P07_paper_forgery_byP02_a2.png"]
+
+
+def test_another_forger_on_the_same_victim_starts_fresh(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 2], forger="P02")
+    assert _session(tmp_path, forger="P03").stage == "forgery"
+
+
+def test_a_forger_continues_at_the_missing_attempt(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1], forger="P02")
+    session = _session(tmp_path, forger="P02")
+    session.btn_tablet_continue.click()
+    assert session.stage == "forgery" and session.attempt == 2
+    _sign_and_approve(session)
+    assert session.stage == "paper"
+    assert len(cs.saved_tablet(tmp_path, "P07", "P02")) == 2
+
+
+def test_redoing_a_forgery_attempt_replaces_it(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1, 2], forger="P02")
+    session = _session(tmp_path, forger="P02")
+    path = cs.saved_tablet(tmp_path, "P07", "P02")[1][0]
+    session.tablet_pick.setCurrentIndex(2)
+    session.btn_redo_tablet.click()
+    _sign_and_approve(session)
+    assert path.stat().st_size > 0 and len(list(csv.reader(open(path)))) > 1
+    row = [r for r in csv.DictReader(open(tmp_path / "manifest.csv"))
+           if r["file"] == str(path.relative_to(tmp_path))]
+    assert len(row) == 1 and (row[0]["forger"], row[0]["attempt"]) == ("P02", "2")
+
+
+def test_deleting_a_forger_keeps_the_victim_and_other_forgers(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", [1])
+    _saved_tablet_files(tmp_path, "P07", [1, 2], forger="P02")
+    _saved_tablet_files(tmp_path, "P07", [1], forger="P03")
+    session = _session(tmp_path, forger="P02", typed="P02")
+    session.btn_delete_all.click()
+    assert session.stage == "idle"
+    assert [p.name for p in sorted((tmp_path / "P07").iterdir())] == [
+        "P07_tablet_forgery_byP03_a1.csv", "P07_tablet_genuine_01.csv"]
+
+
+def test_the_menu_follows_the_language_toggle(app, tmp_path):
+    _saved_tablet_files(tmp_path, "P07", _all_genuine())
+    session = _session(tmp_path)
+    session.toggle_language()
+    assert session.prompt.text() == session._t(*[session._last[0]], **session._last[1])
+    assert session.btn_redo_tablet.text() == cs.TEXT["ar"]["btn_redo_tablet"]
+    assert session.btn_end.text() == cs.TEXT["ar"]["btn_cancel"]
+    assert session.tablet_pick.itemText(0) == cs.TEXT["ar"]["pick_all"]
+
+
+def test_english_and_arabic_have_the_same_texts():
+    assert set(cs.TEXT["en"]) == set(cs.TEXT["ar"])
+
+
+# --- scans in any order, and PDFs straight from the scanner --------------------------------
+
+def _sheet_with_ink(tmp_path, name, boxes):
+    """A scanned page with a blue mark in the first `boxes` boxes."""
+    path = tmp_path / "sheet.png"
+    cs.make_sheet(path)
+    img = cv2.imread(str(path))
+    for t, b, l, r in cs.sheet_boxes(*img.shape[:2])[:boxes]:
+        cv2.ellipse(img, ((l + r) // 2, (t + b) // 2), (180, 60), 0, 0, 360, (200, 60, 20), 6)
+    out = tmp_path / name
+    cv2.imwrite(str(out), img)
+    return out
+
+
+def _no_empty_box(tmp_path, participant="P07"):
+    return all(cs.ink_path(t[0]).exists() for t in cs.saved_paper(tmp_path, participant))
+
+
+def test_the_back_page_given_first_still_imports_in_signing_order(app, tmp_path):
+    front = _sheet_with_ink(tmp_path, "front.png", SHEET_GRID[0] * SHEET_GRID[1])
+    back = _sheet_with_ink(tmp_path, "back.png", 5)
+    session = cs.CaptureSession(root=tmp_path)
+    session.start("P07", operator="op")
+    session.save_paper([back, front])
+    assert _no_empty_box(tmp_path)
+
+
+def test_a_scanner_pdf_with_the_back_page_first_imports_directly(app, tmp_path):
+    if not shutil.which("pdftoppm"):
+        pytest.skip("pdftoppm not installed")
+    pages = [Image.open(_sheet_with_ink(tmp_path, n, k)).convert("RGB")
+             for n, k in (("back.png", 5), ("front.png", SHEET_GRID[0] * SHEET_GRID[1]))]
+    pdf = tmp_path / "SCAN.PDF"
+    pages[0].save(pdf, save_all=True, append_images=pages[1:], resolution=300)
+    session = cs.CaptureSession(root=tmp_path)
+    session.start("P07", operator="op")
+    assert len(session.save_paper([pdf])) == CAMPAIGN_GENUINE_PER_MODALITY + 1
+    assert _no_empty_box(tmp_path)
+
+
+def test_a_pdf_without_pdftoppm_gives_a_clear_refusal(tmp_path, monkeypatch):
+    monkeypatch.setattr(cs.shutil, "which", lambda _name: None)
+    with pytest.raises(ValueError, match="pdftoppm"):
+        cs.read_sheets([tmp_path / "scan.pdf"])
+
+
+def test_an_unreadable_scan_is_refused_by_name(tmp_path):
+    bad = tmp_path / "bad.png"
+    bad.write_text("not an image")
+    with pytest.raises(ValueError, match="bad.png"):
+        cs.read_sheets([bad])

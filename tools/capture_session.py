@@ -2,18 +2,26 @@
 
 Tablet: practice (never saved), then CAMPAIGN_GENUINE_PER_MODALITY genuine signatures with a
 break after CAMPAIGN_BREAK_AFTER; each is saved only after the signer approves it and the input
-gate passes. Paper: import the scanned sheets (print them with --make-sheet); each sheet is cut
-into its grid of boxes in signing order. Forgery mode records a team forger's attempts at one
+gate passes. Paper: import the scanned sheets as images or a PDF (print them with --make-sheet);
+each sheet is cut into its grid of boxes, the fuller page first, in signing order. Forgery mode records a team forger's attempts at one
 volunteer. Files go to INHOUSE_DIR/<participant>/, one manifest row each. Raw streams are
 research data: keep INHOUSE_DIR on an encrypted disk, never in git or the app database.
+
+A code (or forger and victim) that already has files opens the operator menu instead: continue
+the tablet, import or review the paper, redo tablet signatures, or delete. The paper can wait:
+end after the tablet part and import it later from the menu.
 
 Run:  python tools/capture_session.py
       python tools/capture_session.py --make-sheet sheet.png
 """
 import argparse
 import csv
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,11 +31,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_FORGERY_ATTEMPTS,  # noqa: E402
                              CAMPAIGN_GENUINE_PER_MODALITY, CAMPAIGN_PRACTICE_SIGNINGS,
-                             INHOUSE_DIR, SHEET_GRID, SHEET_MARGIN)
+                             INHOUSE_DIR, SHEET_DPI, SHEET_GRID, SHEET_MARGIN)
 from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtGui import QFont, QImage, QPixmap  # noqa: E402
 from PyQt5.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout,  # noqa: E402
-                             QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
+                             QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+                             QVBoxLayout, QWidget)
 
 from src.capture.ink import ink_box, ink_crop  # noqa: E402,F401  (ink_box: tests)
 from src.capture.tablet import SignatureCaptureWidget  # noqa: E402
@@ -74,6 +83,24 @@ TEXT = {
         "mode_genuine": "Genuine", "mode_forgery": "Forgery",
         "ph_code": "Participant, e.g. P07", "ph_operator": "Operator", "ph_forger": "Forger, e.g. P02",
         "dlg_sheets": "Scanned sheets, in order", "dlg_replace": "Image of this one signature",
+        "menu_genuine": ("{participant} already has saved data: tablet {tablet}/{tablet_n}, "
+                         "paper {paper}/{paper_n}. What do you want to do?"),
+        "menu_forgery": ("Forger {forger} on {participant} already has saved data: tablet "
+                         "{tablet}/{tablet_n}, paper {paper}/{paper_n}. What do you want to do?"),
+        "redo_one": "Redo {name} ({i} of {n}). The old one stays until you press I approve.",
+        "review": ("Saved paper signatures. Check the crops: delete or replace a bad one, or "
+                   "delete them all with Undo paper import."),
+        "deleted_all": "Deleted {name}: {n} files.",
+        "confirm_delete": "Permanently delete {what}? This cannot be undone.",
+        "what_tablet": "{n} tablet signatures", "what_paper": "{n} paper signatures",
+        "type_code": "This permanently deletes {n} files of {name}. Type {code} to confirm.",
+        "pick_all": "All tablet signatures",
+        "btn_tablet_continue": "Continue tablet", "btn_review": "Review paper",
+        "btn_redo_tablet": "Redo tablet", "btn_delete_tablet": "Delete tablet",
+        "btn_delete_person": "Delete whole participant",
+        "btn_delete_forger": "Delete this forger's attempts",
+        "btn_cancel": "Cancel", "btn_later": "Import later / Next participant",
+        "btn_yes": "Yes", "btn_no": "No",
     },
     "ar": {
         "start_hint": "أدخل رمز المشارك ثم اضغط «ابدأ».",
@@ -108,6 +135,24 @@ TEXT = {
         "mode_genuine": "أصلي", "mode_forgery": "تزوير",
         "ph_code": "رمز المشارك، مثل P07", "ph_operator": "المشغّل", "ph_forger": "رمز المزوّر، مثل P02",
         "dlg_sheets": "الصور، بالترتيب", "dlg_replace": "صورة هذا التوقيع وحده",
+        "menu_genuine": ("لدى {participant} بيانات محفوظة: الجهاز اللوحي {tablet}/{tablet_n}، "
+                         "الورق {paper}/{paper_n}. ماذا تريد أن تفعل؟"),
+        "menu_forgery": ("لدى المزوّر {forger} على {participant} بيانات محفوظة: الجهاز اللوحي "
+                         "{tablet}/{tablet_n}، الورق {paper}/{paper_n}. ماذا تريد أن تفعل؟"),
+        "redo_one": "إعادة {name} ({i} من {n}). يبقى القديم حتى تضغط «أوافق».",
+        "review": ("التوقيعات الورقية المحفوظة. راجع القصاصات: احذف قصاصة سيئة أو استبدلها، "
+                   "أو احذفها كلها بزر «التراجع عن إدخال الصور»."),
+        "deleted_all": "حُذف {name}: {n} ملفات.",
+        "confirm_delete": "حذف {what} نهائيًا؟ لا يمكن التراجع عن ذلك.",
+        "what_tablet": "توقيعات الجهاز اللوحي ({n})", "what_paper": "التوقيعات الورقية ({n})",
+        "type_code": "سيُحذف {n} ملفات لـ {name} نهائيًا. اكتب {code} للتأكيد.",
+        "pick_all": "كل توقيعات الجهاز اللوحي",
+        "btn_tablet_continue": "متابعة الجهاز اللوحي", "btn_review": "مراجعة الورق",
+        "btn_redo_tablet": "إعادة توقيع الجهاز اللوحي", "btn_delete_tablet": "حذف من الجهاز اللوحي",
+        "btn_delete_person": "حذف المشارك كله",
+        "btn_delete_forger": "حذف محاولات هذا المزوّر",
+        "btn_cancel": "إلغاء", "btn_later": "إدخال الصور لاحقًا / المشارك التالي",
+        "btn_yes": "نعم", "btn_no": "لا",
     },
 }
 
@@ -129,11 +174,51 @@ def signature_path(root, participant, modality, role, index=None, forger=None, a
 
 
 def next_index(root, participant, modality):
-    """The next free genuine number, so a session that crashed resumes where it stopped."""
+    """The lowest free genuine number, so a session that crashed resumes where it stopped and a
+    deleted signature is filled before anything new."""
     folder = Path(root) / participant
-    taken = [int(m.group(1)) for p in folder.glob(f"{participant}_{modality}_genuine_*")
-             if (m := re.search(r"_genuine_(\d+)\.", p.name))]
-    return max(taken, default=0) + 1
+    taken = {int(m.group(1)) for p in folder.glob(f"{participant}_{modality}_genuine_*")
+             if (m := re.search(r"_genuine_(\d+)\.", p.name))}
+    return min(set(range(1, len(taken) + 2)) - taken)
+
+
+def expected_files(root, participant, modality, forger=None):
+    """Every signature a full session saves, as (path, role, index, attempt), in signing order."""
+    if forger:
+        return [(signature_path(root, participant, modality, "forgery", forger=forger, attempt=a),
+                 "forgery", "", a) for a in range(1, CAMPAIGN_FORGERY_ATTEMPTS + 1)]
+    files = [(signature_path(root, participant, modality, "genuine", index=i), "genuine", i, "")
+             for i in range(1, CAMPAIGN_GENUINE_PER_MODALITY + 1)]
+    if modality == "paper":
+        files.append((signature_path(root, participant, "paper", "forgercopy"), "forgercopy", "", ""))
+    return files
+
+
+def saved_tablet(root, participant, forger=None):
+    """The tablet signatures on disk, in number order, as expected_files gives them. Includes
+    any beyond the expected count, so the operator can see and delete them."""
+    pattern = rf"_forgery_by{forger}_a(\d+)\.csv$" if forger else r"_genuine_(\d+)\.csv$"
+    found = []
+    for path in (Path(root) / participant).glob(f"{participant}_tablet_*.csv"):
+        if m := re.search(pattern, path.name):
+            n = int(m.group(1))
+            found.append((path, "forgery", "", n) if forger else (path, "genuine", n, ""))
+    return sorted(found, key=lambda t: t[3] if forger else t[2])
+
+
+def saved_paper(root, participant, forger=None):
+    """The expected paper signatures that are on disk."""
+    return [t for t in expected_files(root, participant, "paper", forger) if t[0].exists()]
+
+
+def person_files(root, participant, forger=None):
+    """What a full delete removes. With forger: that forger's attempts at participant. Without:
+    everything of the person, their own folder and the attempts they made at others."""
+    root = Path(root)
+    if forger:
+        return sorted((root / participant).glob(f"{participant}_*_forgery_by{forger}_*"))
+    return sorted({*(root / participant).glob(f"{participant}_*"),
+                   *root.glob(f"P*/*_by{participant}_*")})
 
 
 def _check_inside(root, path):
@@ -152,6 +237,16 @@ def write_raw_events(path, events, root):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "x", newline="") as f:  # skylos: ignore[SKY-D215,SKY-D324] checked by _check_inside: inside the data folder, not a symlink
         csv.writer(f).writerows([RAW_FIELDS] + [list(e) for e in events])
+
+
+def replace_raw_events(path, events, root):
+    """Put a new signature in place of a saved one. The old file stays until the new one is
+    fully written, so a failure cannot lose it."""
+    path = Path(path)
+    temp = _check_inside(root, path.with_suffix(".tmp"))
+    temp.unlink(missing_ok=True)
+    write_raw_events(temp, events, root)
+    os.replace(temp, _check_inside(root, path))
 
 
 def append_manifest(root, row):
@@ -217,7 +312,42 @@ def split_sheet(image):
     return [image[t:b, l:r] for t, b, l, r in sheet_boxes(h, w)]
 
 
-def make_sheet(path, dpi=300):
+def pdf_pages(path, dpi=SHEET_DPI):
+    """Each page of a scanner's PDF as an image, through the pdftoppm program (poppler)."""
+    tool = shutil.which("pdftoppm")
+    if tool is None:
+        raise ValueError("reading a PDF needs pdftoppm (poppler): install it, or scan to PNG")
+    with tempfile.TemporaryDirectory() as folder:
+        try:
+            subprocess.run([tool, "-r", str(dpi), "-png", str(path), str(Path(folder) / "page")],
+                           check=True, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            raise ValueError(f"cannot read {Path(path).name}") from exc
+        return [cv2.imread(str(p)) for p in sorted(Path(folder).glob("page*.png"))]
+
+
+def read_sheets(paths):
+    """The scanned pages of these files, as images: an image is one page, a PDF is all of its."""
+    pages = []
+    for path in paths:
+        if Path(path).suffix.lower() == ".pdf":
+            pages += pdf_pages(path)
+        elif (image := cv2.imread(str(path))) is not None:
+            pages.append(image)
+        else:
+            raise ValueError(f"cannot read {Path(path).name}")
+    return pages
+
+
+def signing_order(pages):
+    """The boxes of these pages in signing order. The front is filled first, so the page with
+    the most signatures comes first, whatever order the scanner or file dialog gave."""
+    sheets = [split_sheet(page) for page in pages]
+    sheets.sort(key=lambda boxes: sum(ink_crop(box) is not None for box in boxes), reverse=True)
+    return [box for boxes in sheets for box in boxes]
+
+
+def make_sheet(path, dpi=SHEET_DPI):
     """A printable A4 sheet: light-grey numbered boxes on the grid split_sheet cuts.
     Sign with a blue pen, inside the boxes; scan the full page at the same DPI."""
     w, h = int(8.27 * dpi), int(11.69 * dpi)
@@ -244,6 +374,7 @@ class CaptureSession(QWidget):
         self.setWindowTitle("XPPen capture session")
         self.stage, self.index, self.attempt, self.practised = "idle", 0, 0, 0
         self.participant = self.operator = self.forger = None
+        self.redo, self.redo_total = [], 0        # [(path, role, index, attempt)] still to sign
         self.lang, self._last = "en", ("start_hint", {})
 
         self.code = QLineEdit()
@@ -286,15 +417,32 @@ class CaptureSession(QWidget):
         for w in (self.btn_skip, self.btn_continue, self.btn_paper, self.btn_end):
             buttons.addWidget(w)
 
+        # The operator menu, for a code that already has saved files.
+        self.tablet_pick = QComboBox()                # all, then each saved tablet signature
+        self.btn_tablet_continue = QPushButton()
+        self.btn_tablet_continue.clicked.connect(self.begin_tablet)
+        self.btn_redo_tablet = QPushButton()
+        self.btn_redo_tablet.clicked.connect(self._redo_picked)
+        self.btn_delete_tablet = QPushButton()
+        self.btn_delete_tablet.clicked.connect(self._delete_picked)
+        self.btn_review = QPushButton()
+        self.btn_review.clicked.connect(self.review_paper)
+        self.btn_delete_all = QPushButton()
+        self.btn_delete_all.clicked.connect(self._delete_everything)
+        menu = QHBoxLayout()
+        for w in (self.btn_tablet_continue, self.btn_review, self.tablet_pick,
+                  self.btn_redo_tablet, self.btn_delete_tablet, self.btn_delete_all):
+            menu.addWidget(w)
+
         # Editing the paper import: one box (delete / replace) or the whole import (undo).
         self.paper_saved = []                     # [(path, role, index, attempt)] of the last import
         self.paper_list = QComboBox()
         self.btn_delete = QPushButton()
-        self.btn_delete.clicked.connect(lambda: self._edit_selected(self.delete_paper))
+        self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_replace = QPushButton()
         self.btn_replace.clicked.connect(self._choose_replacement)
         self.btn_undo = QPushButton()
-        self.btn_undo.clicked.connect(self.undo_paper)
+        self.btn_undo.clicked.connect(self._undo_confirmed)
         edit = QHBoxLayout()
         for w in (self.paper_list, self.btn_delete, self.btn_replace, self.btn_undo):
             edit.addWidget(w)
@@ -309,6 +457,7 @@ class CaptureSession(QWidget):
         layout.addWidget(self.prompt)
         layout.addWidget(self.capture)
         layout.addLayout(buttons)
+        layout.addLayout(menu)
         layout.addLayout(edit)
         views = QHBoxLayout()
         views.addWidget(self.preview)
@@ -323,15 +472,66 @@ class CaptureSession(QWidget):
         if forger:
             signature_path(self.root, participant, "tablet", "forgery", forger=forger, attempt=1)
         self.participant, self.operator, self.forger = participant, operator, forger
-        if forger:
-            self.stage, self.attempt = "forgery", 1
-            self._say("forgery_first", forger=forger, participant=participant,
-                      n=CAMPAIGN_FORGERY_ATTEMPTS)
+        self.redo, self.paper_saved = [], []
+        self._refresh_paper()
+        if saved_tablet(self.root, participant, forger) or saved_paper(self.root, participant, forger):
+            self.open_menu()
+        else:
+            self.begin_tablet()
+
+    def begin_tablet(self):
+        """Sign what is missing: a forger's next attempt, or practice before the genuines."""
+        if self.forger:
+            self.stage, self.attempt = "forgery", self._next_attempt()
+            if self.attempt == 1:
+                self._say("forgery_first", forger=self.forger, participant=self.participant,
+                          n=CAMPAIGN_FORGERY_ATTEMPTS)
+            else:
+                self._say("forgery_again", i=self.attempt, n=CAMPAIGN_FORGERY_ATTEMPTS)
         else:
             self.stage, self.practised = "practice", 0
             self._say("practice_first", n=CAMPAIGN_PRACTICE_SIGNINGS)
         self.capture.setEnabled(True)
         self._show_buttons()
+
+    def open_menu(self):
+        """Show what is saved for this code and let the operator choose what to do."""
+        self.stage, self.redo, self.paper_saved = "menu", [], []
+        self.capture.setEnabled(False)
+        self._refresh_paper()
+        tablet = saved_tablet(self.root, self.participant, self.forger)
+        self.tablet_pick.clear()
+        self.tablet_pick.addItems([self._t("pick_all")] + [t[0].name for t in tablet])
+        self._say("menu_forgery" if self.forger else "menu_genuine",
+                  participant=self.participant, forger=self.forger, tablet=len(tablet),
+                  tablet_n=len(expected_files(self.root, self.participant, "tablet", self.forger)),
+                  paper=len(saved_paper(self.root, self.participant, self.forger)),
+                  paper_n=len(expected_files(self.root, self.participant, "paper", self.forger)))
+        self._show_buttons()
+
+    def review_paper(self):
+        """Open the saved paper in the same grid an import ends on."""
+        self.stage = "done"
+        self.paper_saved = saved_paper(self.root, self.participant, self.forger)
+        self._say("review")
+        self._refresh_paper()
+        self._show_buttons()
+
+    def redo_tablet(self, files):
+        """Sign these again, one by one; each replaces its file only once approved."""
+        self.stage, self.redo, self.redo_total = "redo", list(files), len(files)
+        self.capture.setEnabled(True)
+        self._say_redo()
+        self._show_buttons()
+
+    def delete_files(self, paths):
+        """Permanently remove these files, their manifest rows, and any folder left empty."""
+        for path in paths:
+            _check_inside(self.root, path).unlink(missing_ok=True)
+        remove_manifest_rows(self.root, [Path(p).relative_to(self.root) for p in paths])
+        for folder in {Path(p).parent for p in paths}:
+            if folder.exists() and not any(folder.iterdir()):
+                folder.rmdir()
 
     def continue_after_break(self):
         self.stage = "genuine"
@@ -355,9 +555,9 @@ class CaptureSession(QWidget):
                 self._say("practice_next", i=self.practised + 1, n=CAMPAIGN_PRACTICE_SIGNINGS)
         elif self.stage == "genuine":
             self._save_tablet(events, "genuine", index=self.index)
-            self.index += 1
+            self.index = next_index(self.root, self.participant, "tablet")
             if self.index > CAMPAIGN_GENUINE_PER_MODALITY:
-                self._to_paper("tablet_done")
+                self._tablet_finished("tablet_done")
             elif self.index == CAMPAIGN_BREAK_AFTER + 1:
                 self.stage = "break"
                 self.capture.setEnabled(False)
@@ -366,34 +566,37 @@ class CaptureSession(QWidget):
                 self._say("genuine_next", i=self.index, n=CAMPAIGN_GENUINE_PER_MODALITY)
         elif self.stage == "forgery":
             self._save_tablet(events, "forgery", forger=self.forger, attempt=self.attempt)
-            self.attempt += 1
+            self.attempt = self._next_attempt()
             if self.attempt > CAMPAIGN_FORGERY_ATTEMPTS:
-                self._to_paper("tablet_done_forgery", n=CAMPAIGN_FORGERY_ATTEMPTS)
+                self._tablet_finished("tablet_done_forgery", n=CAMPAIGN_FORGERY_ATTEMPTS)
             else:
                 self._say("forgery_again", i=self.attempt, n=CAMPAIGN_FORGERY_ATTEMPTS)
+        elif self.stage == "redo":
+            path, role, index, attempt = self.redo.pop(0)
+            replace_raw_events(path, events, self.root)
+            remove_manifest_rows(self.root, [path.relative_to(self.root)])
+            self._manifest(path, "tablet", role, index=index, attempt=attempt)
+            if self.redo:
+                self._say_redo()
+            else:
+                self.open_menu()
         self.capture.label.setText(self._t("canvas_hint"))   # the widget wrote "Accepted!" there
         self._show_buttons()
 
     def save_paper(self, sheet_paths):
         """Cut each sheet into its boxes in order; save the genuines then the forger copy
-        (genuine session) or the forger's attempts (forgery session)."""
-        crops = [c for p in sheet_paths for c in split_sheet(cv2.imread(str(p)))]
-        if self.forger:
-            targets = [(signature_path(self.root, self.participant, "paper", "forgery",
-                                       forger=self.forger, attempt=a), "forgery", "", a)
-                       for a in range(1, CAMPAIGN_FORGERY_ATTEMPTS + 1)]
-        else:
-            targets = [(signature_path(self.root, self.participant, "paper", "genuine", index=i),
-                        "genuine", i, "") for i in range(1, CAMPAIGN_GENUINE_PER_MODALITY + 1)]
-            targets.append((signature_path(self.root, self.participant, "paper", "forgercopy"),
-                            "forgercopy", "", ""))
-        if len(crops) < len(targets):
-            raise ValueError(f"{len(crops)} boxes scanned, {len(targets)} needed")
-        for _, (path, *_rest) in zip(crops, targets):
-            if path.exists():
-                raise FileExistsError(path)
+        (genuine session) or the forger's attempts (forgery session). A box already saved is
+        kept, so only the missing ones are filled; a complete set is refused."""
+        crops = signing_order(read_sheets(sheet_paths))
+        expected = expected_files(self.root, self.participant, "paper", self.forger)
+        if len(crops) < len(expected):
+            raise ValueError(f"{len(crops)} boxes scanned, {len(expected)} needed")
+        missing = [(crop, t) for crop, t in zip(crops, expected) if not t[0].exists()]
+        if not missing:
+            raise FileExistsError(expected[0][0])
+        targets = [t for _, t in missing]
         no_ink = []
-        for crop, (path, role, index, attempt) in zip(crops, targets):
+        for crop, (path, role, index, attempt) in missing:
             _check_inside(self.root, path).parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(path), crop)
             self._manifest(path, "paper", role, index=index, attempt=attempt)
@@ -450,7 +653,7 @@ class CaptureSession(QWidget):
         """Clear the window for the next participant. Everything is already saved."""
         self.stage, self.index, self.attempt, self.practised = "idle", 0, 0, 0
         self.participant = self.operator = self.forger = None
-        self.paper_saved = []
+        self.paper_saved, self.redo = [], []
         for field in (self.code, self.forger_code):
             field.clear()
         self.capture.reset_capture()
@@ -467,9 +670,79 @@ class CaptureSession(QWidget):
         except ValueError:
             self._say("bad_code")
 
+    def _next_attempt(self):
+        missing = [t for t in expected_files(self.root, self.participant, "tablet", self.forger)
+                   if not t[0].exists()]
+        return missing[0][3] if missing else CAMPAIGN_FORGERY_ATTEMPTS + 1
+
+    def _tablet_finished(self, key, **values):
+        """On to the paper, unless it is already complete."""
+        if len(saved_paper(self.root, self.participant, self.forger)) == len(
+                expected_files(self.root, self.participant, "paper", self.forger)):
+            self.open_menu()
+        else:
+            self._to_paper(key, **values)
+
+    def _say_redo(self):
+        self._say("redo_one", name=self.redo[0][0].name, n=self.redo_total,
+                  i=self.redo_total - len(self.redo) + 1)
+
+    def _picked(self):
+        """The chosen saved tablet signature as a one-item list; None when "all" is chosen."""
+        i = self.tablet_pick.currentIndex()
+        return None if i <= 0 else [saved_tablet(self.root, self.participant, self.forger)[i - 1]]
+
+    def _redo_picked(self):
+        self.redo_tablet(self._picked()
+                         or expected_files(self.root, self.participant, "tablet", self.forger))
+
+    def _delete_picked(self):
+        files = self._picked() or saved_tablet(self.root, self.participant, self.forger)
+        what = files[0][0].name if len(files) == 1 else self._t("what_tablet", n=len(files))
+        if self._confirm(self._t("confirm_delete", what=what)):
+            self.delete_files([t[0] for t in files])
+            if (saved_tablet(self.root, self.participant, self.forger)
+                    or saved_paper(self.root, self.participant, self.forger)):
+                self.open_menu()
+            else:
+                self.end_session()
+
+    def _delete_everything(self):
+        """Withdrawal: the operator must type the code, because this cannot be undone."""
+        code = self.forger or self.participant
+        name = f"{self.forger} / {self.participant}" if self.forger else self.participant
+        files = person_files(self.root, self.participant, self.forger)
+        if self._typed(self._t("type_code", n=len(files), name=name, code=code)) == code:
+            self.delete_files(files)
+            self.end_session()
+            self._say("deleted_all", name=name, n=len(files))
+
+    def _delete_selected(self):
+        if self.paper_saved and self._confirm(
+                self._t("confirm_delete", what=self.paper_list.currentText())):
+            self._edit_selected(self.delete_paper)
+
+    def _undo_confirmed(self):
+        what = self._t("what_paper", n=len(self.paper_saved))
+        if self._confirm(self._t("confirm_delete", what=what)):
+            self.undo_paper()
+
+    def _confirm(self, text):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setText(text)
+        yes = box.addButton(self._t("btn_yes"), QMessageBox.YesRole)
+        box.setDefaultButton(box.addButton(self._t("btn_no"), QMessageBox.NoRole))
+        box.exec_()
+        return box.clickedButton() == yes
+
+    def _typed(self, text):
+        value, ok = QInputDialog.getText(self, self.windowTitle(), text)
+        return value.strip() if ok else ""
+
     def _choose_sheets(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, self._t("dlg_sheets"), "", "Images (*.png *.jpg *.jpeg *.tif *.tiff)")
+            self, self._t("dlg_sheets"), "", "Scans (*.pdf *.PDF *.png *.jpg *.jpeg *.tif *.tiff)")
         if paths:
             try:
                 self.save_paper(paths)
@@ -547,6 +820,7 @@ class CaptureSession(QWidget):
         """Show every instruction in lang ("en" or "ar"), including the prompt already shown."""
         self.lang = lang
         self._retranslate()
+        self._show_buttons()
 
     def toggle_language(self):
         self.set_language("ar" if self.lang == "en" else "en")
@@ -562,14 +836,20 @@ class CaptureSession(QWidget):
         for widget, key in ((self.btn_start, "btn_start"), (self.capture.btn_confirm, "btn_approve"),
                             (self.capture.btn_reset, "btn_redo"), (self.btn_skip, "btn_skip"),
                             (self.btn_continue, "btn_continue"), (self.btn_paper, "btn_paper"),
-                            (self.btn_end, "btn_end"), (self.btn_delete, "btn_delete"),
-                            (self.btn_replace, "btn_replace"), (self.btn_undo, "btn_undo")):
+                            (self.btn_delete, "btn_delete"), (self.btn_replace, "btn_replace"),
+                            (self.btn_undo, "btn_undo"),
+                            (self.btn_tablet_continue, "btn_tablet_continue"),
+                            (self.btn_review, "btn_review"),
+                            (self.btn_redo_tablet, "btn_redo_tablet"),
+                            (self.btn_delete_tablet, "btn_delete_tablet")):
             widget.setText(self._t(key))
         for field, key in ((self.code, "ph_code"), (self.op, "ph_operator"),
                            (self.forger_code, "ph_forger")):
             field.setPlaceholderText(self._t(key))
         self.mode.setItemText(0, self._t("mode_genuine"))
         self.mode.setItemText(1, self._t("mode_forgery"))
+        if self.tablet_pick.count():
+            self.tablet_pick.setItemText(0, self._t("pick_all"))
         self.btn_lang.setText("English" if self.lang == "ar" else "العربية")
         rtl = self.lang == "ar"
         self.prompt.setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
@@ -581,8 +861,24 @@ class CaptureSession(QWidget):
     def _show_buttons(self):
         self.btn_skip.setVisible(self.stage == "practice")
         self.btn_continue.setVisible(self.stage == "break")
-        self.btn_paper.setVisible(self.stage == "paper")
-        self.btn_end.setVisible(self.stage == "done")
+        menu = self.stage == "menu"
+        tablet = menu and saved_tablet(self.root, self.participant, self.forger)
+        paper = menu and saved_paper(self.root, self.participant, self.forger)
+        expected = (lambda modality: expected_files(self.root, self.participant, modality,
+                                                    self.forger))
+        self.btn_paper.setVisible(self.stage == "paper"
+                                  or (menu and len(paper) < len(expected("paper"))))
+        self.btn_end.setVisible(self.stage in ("done", "paper", "menu", "redo"))
+        self.btn_end.setText(self._t({"menu": "btn_cancel", "paper": "btn_later"}.get(
+            self.stage, "btn_end")))
+        self.btn_tablet_continue.setVisible(
+            menu and any(not t[0].exists() for t in expected("tablet")))
+        self.btn_review.setVisible(bool(paper))
+        for w in (self.tablet_pick, self.btn_redo_tablet, self.btn_delete_tablet):
+            w.setVisible(bool(tablet))
+        self.btn_delete_all.setVisible(menu)
+        self.btn_delete_all.setText(self._t("btn_delete_forger" if self.forger
+                                            else "btn_delete_person"))
         for w in self.edit_widgets:
             w.setVisible(self.stage == "done" and bool(self.paper_saved))
 
