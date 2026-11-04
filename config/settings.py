@@ -150,7 +150,7 @@ SHEET_MARGIN = 0.05                     # Fraction of each box cut away, so the 
 # drops faint ballpoint strokes; this one scores ink against the local paper, so shadows cancel.
 INK_BACKGROUND_KERNEL = 51              # Median blur size (px) that estimates the paper under the ink
 INK_MIN_CONTRAST = 18                   # Ink is at least this much darker than its local paper (0-255)
-INK_MIN_SATURATION = 20                 # ...and coloured: grey shadows, creases and page edges are not
+INK_MIN_SATURATION = 10                 # ...and coloured: grey shadows, creases and page edges are not (0 lets folds in)
 INK_HUE_RANGE = (95, 165)               # Blue ballpoint, OpenCV hue 0-179
 INK_CLUSTER_GAP = 61                    # Ink pieces closer than this (px) belong to one signature
 INK_MIN_PIXELS = 200                    # Fewer ink pixels than this: no signature in the box
