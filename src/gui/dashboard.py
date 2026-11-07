@@ -22,6 +22,30 @@ class ProgressRing(QWidget):
         self.percentage = max(0, min(100, value))
         self.update()  # يطلب إعادة الرسم
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(10, 10, self.width() - 20, self.height() - 20)
+
+        bg_pen = QPen(QColor(BORDER))
+        bg_pen.setWidth(10)
+        bg_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(bg_pen)
+        painter.drawArc(rect, 0, 360 * 16)
+
+        progress_pen = QPen(QColor(ACCENT))
+        progress_pen.setWidth(10)
+        progress_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(progress_pen)
+        span_angle = int(-self.percentage / 100 * 360 * 16)
+        painter.drawArc(rect, 90 * 16, span_angle)
+
+        painter.setPen(QColor(TEXT_LIGHT))
+        painter.setFont(QFont("Arial", 20, QFont.Bold))
+        painter.drawText(rect, Qt.AlignCenter, f"{int(self.percentage)}%")
+
+
+
 class StatTile(QFrame):
     """بلاطة إحصائية صغيرة (Bento tile)"""
     def __init__(self, title: str, icon_text: str = ""):
@@ -81,6 +105,14 @@ class RecentEventsTile(QFrame):
             self.rows_container.addWidget(empty)
             return
 
+        # "Sign again" is not a verdict; only final decisions are listed.
+        events = [e for e in events if e.get("decision") in ("Genuine", "Forged")]
+        if not events:
+            empty = QLabel("No verification events yet.")
+            empty.setProperty("role", "muted")
+            self.rows_container.addWidget(empty)
+            return
+
         for e in events[-4:][::-1]:
             row = QHBoxLayout()
             decision = e.get("decision", "?")
@@ -106,6 +138,7 @@ class RecentEventsTile(QFrame):
 class DashboardScreen(QWidget):
     def __init__(self):
         super().__init__()
+        self._employee_username = None
         layout = QVBoxLayout()
         layout.setContentsMargins(36, 30, 36, 30)
         layout.setSpacing(6)
@@ -160,7 +193,15 @@ class DashboardScreen(QWidget):
     def set_employee_name(self, full_name: str):
         self.welcomeLabel.setText(f"Welcome back, {full_name}")
 
+    def showEvent(self, event):
+        # Reload every time the screen is shown, so a verification done on another
+        # screen appears without restarting the app.
+        super().showEvent(event)
+        if self._employee_username:
+            self.refresh(self._employee_username)
+
     def refresh(self, employee_username: str):
+        self._employee_username = employee_username
         clients = storage.list_clients(employee_username)
         stats = storage.get_verification_stats(employee_username)
 
