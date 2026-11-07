@@ -12,7 +12,7 @@ motion record" is visible in the type. Guessing wrong is silent in both
 directions: a scan handed to the renderer draws a scribble out of pixel
 intensities, and a trajectory handed to `preprocess_image` gets resized onto
 220x155 and inverted, producing a perfectly well-formed tensor that means
-nothing. `SUMMARY.md` Part 9 §12 records four defects of exactly that shape —
+nothing. Four earlier defects had exactly that shape:
 plausible output, no exception, green suite. `TestTheDisambiguationRule` below is
 the part of this file that has to survive; the rest is geometry.
 """
@@ -42,7 +42,7 @@ def _trajectory(num_points=120, columns=TEMPORAL_INPUT_FEATURES, phase=0.0):
 
     Width follows the capture contract rather than a literal, so this fixture
     moves with `TEMPORAL_CHANNELS` instead of agreeing with a stale gate — the
-    failure mode recorded in Part 9 §12, where every fixture in the suite built
+    failure mode seen before, where every fixture in the suite built
     3-column trajectories and therefore agreed with a gate the shipped weights
     had already outgrown.
     """
@@ -167,8 +167,9 @@ class TestTheDisambiguationRule:
     **column count**, which is the one property whose two admissible ranges
     cannot overlap:
 
-    * a trajectory carries `TEMPORAL_CHANNEL_WIDTHS` columns — 3, 4 or 5, and
-      widening past that is banned outright under AGENTS.md Drift Prevention;
+    * a trajectory carries `TEMPORAL_CHANNEL_WIDTHS` columns, 3 to 7. Widths 6
+      and 7 are the research-only tilt modes; the capture contract stays 4
+      under AGENTS.md Drift Prevention;
     * a scan is at least `MIN_BBOX_PIXELS` (64) wide, because the ink bounding
       box cannot exceed the canvas and anything under that floor already fails
       `quality_gate`.

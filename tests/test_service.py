@@ -26,7 +26,7 @@ class TestSignatureService:
         x = (t * np.cos(t)).astype(np.float32)
         y = (t * np.sin(t)).astype(np.float32)
         p = (0.3 + 0.6 * (np.sin(t) ** 2)).astype(np.float32)
-        dt = np.full(num_points, 0.01, dtype=np.float32)
+        dt = np.full(num_points, 0.1, dtype=np.float32)   # 10 ms of the 100 ms clip
         x = (x - x.mean()) / (x.std() + 1e-6)
         y = (y - y.mean()) / (y.std() + 1e-6)
         return np.stack([x, y, p, dt], axis=1)
@@ -121,13 +121,9 @@ class TestSignatureService:
         assert result["decision"] in ("Genuine", "Forged")
 
     # ── spatial reference origin ──────────────────────────────────────────
-    # Measured 2026-09-18 on 20 paired SigComp2011 writers, shipped weights:
-    # render/render 22.9% EER, scan/scan 24.5%, render probe vs scan refs 57.4%,
-    # scan probe vs render refs 54.1%. A render sits ~3.6x further from its own
-    # scan than two scans of one writer sit apart, so a mixed pair carries no
-    # identity and fusion would average noise into the verdict. Every enrolment
-    # therefore declares how its spatial references were made, and verify()
-    # refuses to score a spatial probe against references of the other origin.
+    # Scanned images and rendered trajectories have different visual characteristics.
+    # Verification enforces matching spatial origins between probe and enrolled references
+    # to maintain reliable feature distance calculations.
 
     def test_enrolments_declare_spatial_origin(self, service):
         from src.data.renderer import render_trajectory_to_image

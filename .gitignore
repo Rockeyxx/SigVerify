@@ -42,8 +42,9 @@ models/weights/
 
 # Planning docs (local only, not repo content)
 docs/*
-!docs/screenshots/
-!docs/screenshots/**
+
+# EGM design briefs, drafts and review reports (local only)
+.egm/
 
 # Local diagnostics — instruments for answering "why is this number bad",
 # not project code. Nothing imports them and nothing ships with them, so they
@@ -51,7 +52,7 @@ docs/*
 tools/diagnose_error_sources.py
 
 # One-off evaluation arms from 2026-08-18/19. Each answered a single question,
-# the answer is recorded in SUMMARY.md Part 9, and nothing imports them. Kept on
+# the answer is recorded, and nothing imports them. Kept on
 # disk for reference, out of the repo for the same reason as the line above.
 # (fusion_paired_eval.py is deliberately NOT here: its +5.07-point result is the
 # open lever, and it gets re-run the moment paired capture exists.)
@@ -81,4 +82,4 @@ src/gui/data/
 src/gui/ui/
 src/gui/test_verification_ui.py
 cropped_test/
-docs/screenshots/desktop.ini
+desktop.ini

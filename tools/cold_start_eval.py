@@ -1,44 +1,12 @@
-"""
-Cold-start evaluation: shipped weights against a corpus they never trained on.
+"""Cold-start evaluation: evaluate models against unseen datasets.
 
-Every EER in `SUMMARY.md` and `README.md` is measured on held-out *writers* of
-corpora the model *did* train on. That is the standard writer-independent
-protocol and it is not the same question as "what happens on a corpus from
-somewhere else". This tool asks the second question, which is the one a
-deployment actually faces.
+Evaluates trained model weights against external signature corpora not seen
+during training, measuring transfer performance across domains.
 
-Two things make it a deployment measurement rather than another benchmark:
-
-* **It scores through `verify()`.** The shipped operating point is produced by
-  the same call the GUI makes, one call per probe, with references round-tripped
-  through `embedding_to_bytes`/`bytes_to_embedding` exactly as enrolment stores
-  them. `benchmark.py` never touches that path -- `trajectory_gate` is reachable
-  only from `verify()` -- so a serving defect is invisible to it. Three such
-  defects shipped undetected (Part 9 §12).
-* **It reports FAR/FRR/HTER, not EER.** The defect this tool measures is
-  threshold-side, and EER is threshold-free: it *cannot* respond to a change in
-  tau. Part 9 §3 records an arm that moved EER by exactly 0.00 by construction
-  for this reason. Quoting EER for a threshold question is the mistake, not the
-  answer.
-
-Three operating points are reported, and only the last two are numbers a
-deployment could honestly reach:
-
-1. **Shipped tau** -- `config/settings.py` as it stands. What a user gets today.
-2. **Domain-calibrated tau** -- fitted on half the unseen writers, applied
-   unchanged to the other half. Mirrors `calibrated_fusion` in
-   `tools/fusion_paired_eval.py`, for the reason given there: a constant chosen
-   on the scores it is then quoted against is a lower bound on nothing.
-3. **FAR-constrained tau** -- same writer-disjoint discipline, but tau is chosen
-   to hold FAR at a target rather than to balance the two errors. This is the
-   exchange rate: what FRR you pay to push FAR down.
-
-No tau puts FAR and FRR both below the EER, because `max(FAR, FRR) >= EER` at
-every threshold. "Both under 5%" is therefore a statement about separability,
-not about where the threshold sits.
-
-    python tools/cold_start_eval.py --branch spatial
-    python tools/cold_start_eval.py --branch temporal --far-target 0.05
+Reports FAR, FRR, and HTER metrics across multiple threshold configurations:
+  1. Default threshold from settings.
+  2. Domain-calibrated threshold fitted on held-out writers.
+  3. FAR-constrained threshold targeting specific security requirements.
 """
 import argparse
 import os
@@ -52,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import (
     MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
+    SIGCOMP2009_DIR,
     SPATIAL_DECISION_THRESHOLD,
     TARGET_FAR,
     TEMPORAL_CHANNELS,
@@ -64,22 +33,9 @@ from src.data.parsers import parse_deepsigndb, parse_sigcomp2011_offline
 from src.verification import (bytes_to_embedding, embed, embedding_to_bytes,
                               load_model, verify)
 
-# Which corpus is genuinely unseen by which shipped checkpoint. Both entries are
-# claims about training provenance, so both cite where that provenance is
-# recorded: a wrong entry turns this into an in-domain benchmark that reports
-# suspiciously good numbers and reads as a success.
+# Mapping of unseen evaluation corpora by modality branch.
 UNSEEN_CORPUS = {
-    # WARNING (2026-09-06): the shipped spatial_cnn.pth NOW TRAINS ON
-    # sigcomp2011_offline (SUMMARY.md Part 9 §13), so this default is training
-    # data for it and scoring it here measures memorisation, not transfer. It
-    # remains valid only for a pre-2026-09-06 checkpoint such as
-    # `exp_ctrl.pth` or `archive_spatial_cnn_m20_8.59eer.pth`, passed via
-    # --weights. For the shipped weight use `--corpus nfi2009`, which is
-    # screened against every image corpus on disk.
     "spatial": "SigComp2011 offline (Dutch + Chinese scans) — TRAINING DATA for the shipped weight",
-    # temporal_lstm.pth trained on SVC2004 Task 2 + SigComp2011 online, 62
-    # writers. DeepSignDB was measured and NOT adopted (Part 9 §11), so its
-    # Evaluation split -- the authors' own held-out benchmark -- is untouched.
     "temporal": "DeepSignDB Evaluation / stylus",
 }
 
@@ -168,7 +124,7 @@ def load_corpus(branch, corpus="default"):
         # shipped weight and would report memorisation as a cold-start score.
         raise ValueError(
             "sigcomp2011_offline is training data for the spatial weight shipped "
-            "on 2026-09-06 (SUMMARY.md Part 9 §13), so the default corpus would "
+            "on 2026-09-06, so the default corpus would "
             "measure memorisation.\n"
             "  Use --corpus nfi2009 (screened against every corpus on disk), or\n"
             "  pass a pre-2026-09-06 checkpoint via --weights, e.g.\n"

@@ -1,21 +1,16 @@
-"""
-Dataset Parsers — Signature Verification System
+"""Dataset parsers for signature verification.
 
-Parser layer that outputs a uniform data dictionary format across datasets:
+This module provides dataset parsers that convert signature files into a
+uniform dictionary format:
 
     {writer_id: {"genuine": [...], "forged": [...]}}
 
-Writer IDs use namespaced prefixes (`cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
-to ensure global uniqueness when partitioning writers into independent splits.
+Writer IDs use prefixes (such as `cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
+so that writer IDs remain unique across different datasets.
 
-Offline parsers return image file paths (loaded lazily by dataset classes).
-Online parsers return memory-resident `[L, 3]` float32 trajectory arrays.
-
-For details on parser design, pressure scaling, and dataset schemas, see:
-  - SUMMARY.md (Part 1 — Dataset Parsers)
-  - AGENTS.md (Capture Contract & Temporal Branch Constraints)
+Offline parsers return file paths to images (loaded when needed by dataset classes).
+Online parsers return numpy float32 trajectory arrays with shape [L, C].
 """
-
 
 import csv
 import os
@@ -27,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
+    BIOSECURID_SONOF_DIR,
     CEDAR_DIR,
     DEEPSIGNDB_DIR,
     MOBISIG_DIR,
@@ -34,23 +30,18 @@ from config.settings import (
     SIGCOMP2011_DIR,
     SVC2004_DIR,
     TEMPORAL_SAMPLE_PERIOD_MS,
+    TILT_CHANNEL_MODES,
     UTSIG_DIR,
 )
 
-# Standard pressure normalization scale factor for SVC2004 (0–1023 hardware dynamic range).
+# Standard maximum pressure scale for SVC2004 digitizers.
 SVC_PRESSURE_MAX = 1023.0
-# Angular tilt boundaries from digitizer specifications (expressed in tenths of a degree).
+# Maximum tilt angles in tenths of a degree from digitizer hardware specifications.
 SVC_AZIMUTH_MAX = 3600.0
 SVC_ALTITUDE_MAX = 900.0
 # Maximum gap threshold in milliseconds applied to inter-sample duration deltas.
 def max_gap_ms_from_env(value, default):
-    """
-    Parse `SIGVER_MAX_GAP_MS`, the sweep-only override for the dt clip.
-
-    The clip is a data contract: a checkpoint trained with one value must be
-    scored and served with the same one, so train.py records it in the split
-    record and benchmark.py refuses a mismatch. A malformed value raises.
-    """
+    """Parse SIGVER_MAX_GAP_MS environment override for the dt time gap limit."""
     if value is None:
         return default
     try:
@@ -64,18 +55,15 @@ def max_gap_ms_from_env(value, default):
 
 MAX_GAP_MS = max_gap_ms_from_env(os.environ.get("SIGVER_MAX_GAP_MS"), 100.0)
 
-# Pressure scaling constant for SigComp2011 datasets (WACOM Intuos3 force resolution).
+# Maximum pen force value for SigComp2011 digitizers.
 SIGCOMP_PRESSURE_MAX = 1023.0
 
-# Decimation step factor aligning 200 Hz SigComp2011 data to 100 Hz target sampling rate.
+# Decimation factor to align 200 Hz SigComp2011 recordings to the target 100 Hz rate.
 SIGCOMP_DECIMATION = 2
-# Milliseconds per row *after* decimation — 200 Hz halved. This is what makes
-# a dropped pen-up run measurable as elapsed time rather than just a hole.
-# Equals the corpus-wide target period: decimation exists to land on it.
+# Sampling period in milliseconds after decimation.
 SIGCOMP_SAMPLE_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
-# ─── DeepSignDB ───────────────────────────────────────────────────────
-# Mapping definition matching source database distributions across Development and Evaluation partitions.
+# DeepSignDB writer ID ranges and corresponding source sub-datasets.
 DEEPSIGN_SOURCE_RANGES = {
     "Development": ((1, 230, "MCYT"), (231, 498, "BiosecurID"),
                     (1009, 1038, "eBioSign_DS1"), (1039, 1084, "eBioSign_DS2")),
@@ -84,31 +72,26 @@ DEEPSIGN_SOURCE_RANGES = {
                    (408, 442, "eBioSign_DS2")),
 }
 
-# Column index mapping for pen force across constituent source formats.
+# Column index for pen pressure in each sub-dataset.
 DEEPSIGN_PRESSURE_COLUMN = {"MCYT": 5, "BiosecurID": 6, "BiosecureDS2": 6,
                             "eBioSign_DS1": 3, "eBioSign_DS2": 3}
 
-# Digitizer pen sources included in default training splits.
+# Sub-datasets collected using pen tablets.
 DEEPSIGN_PEN_SOURCES = ("MCYT", "BiosecurID", "BiosecureDS2")
 DEEPSIGN_PRESSURE_MAX = 1023.0
 
-# Target temporal period in milliseconds, derived from the corpus-wide
-# sampling rate rather than restated as a literal.
+# Target sampling period in milliseconds.
 DEEPSIGN_TARGET_PERIOD_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _CEDAR_FORGED = re.compile(r"^forgeries_(\d+)_(\d+)\.png$", re.IGNORECASE)
 _BHSIG_FILE = re.compile(r"^[BH]-S-(\d+)-([GF])-(\d+)\.tif$", re.IGNORECASE)
 _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
-# SIGN_GEN_USER7_USER7_3.csv  -> genuine, writer 7
-# SIGN_FOR_USER7_USER2_3.csv  -> forgery of writer 7, drawn by user 2
 _MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
                            re.IGNORECASE)
-# u0231_g_u1013s0001_sg0001.txt -> genuine, DeepSignDB user 231
-# u0231_s_u1013s0001_sg0002.txt -> skilled forgery of that same user
-# The tail is the original database's own filename and is not interpreted; the
-# ID and the g/s flag are the only fields DeepSignDB guarantees across sources.
 _DEEPSIGN_FILE = re.compile(r"^u(\d+)_([gs])_.+\.txt$", re.IGNORECASE)
+# BiosecurID names carry their session ("u1202s0003_sg0001"); MCYT names carry none.
+_DEEPSIGN_SESSION = re.compile(r"_u\d+s(\d{4})_sg\d+\.txt$", re.IGNORECASE)
 
 
 def _require_dir(path, label):
@@ -121,34 +104,21 @@ def _new_writer():
 
 
 def normalize_trajectory(xy, pressure, extra=None):
-    """
-    Normalize a raw trajectory into the model's expected [L, 3] input.
-
-    **The capture layer must call this too.** The tablet emits raw device units
-    exactly like the SVC2004 files do; if inference skips this step the model
-    sees a completely different input distribution than it trained on and the
-    embeddings are meaningless.
+    """Normalize raw trajectory coordinates and pressure into a standard format.
 
     Args:
-        xy:       [L, 2] raw X/Y in device units.
-        pressure: [L] pressure already scaled into [0, 1], or None to impute.
-        extra:    optional [L, K] of additional channels, ALREADY scaled into
-                  roughly [0, 1] by the caller using documented device maxima.
-                  Scaling here per-file would make one signature's range depend
-                  on its own extremes, the same mistake a per-file pressure max
-                  would be.
+        xy: [L, 2] raw coordinates in device units.
+        pressure: [L] pressure values scaled to [0.0, 1.0], or None.
+        extra: optional [L, K] extra channels scaled to [0.0, 1.0].
 
     Returns:
-        float32 [L, 3 + K] — X and Y z-scored per signature, P in [0, 1].
-
-    X/Y are standardized per-signature so the model keys on shape and dynamics
-    rather than where on the tablet the person happened to sign, or how large.
+        float32 array with shape [L, 3 + K] where X and Y are z-scored per signature.
     """
     xy = np.asarray(xy, dtype=np.float32)
 
     mean = xy.mean(axis=0)
     std = xy.std(axis=0)
-    # A dot or perfectly straight stroke has zero variance on an axis; guard the divide.
+    # Avoid division by zero if variance is zero.
     std = np.where(std < 1e-8, 1.0, std)
     xy = (xy - mean) / std
 
@@ -164,34 +134,27 @@ def normalize_trajectory(xy, pressure, extra=None):
 
 
 def merge_datasets(target, incoming):
-    """
-    Merge one parsed writer_samples into another, appending samples per writer.
+    """Merge incoming writer samples into target dictionary, appending samples per writer.
 
-    A plain `dict.update` would replace a writer's whole record when two datasets
-    use the same ID, silently discarding one of them. That is not hypothetical:
-    SVC2004 Task1 and Task2 are separate recordings of the same 40 signers, so
-    both parse to `svc_1`..`svc_40`, and updating would drop 1600 signatures
-    without a word.
-
-    Writer IDs stay namespaced per writer_samples (`cedar_7`, `mobisig_3`), so an ID
-    collision means the same person, and appending is the correct reading.
-
-    Returns `target`, mutated in place, so calls can be chained.
+    "genuine_session", when either side has it, stays aligned with "genuine";
+    samples whose corpus records no session get None.
     """
     for writer_id, record in incoming.items():
         existing = target.setdefault(writer_id, _new_writer())
+        if "genuine_session" in existing or "genuine_session" in record:
+            sessions = existing.get("genuine_session", [None] * len(existing["genuine"]))
+            sessions.extend(record.get("genuine_session", [None] * len(record["genuine"])))
+            existing["genuine_session"] = sessions
         existing["genuine"].extend(record["genuine"])
         existing["forged"].extend(record["forged"])
     return target
 
 
-def parse_dataset(path, **kwargs):
-    """
-    Dispatch a dataset directory to its parser by directory name.
+def parse_dataset(path, float32_parse=False, **kwargs):
+    """Dispatch dataset folder to its parser based on folder name.
 
-    `./data/cedar` → parse_cedar, `./data/svc2004` → parse_svc2004, etc. An
-    unrecognized name raises rather than returning an empty dict — silently
-    training on zero writers is the worse failure.
+    float32_parse reaches only the parsers that read a device clock (SVC2004 and
+    DeepSignDB); every other corpus is read the same either way.
     """
     name = os.path.basename(os.path.normpath(path)).lower()
     if name not in _PARSERS:
@@ -200,19 +163,14 @@ def parse_dataset(path, **kwargs):
             f"Expected one of: {', '.join(sorted(_PARSERS))}. "
             f"Rename the directory to match, or add a parser."
         )
-    # kwargs reach only the parser that declares them; passing
-    # extra_channels at an image dataset is a caller error, not a silent no-op.
-    return _PARSERS[name](path, **kwargs)
+    parser = _PARSERS[name]
+    if float32_parse and parser in (parse_svc2004, parse_deepsigndb):
+        kwargs["float32_parse"] = True
+    return parser(path, **kwargs)
 
 
 def parse_cedar(root=CEDAR_DIR):
-    """
-    Parse CEDAR: flat `full_org/original_{w}_{s}.png` + `full_forg/forgeries_{w}_{s}.png`.
-
-    55 writers × 24 genuine + 24 skilled forgeries. Non-matching entries
-    (notably the `Thumbs.db` left by the Windows packaging) are ignored —
-    a loose glob would otherwise invent a phantom writer.
-    """
+    """Parse the offline CEDAR signature dataset."""
     _require_dir(root, "CEDAR")
     writers = {}
 
@@ -236,13 +194,7 @@ def parse_cedar(root=CEDAR_DIR):
 
 
 def parse_bhsig260(root=BHSIG260_DIR, scripts=("Bengali", "Hindi")):
-    """
-    Parse BHSig260: `{script}/{writer}/X-S-{w}-{G|F}-{n}.tif`.
-
-    100 Bengali + 160 Hindi writers, 24 genuine + 30 forged each. Writer IDs
-    are script-scoped because Bengali writer 001 and Hindi writer 001 are
-    different people — merging them would break the writer-independent split.
-    """
+    """Parse the offline BHSig260 signature dataset."""
     _require_dir(root, "BHSig260")
     writers = {}
 
@@ -254,7 +206,7 @@ def parse_bhsig260(root=BHSIG260_DIR, scripts=("Bengali", "Hindi")):
         for writer_dir in sorted(os.listdir(script_dir)):
             full_dir = os.path.join(script_dir, writer_dir)
             if not os.path.isdir(full_dir):
-                continue  # skips the list.genuine / list.forgery / *_pairs.txt index files
+                continue
 
             writer_id = f"bhsig_{script}_{writer_dir}"
             for filename in sorted(os.listdir(full_dir)):
@@ -269,13 +221,7 @@ def parse_bhsig260(root=BHSIG260_DIR, scripts=("Bengali", "Hindi")):
 
 
 def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
-    """
-    Parse UTSig: `Genuine/{w}/{n}.tif` and `Forgery/{type}/{w}/{n}.tif`.
-
-    115 writers × 27 genuine + 6 skilled forgeries. Defaults to Skilled only —
-    AGENTS.md reports all metrics under the skilled-forgery scenario, and mixing
-    in Simple / Opposite-Hand forgeries would quietly make the numbers look better.
-    """
+    """Parse the offline UTSig signature dataset."""
     _require_dir(root, "UTSig")
     writers = {}
 
@@ -312,24 +258,31 @@ def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
     return writers
 
 
-def load_svc2004_file(path, extra_channels=None):
-    """
-    Load one SVC2004 signature into a normalized [L, 3] (X, Y, P) array.
+def _tilt_mode_extra(dt, tilt, mode):
+    """[L,1] dt plus [L,2] tilt (None -> the mode's fill), plus `present` in flag mode."""
+    n = len(dt)
+    present = tilt is not None
+    if tilt is None:
+        tilt = np.full((n, 2), TILT_CHANNEL_MODES[mode], dtype=np.float32)
+    columns = [np.asarray(dt, dtype=np.float32).reshape(n, 1),
+               np.asarray(tilt, dtype=np.float32)]
+    if mode == "dt_tilt_flag":
+        columns.append(np.full((n, 1), 1.0 if present else 0.0, dtype=np.float32))
+    return np.column_stack(columns)
 
-    Auto-detects the task variant by column count:
-      - Task1 (4 cols: X Y T button)                     → no pressure, P imputed to 1.0
-      - Task2 (7 cols: X Y T button azimuth altitude P)  → real pressure, scaled to [0, 1]
 
-    Either way the extra channels (timestamp, button, azimuth, altitude) are
-    dropped: the architecture takes [1, L, 3] and nothing wider.
+def load_svc2004_file(path, extra_channels=None, float32_parse=False):
+    """Load an SVC2004 signature file into a normalized trajectory array.
 
-    The first line is a point count, which is skipped — the actual rows are
-    trusted over the declared number.
+    Supports 4-column Task1 (X, Y, T, Button) and 7-column Task2 (with pressure and angles).
+    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
     """
     with open(path, "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = [line.split() for line in fh.read().splitlines() if line.strip()]
 
-    rows = np.array([[float(v) for v in row] for row in lines[1:]], dtype=np.float32)
+    # float64: the clock reaches 7.5e7 ms, past the 2**24 where float32 stops holding every integer.
+    rows = np.array([[float(v) for v in row] for row in lines[1:]],
+                    dtype=np.float32 if float32_parse else np.float64)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
@@ -338,59 +291,44 @@ def load_svc2004_file(path, extra_channels=None):
 
     extra = None
     if extra_channels and rows.shape[1] < 7:
-        # Task1 has four columns and can supply neither channel. Returning [L, 3]
-        # here would merge ragged widths into one run instead of failing.
         raise ValueError(
             f"{path} has {rows.shape[1]} columns, so it cannot supply "
             f"'{extra_channels}' — only 7-column Task2 files can."
         )
     if extra_channels:
+        gaps = np.zeros(len(rows), dtype=np.float32)
+        gaps[1:] = np.diff(rows[:, 2])
+        dt = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        tilt = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
+                                rows[:, 5] / SVC_ALTITUDE_MAX])
         if extra_channels == "tilt":
-            # WACOM reports both in tenths of a degree against documented maxima
-            # (azimuth 0-3600, altitude 0-900), so these are fixed divisors, not
-            # per-file statistics.
-            extra = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
-                                     rows[:, 5] / SVC_ALTITUDE_MAX])
+            extra = tilt
         elif extra_channels == "dt":
-            # Real inter-sample time. The model otherwise assumes a uniform
-            # 100 Hz grid, but measured dt has a 10 ms median and a 311 ms tail,
-            # so pauses and pen lifts are currently invisible to it.
-            gaps = np.zeros(len(rows), dtype=np.float32)
-            gaps[1:] = np.diff(rows[:, 2])
-            extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+            extra = dt
+        elif extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(dt, tilt, extra_channels)
         else:
-            raise ValueError(f"Unknown extra_channels '{extra_channels}' "
-                             "— expected 'tilt', 'dt' or None")
+            raise ValueError(f"Unknown extra_channels '{extra_channels}' — expected one of "
+                             f"'tilt', 'dt', {', '.join(map(repr, TILT_CHANNEL_MODES))} or None")
 
     return normalize_trajectory(xy, pressure, extra)
 
 
 def svc2004_has_pressure(root=SVC2004_DIR):
-    """
-    Report whether this SVC2004 copy carries a real pressure channel.
-
-    Task1 downloads do not. Training should warn rather than silently produce a
-    permanently pressure-blind temporal model, since pressure-channel dropout
-    becomes a no-op when every P is already 1.0.
-    """
+    """Check if the SVC2004 dataset files include a pressure column."""
     _require_dir(root, "SVC2004")
     for filename in sorted(os.listdir(root)):
         if not _SVC_FILE.match(filename):
             continue
         with open(os.path.join(root, filename), "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] filename matched _SVC_FILE
-            fh.readline()  # point-count header
+            fh.readline()
             first = fh.readline().split()
         return len(first) >= 7
     return False
 
 
-def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
-    """
-    Parse SVC2004: flat `U{user}S{sample}.TXT`.
-
-    40 users × 40 signatures. Samples S1–S20 are genuine; S21–S40 are the
-    skilled forgeries — the label lives in the filename, not in any index file.
-    """
+def parse_svc2004(root=SVC2004_DIR, extra_channels=None, float32_parse=False):
+    """Parse the SVC2004 online signature dataset."""
     _require_dir(root, "SVC2004")
     writers = {}
 
@@ -403,20 +341,18 @@ def parse_svc2004(root=SVC2004_DIR, extra_channels=None):
         writer_id = f"svc_{user}"
         label = "genuine" if sample <= 20 else "forged"
 
-        writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels))
+        record = writers.setdefault(writer_id, {**_new_writer(), "genuine_session": []})
+        record[label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
+                                               float32_parse))
+        if label == "genuine":
+            # Ten genuines per session, recorded about two weeks apart (D8).
+            record["genuine_session"].append(1 if sample <= 10 else 2)
 
     return writers
 
 
 def load_mobisig_file(path):
-    """
-    Load one MOBISIG CSV into the model's [L, 3] input.
-
-    The file carries 13 columns, including velocity, accelerometer and gyroscope
-    channels. Only x, y and pressure are read: the capture contract is three
-    channels, and the model derives its own dynamics from them.
-    """
+    """Load a MOBISIG CSV signature file into a normalized trajectory array."""
     xs, ys, ps = [], [], []
     with open(path, newline="") as handle:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         for row in csv.DictReader(handle):
@@ -424,24 +360,11 @@ def load_mobisig_file(path):
             ys.append(float(row["y"]))
             ps.append(float(row["pressure"]))
 
-    # MOBISIG pressure already arrives in [0, 1]; normalize_trajectory clips it.
     return normalize_trajectory(np.column_stack([xs, ys]), np.asarray(ps))
 
 
 def parse_mobisig(root=MOBISIG_DIR):
-    """
-    Parse MOBISIG: `USER{n}/SIGN_{GEN,FOR}_USER{owner}_USER{signer}_{k}.csv`.
-
-    83 users x 45 genuine + 20 skilled forgeries. A forgery filename names two
-    users: the one being imitated and the one who drew it. The signature belongs
-    to the **owner** being imitated, since that is whose identity the system
-    would be deciding on. Filing it under the forger instead would put an
-    impostor attempt in that person's genuine reference set.
-
-    These are finger-drawn signatures on a capacitive touchscreen, so pressure
-    derives from contact area rather than a pen sensor. Suitable for pre-training
-    the temporal branch, not for training the shipped pen-tablet model.
-    """
+    """Parse the MOBISIG touchscreen signature dataset."""
     _require_dir(root, "MOBISIG")
     writers = {}
 
@@ -467,59 +390,16 @@ def parse_mobisig(root=MOBISIG_DIR):
 
 
 def load_sigcomp2011_file(path, extra_channels=None):
-    """
-    Load one SigComp2011 `.HWR` file into the model's [L, 3] input.
-
-    The format is three whitespace-separated columns per line — X, Y, Z — with
-    no header, where Z is WACOM pen force on the same 0–1023 scale SVC2004 uses.
-
-    Two writer_samples-level alignments are applied here, both of which exist because
-    these trajectories are merged with SVC2004 and read by a single encoder.
-    Neither widens the [L, 3] contract.
-
-    1. **Decimate 200 Hz to 100 Hz** — see `SIGCOMP_DECIMATION`.
-    2. **Drop pen-up samples (Z = 0).** These writers signed on paper laid over
-       the tablet, which keeps sensing while the pen travels between the twelve
-       preprinted boxes, so about 30% of raw points are in-air moves in runs
-       averaging 19 samples. SVC2004 Task2 contains **no** zero-pressure points
-       at all (measured: 0 of 100,494). Mixing the two unfiltered would make the
-       pressure channel and its derivative mean different things per writer_samples,
-       which is precisely what collapsed the earlier SVC2004 Task1 + Task2 merge
-       (43.75% EER; the per-writer pair cap means merging adds no pairs, only
-       mixes pressure-blind samples into the pressure channel).
-
-    The cost is stated plainly: in-air trajectory is discriminative in the
-    online-verification literature, and this discards it. It is discarded
-    because the dataset the deployment device matches does not have it.
-
-    `extra_channels="dt"` recovers the one thing the drop throws away that the
-    model can still use: **how long** the pen was in the air. This archive has no
-    clock column, but it samples on a fixed grid, so the elapsed time between two
-    surviving pen-down points is just how far apart they sat before filtering.
-    That is a measured duration, on the same millisecond scale as SVC2004's real
-    timestamps — not a constant standing in for a channel this corpus lacks.
-    The distinction matters: a constant would let the model identify the corpus
-    instead of the writer, which is the failure recorded against padding
-    SigComp with constant tilt.
-
-    `extra_channels="tilt"` is refused rather than ignored. Silently returning
-    three channels would let a five-channel run score this corpus and report a
-    plausible number instead of failing.
-    """
+    """Load a SigComp2011 online signature file into a normalized trajectory array."""
     rows = np.loadtxt(path, dtype=np.float32, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2011")
 
 
-def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
-    """
-    Shared core for the NFI tablet archives: `[N, 3]` rows of X, Y, force on the
-    200 Hz grid in, model sample out. SigComp2009 and SigComp2011 differ only in
-    file syntax; the decimation, pen-up drop and `dt` reconstruction documented
-    on `load_sigcomp2011_file` apply to both.
-    """
-    rows = rows[::SIGCOMP_DECIMATION]
+def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCOMP_DECIMATION):
+    """Process raw rows from SigComp collections into a normalized trajectory sample."""
+    rows = rows[::decimation]
     pen_down = np.flatnonzero(rows[:, 2] > 0)
     if len(pen_down) < 2:
         raise ValueError(
@@ -528,12 +408,13 @@ def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
         )
 
     extra = None
-    if extra_channels == "dt":
-        # Row distance before filtering *is* elapsed time on a fixed grid: 10 ms
-        # inside a stroke, one lift's full duration across a dropped run.
+    if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
+        # Compute elapsed time between pen-down samples based on sampling period.
         gaps = np.zeros(len(pen_down), dtype=np.float32)
         gaps[1:] = np.diff(pen_down) * SIGCOMP_SAMPLE_MS
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        if extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(extra, None, extra_channels)
     elif extra_channels is not None:
         raise ValueError(
             f"{corpus} cannot supply '{extra_channels}' — the archive ships "
@@ -546,17 +427,7 @@ def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus):
 
 
 def load_nfi2009_file(path, extra_channels=None):
-    """
-    Load one SigComp2009 / NFI online `.hwr` file into the model's input.
-
-    Same NFI collection family and WACOM Intuos3 tablet as SigComp2011 (200 Hz,
-    force on the 0-1023 scale), so it shares `_sigcomp_rows_to_sample`. The
-    syntax differs: line one is `<id> <point count>`, then five columns per
-    point (X, Y, force, azimuth, altitude), with force `-1` while the pen is in
-    the air. Azimuth and altitude are dropped: `tilt` is deferred until the
-    deployment tablet is confirmed to report them, and no shipped weight reads
-    them.
-    """
+    """Load a SigComp2009 online signature file into a normalized trajectory array."""
     with open(path, encoding="latin-1") as handle:
         lines = handle.read().splitlines()
     points = [line.split() for line in lines[1:]]
@@ -567,14 +438,81 @@ def load_nfi2009_file(path, extra_channels=None):
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2009")
 
 
-def _sigcomp_parts(dirpath, root):
-    """
-    Lowercased path components of `dirpath` *below* `root`.
+# BiosecurID-SONOF: Wacom Intuos3 at 100 Hz (already the target rate), x, y and
+# pressure only, pen-up recorded as pressure 0, so the SigComp core applies undecimated.
+SONOF_ONLINE_ID_OFFSET = 1000          # pen file u1001 is scan folder u0001
+SONOF_GENUINE_SLOTS = (1, 2, 6, 7)     # per session; slots 3 to 5 are skilled forgeries
+_SONOF_ONLINE_FILE = re.compile(r"^u(\d{4})(s\d{4}_sg(\d{4}))\.mat$", re.IGNORECASE)
 
-    Only the components inside the dataset are examined. Matching against the
-    absolute path would let a directory anywhere above it decide the label —
-    a checkout under `~/forgeries/` would classify the whole writer_samples as forged.
+
+def load_sonof_online_file(path, extra_channels=None):
+    """Load a BiosecurID-SONOF pen recording (.mat with x, y, p) into a normalized trajectory array."""
+    from scipy.io import loadmat
+    mat = loadmat(path)
+    rows = np.column_stack([np.ravel(mat[key]) for key in ("x", "y", "p")]).astype(np.float32)
+    return _sigcomp_rows_to_sample(rows, extra_channels, path, "BiosecurID-SONOF", decimation=1)
+
+
+def parse_biosecurid_sonof_pairs(root=BIOSECURID_SONOF_DIR):
+    """Pair each SONOF pen recording with the scan of the same signing.
+
+    Returns {writer_id: {"genuine": [(png, mat)], "forged": [(png, mat)]}}. A
+    missing scan, or one whose label disagrees with its slot, raises: a silent
+    gap or a shifted join would corrupt every fused number built on it.
     """
+    online = os.path.join(root, "OnlineReal")
+    _require_dir(online, "BiosecurID-SONOF OnlineReal")
+    writers = {}
+    for filename in sorted(os.listdir(online)):
+        match = _SONOF_ONLINE_FILE.match(filename)
+        if not match:
+            continue
+        pen_user, stem, slot = int(match.group(1)), match.group(2), int(match.group(3))
+        scan_user = pen_user - SONOF_ONLINE_ID_OFFSET
+        genuine = slot in SONOF_GENUINE_SLOTS
+        scan_dir = os.path.join(root, "OfflineReal", f"u{scan_user:04d}")
+        scan = os.path.join(scan_dir, f"u{scan_user:04d}{stem}{'g' if genuine else 'f'}.png")
+        if not os.path.exists(scan):
+            if os.path.exists(scan[:-5] + ("f" if genuine else "g") + ".png"):
+                raise ValueError(f"Scan for {filename} carries the wrong label for slot {slot}.")
+            raise FileNotFoundError(f"No scan for {filename}: expected u{scan_user:04d}{stem}")
+        record = writers.setdefault(f"sonof_u{pen_user:04d}", _new_writer())
+        record["genuine" if genuine else "forged"].append((scan, os.path.join(online, filename)))
+    return writers
+
+
+_SONOF_SCAN_FILE = re.compile(r"^u(\d{4})s\d{4}_sg(\d{4})([gf])\.png$", re.IGNORECASE)
+
+
+def parse_biosecurid_sonof_scans(root=BIOSECURID_SONOF_DIR):
+    """Parse the SONOF scans (OfflineReal) as an offline corpus.
+
+    Writer IDs follow the pen files (`sonof_u1001` is scan folder u0001), so a
+    writer list carries over to the fused pairs. A label that disagrees with its
+    slot raises, as in parse_biosecurid_sonof_pairs.
+    """
+    offline = os.path.join(root, "OfflineReal")
+    _require_dir(offline, "BiosecurID-SONOF OfflineReal")
+    writers = {}
+    for writer_dir in sorted(os.listdir(offline)):
+        full_dir = os.path.join(offline, writer_dir)
+        if not os.path.isdir(full_dir):
+            continue
+        for filename in sorted(os.listdir(full_dir)):
+            match = _SONOF_SCAN_FILE.match(filename)
+            if not match:
+                continue
+            genuine = int(match.group(2)) in SONOF_GENUINE_SLOTS
+            if genuine != (match.group(3).lower() == "g"):
+                raise ValueError(f"Scan {filename} carries the wrong label for its slot.")
+            record = writers.setdefault(
+                f"sonof_u{int(match.group(1)) + SONOF_ONLINE_ID_OFFSET:04d}", _new_writer())
+            record["genuine" if genuine else "forged"].append(os.path.join(full_dir, filename))
+    return writers
+
+
+def _sigcomp_parts(dirpath, root):
+    """Return lowercased relative directory path components below root."""
     relative = os.path.relpath(dirpath, root)
     if relative == os.curdir:
         return []
@@ -582,30 +520,18 @@ def _sigcomp_parts(dirpath, root):
 
 
 def _sigcomp_kind(parts):
-    """
-    Classify a SigComp2011 directory by the archive layout it belongs to.
-
-    The two shipped archives name their signatures with the *same* tokens in
-    *opposite* order — a training genuine is `writer_index` while a test genuine
-    is `index_writer` — so `001_23.HWR` and `01_011.HWR` cannot be told apart
-    from the filename alone. The containing folder is what disambiguates them,
-    and it is a structural fact of the archives rather than a heuristic.
-
-    Returns "train_genuine", "train_forged", "test", or None.
-    """
+    """Determine the subset kind of a SigComp directory."""
     if any("genuine" in p for p in parts):
         return "train_genuine"
     if any("forg" in p for p in parts):
         return "train_forged"
-    # Test signatures sit one level deeper, in a per-writer directory under
-    # `Questioned(1259)/` or `Reference(648)/`.
     if any(p.startswith("questioned") or p.startswith("ref") for p in parts):
         return "test"
     return None
 
 
 def _sigcomp_language(parts):
-    """Recover 'Dutch' or 'Chinese' from the path, or None outside both trees."""
+    """Return 'Dutch' or 'Chinese' based on path components, or None."""
     for language in ("Dutch", "Chinese"):
         if language.lower() in parts:
             return language
@@ -613,14 +539,7 @@ def _sigcomp_language(parts):
 
 
 def _sigcomp_train_writer(filename, kind):
-    """
-    Writer ID for a training-set file, or None if the name does not fit.
-
-    Genuine files are `III_NN.HWR`. Forgeries name the forger first, in one of
-    two conventions the archive mixes: Dutch splits them (`170_001_02.HWR`)
-    while Chinese runs them together (`0120001_1.HWR`, forger 0120, writer 001).
-    Taking the last three digits of the second-to-last token covers both.
-    """
+    """Extract writer ID for a training file in SigComp2011."""
     tokens = os.path.splitext(filename)[0].split("_")
     if len(tokens) < 2 or not all(t.isdigit() for t in tokens):
         return None
@@ -633,18 +552,7 @@ def _sigcomp_train_writer(filename, kind):
 
 
 def _sigcomp_test_entry(filename, writer_dir):
-    """
-    (writer, label) for a test-set file, or None if the name does not fit.
-
-    Genuine is `NN_III.HWR`; a forgery inserts the forger, either as a third
-    token (Dutch `01_182_013.HWR`) or glued to the writer (Chinese
-    `01_0130011.HWR`). So a two-token name whose second token is the bare
-    three-digit writer is the only genuine shape.
-
-    The writer directory is the authority on identity — it is checked against
-    the filename rather than trusted blindly, since a mismatch would mean the
-    archive was rearranged and every label below it is suspect.
-    """
+    """Extract (writer, label) from a test file in SigComp2011."""
     tokens = os.path.splitext(filename)[0].split("_")
     if len(tokens) < 2 or not all(t.isdigit() for t in tokens):
         return None
@@ -660,24 +568,7 @@ def _sigcomp_test_entry(filename, writer_dir):
 
 
 def parse_sigcomp2011(root=SIGCOMP2011_DIR, extra_channels=None):
-    """
-    Parse the SigComp2011 **online** writer_samples into the standard writer dict.
-
-    84 pen-tablet writers — 64 Dutch, 20 Chinese — recorded on a WACOM Intuos3
-    A3 at 200 Hz with real 0–1023 pen force. That capture stack is the same
-    family as SVC2004's, which is the reason this dataset is worth having: the
-    measured result on this project is that pen accuracy only improves with more
-    *pen-domain* writers, and touchscreen writers do not substitute at any
-    quantity. It more than triples the pen-domain writer count.
-
-    Both shipped archives extract into `root` and this walks whatever is there,
-    so a partial download (training set only) parses fine and simply yields
-    fewer writers. Offline PNGs, if extracted alongside, are ignored.
-
-    Writer IDs carry the language (`sigcomp_Dutch_013`) because Dutch writer 013
-    and Chinese writer 013 are different people. Within a language the training
-    and test author IDs are disjoint, so no further namespacing is needed.
-    """
+    """Parse the SigComp2011 online signature dataset."""
     _require_dir(root, "SigComp2011")
     writers = {}
 
@@ -714,43 +605,20 @@ def parse_sigcomp2011(root=SIGCOMP2011_DIR, extra_channels=None):
 
 
 def deepsigndb_source(user_id, split):
-    """
-    Which source database a DeepSignDB user ID belongs to, or None if outside
-    every documented range.
-
-    The ID alone is not enough — `u0001` is an MCYT signer in both halves, but a
-    different MCYT signer in each — so the split has to be named explicitly.
-    """
+    """Return the source database name for a DeepSignDB user ID, or None."""
     for low, high, source in DEEPSIGN_SOURCE_RANGES[split]:
         if low <= user_id <= high:
             return source
     return None
 
 
-def load_deepsigndb_file(path, source, extra_channels=None):
+def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False):
+    """Load a DeepSignDB trajectory file into a normalized array.
+
+    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
     """
-    Load one DeepSignDB signature into the model's [L, 3] input.
-
-    Row 1 is a point count, which is skipped — the actual rows are trusted over
-    the declared number, as in SVC2004. Columns 1–3 are X, Y and a millisecond
-    timestamp for every source; pen force sits at `DEEPSIGN_PRESSURE_COLUMN[source]`.
-
-    Two alignments are applied, both because these trajectories are merged with
-    SVC2004 and read by one encoder. Neither widens the [L, 3] contract.
-
-    1. **Resample to 100 Hz.** The factor comes from this file's own median
-       inter-sample gap rather than a per-dataset constant, because BiosecurID
-       mixes 100 Hz and 200 Hz captures roughly half and half (see
-       `DEEPSIGN_TARGET_PERIOD_MS`). Files already at or below 100 Hz are left
-       alone — this only ever drops samples, never invents them.
-    2. **Drop pen-up samples (force = 0).** Measured 20–30% of raw points across
-       every stylus source, matching SigComp2011's 30% and against SVC2004
-       Task2's zero. The same reasoning applies: mixing them unfiltered would
-       make the pressure channel and its derivative mean different things per
-       dataset. The cost is the same too — in-air trajectory is discriminative
-       in the literature, and this discards it.
-    """
-    rows = np.loadtxt(path, dtype=np.float32, skiprows=1, ndmin=2)
+    # float64: timestamps pass 2**24 ms, where float32 stops holding every integer.
+    rows = np.loadtxt(path, dtype=np.float32 if float32_parse else np.float64, skiprows=1, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
 
@@ -763,8 +631,6 @@ def load_deepsigndb_file(path, source, extra_channels=None):
 
     if len(rows) >= 3:
         period = float(np.median(np.diff(rows[:, 2])))
-        # A zero or negative median means the clock is unusable for rate
-        # detection; keeping every sample is the conservative reading.
         if period > 0:
             rows = rows[::max(1, round(DEEPSIGN_TARGET_PERIOD_MS / period))]
 
@@ -776,14 +642,13 @@ def load_deepsigndb_file(path, source, extra_channels=None):
         )
 
     extra = None
-    if extra_channels == "dt":
-        # Unlike SigComp2011 this corpus carries a real millisecond clock, so the
-        # gap is read directly rather than reconstructed from dropped rows. Both
-        # end up on the same scale, which is what lets the three corpora train
-        # one encoder.
+    if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
+        # Calculate time delta between consecutive samples.
         gaps = np.zeros(len(rows), dtype=np.float32)
         gaps[1:] = np.diff(rows[:, 2])
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        if extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(extra, None, extra_channels)
     elif extra_channels is not None:
         raise ValueError(
             f"DeepSignDB cannot supply '{extra_channels}' — only 'dt' is "
@@ -795,31 +660,8 @@ def load_deepsigndb_file(path, source, extra_channels=None):
 
 
 def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus",
-                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None):
-    """
-    Parse DeepSignDB: `DeepSignDB/{split}/{modality}/u{id}_{g|s}_*.txt`.
-
-    Defaults to the **Development** half, **stylus**, **Wacom pen sources** —
-    498 writers, the largest pen-domain corpus this project has. The defaults are
-    what training uses; the arguments exist so the held-out half stays reachable
-    without editing code.
-
-    `split="Evaluation"` is the authors' held-out benchmark and the split every
-    published DeepSignDB result is reported on. Training on it would forfeit the
-    only directly comparable external number this project can quote, so it is
-    never a default and never merged with Development.
-
-    `modality="finger"` is touchscreen capture by the same people as the stylus
-    half. It carries no pressure at all (measured: the force column is 0 in every
-    finger file), which puts it in MOBISIG's domain rather than the pen tablet's.
-    Writer IDs deliberately omit the modality, so if both are ever parsed and
-    merged, one person's stylus and finger signatures land on one writer — which
-    is what they are.
-
-    Raises on an unknown source name rather than silently yielding fewer writers:
-    a typo in `sources` would otherwise read as "this corpus is smaller than
-    documented".
-    """
+                     sources=DEEPSIGN_PEN_SOURCES, extra_channels=None, float32_parse=False):
+    """Parse the DeepSignDB online signature dataset."""
     unknown = set(sources) - set(DEEPSIGN_PRESSURE_COLUMN)
     if unknown:
         raise ValueError(
@@ -846,27 +688,22 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
         if source not in wanted:
             continue
 
-        # `deepsign_MCYT-dev_0001` — the source keeps the per-dataset breakdown
-        # meaningful (benchmark.py groups on the second token) and the split tag
-        # keeps Development and Evaluation from ever colliding.
         writer_id = f"deepsign_{source}-{split_tag}_{int(match.group(1)):04d}"
         label = "genuine" if match.group(2).lower() == "g" else "forged"
 
-        writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(
+        record = writers.setdefault(writer_id, {**_new_writer(), "genuine_session": []})
+        record[label].append(
             load_deepsigndb_file(os.path.join(directory, filename), source,
-                                 extra_channels))
+                                 extra_channels, float32_parse))
+        if label == "genuine":
+            session = _DEEPSIGN_SESSION.search(filename)
+            record["genuine_session"].append(int(session.group(1)) if session else None)
 
     return writers
 
 
 def parse_sigcomp2011_offline(root=None):
-    """
-    Parse ICDAR SigComp2011 offline scanned image signature dataset.
-
-    Returns:
-        {writer_id: {"genuine": [img_path_strings], "forged": [img_path_strings]}}
-    """
+    """Parse the ICDAR SigComp2011 offline scanned image signature dataset."""
     if root is None:
         root = os.path.join("data", "sigcomp2011_offline")
     _require_dir(root, "SigComp2011 Offline")
@@ -911,13 +748,11 @@ def parse_sigcomp2011_offline(root=None):
     return writers
 
 
-# Registered after definition so parse_dataset can dispatch by directory name.
+# Registered parsers by dataset directory name.
 _PARSERS = {
     "cedar": parse_cedar,
     "bhsig260": parse_bhsig260,
     "utsig": parse_utsig,
-    # Both SVC2004 tasks use the identical filename convention and the same
-    # parser — load_svc2004_file auto-detects 4-column vs 7-column per file.
     "svc2004": parse_svc2004,
     "svc2004_task1": parse_svc2004,
     "svc2004_task2": parse_svc2004,
@@ -925,57 +760,34 @@ _PARSERS = {
     "sigcomp2011": parse_sigcomp2011,
     "sigcomp2011_offline": parse_sigcomp2011_offline,
     "deepsigndb": parse_deepsigndb,
+    # Scans only; the pen files are read through parse_biosecurid_sonof_pairs.
+    "biosecurid_sonof": parse_biosecurid_sonof_scans,
 }
 
-# Which corpora can supply which extra temporal channel, keyed exactly as
-# `_PARSERS` is — a substring test would let `sigcomp2011_offline` claim its
-# online sibling's channels.
-#
-# Every corpus merged into one run has to return the same width, so a channel is
-# usable only when *every* requested corpus appears here with it. `dt` is the
-# only channel two corpora share: SVC2004 measures it against a real clock,
-# SigComp2011 reconstructs it from the length of the pen-up runs it drops.
-# SVC2004 Task1 is absent because its four columns carry neither.
+# Supported additional channels by dataset.
 EXTRA_CHANNEL_SUPPORT = {
-    "svc2004": frozenset({"tilt", "dt"}),
-    "svc2004_task2": frozenset({"tilt", "dt"}),
-    "sigcomp2011": frozenset({"dt"}),
-    "deepsigndb": frozenset({"dt"}),
+    "svc2004": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
+    "svc2004_task2": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
+    "sigcomp2011": frozenset({"dt", *TILT_CHANNEL_MODES}),
+    "deepsigndb": frozenset({"dt", *TILT_CHANNEL_MODES}),
 }
 
 
 def is_known_dataset(path):
-    """
-    Whether `path`'s basename dispatches to a parser.
-
-    Callers validating channels need this so an unrecognized directory reports
-    *that*, rather than a confusing complaint about a channel it was never going
-    to supply either way.
-    """
+    """Check if the directory name matches a known dataset parser."""
     return os.path.basename(os.path.normpath(path)).lower() in _PARSERS
 
 
 def supports_extra_channel(path, channel):
-    """Whether the corpus rooted at `path` can supply `channel`."""
+    """Check if the dataset at the given path supports the extra channel."""
     name = os.path.basename(os.path.normpath(path)).lower()
     return channel in EXTRA_CHANNEL_SUPPORT.get(name, frozenset())
 
 
-SPATIAL_DATASETS = ("cedar", "bhsig260", "utsig", "sigcomp2011_offline")
 TEMPORAL_DATASETS = ("svc2004", "svc2004_task1", "svc2004_task2",
                      "mobisig", "sigcomp2011", "deepsigndb")
 
 
 def is_temporal_dataset(path):
-    """
-    Whether the corpus rooted at `path` yields trajectories rather than images.
-
-    `extra_channels` is a temporal-only concept. A fused run lists both families
-    in one `--data-dir`, so offering the channel to the image corpora aborts a
-    run that is otherwise entirely valid — they cannot supply `dt` and were
-    never going to be asked for a trajectory width in the first place. Keyed
-    exactly as `_PARSERS` is, so `sigcomp2011_offline` cannot be mistaken for
-    its online sibling.
-    """
+    """Check if the dataset yields online trajectories rather than offline images."""
     return os.path.basename(os.path.normpath(path)).lower() in TEMPORAL_DATASETS
-

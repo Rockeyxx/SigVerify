@@ -1,12 +1,6 @@
 """
-Configuration Core — Signature Verification System (EE 499)
-
-Consolidated hyperparameter definitions, system boundaries, paths,
-and global operational constants.
-
-Model Weights Storage Note:
-  Binary `.pth` weight files are excluded from git tracking via `.gitignore`
-  and are distributed through GitHub Releases for local setup.
+Configuration settings and constants for signature verification system.
+Contains model hyperparameters, paths, hardware constraints, and decision thresholds.
 """
 
 import os
@@ -14,6 +8,10 @@ import os
 # ─── Paths ────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "models", "weights")
+# The shipped weights (GitHub Releases), each with a <name>.split.json record
+# of the corpora and writer partition it was trained on.
+SPATIAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
+TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 
 # Root data directories. `data/` is gitignored — local download is required; no datasets are checked into git.
@@ -48,6 +46,21 @@ SIGCOMP2009_DIR = os.path.join(DATA_DIR, "sigcomp2009_dl", "extracted")
 # **Restricted License Dataset:** Requires a signed agreement. Datasets, extracted features, and trained weights are restricted to academic evaluation and are excluded from public releases.
 DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 
+# BiosecurID-SONOF (BiDA Lab, UAM): 132 writers, a pen recording (OnlineReal/) and a scan
+# (OfflineReal/) of the same signing. **Restricted License Dataset**, as DeepSignDB:
+# evaluation and calibration only; no weight trained on it ships.
+BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
+INHOUSE_DIR = os.path.join(DATA_DIR, "inhouse")      # XPPen campaign: <participant>/ + manifest.csv
+
+# The corpora each branch trains on, which are the ones the shipped weights
+# trained on. Scoring a shipped checkpoint takes its corpora and partition from
+# its split record instead, and tests/test_leakage.py fails when the two
+# disagree. Not "every image corpus the parsers can read": that list includes the
+# evaluation-only sigcomp2011_offline, and a split built from it scored the shipped
+# spatial weight on 5 of its own training writers.
+SPATIAL_TRAIN_DIRS = (CEDAR_DIR, BHSIG260_DIR, UTSIG_DIR)
+TEMPORAL_TRAIN_DIRS = (SVC2004_TASK2_DIR, SIGCOMP2011_DIR)
+
 # ─── DataLoader ───────────────────────────────────────────────────────
 NUM_WORKERS = 4                         # Set to 0 if worker process hanging occurs on Windows
 PIN_MEMORY = False                      # CPU-bound execution — memory pinning provides no benefit
@@ -55,14 +68,8 @@ PIN_MEMORY = False                      # CPU-bound execution — memory pinning
 # ─── Spatial Branch (Offline — Siamese CNN) ───────────────────────────
 def spatial_input_size_from_env(value, default):
     """
-    Parse `SIGVER_SPATIAL_INPUT_SIZE=WxH`, the one override for the image size.
-
-    It exists for the input-size sweep only: the size has to reach DataLoader
-    workers (which re-import this module under forkserver) and the benchmark
-    alike, and the environment is the only channel both inherit. A checkpoint
-    trained under it records the size in its split record, and benchmark.py
-    refuses to score it at any other size. A malformed value raises rather than
-    falling back, so a typo cannot silently train at the default.
+    Parse the image size override from SIGVER_SPATIAL_INPUT_SIZE (e.g. '220x155').
+    Used during input size sweeps. Raises ValueError if format is invalid.
     """
     if value is None or value == "":
         return default
@@ -130,13 +137,39 @@ TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
 MIN_TRAJECTORY_POINTS = 10              # Trajectories below 10 points lack sufficient detail
 MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean threshold
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
+TRAJECTORY_DT_MEDIAN_TOLERANCE = 0.10   # Median dt may sit at most 10% off one 10 ms grid step
+CAPTURE_DEVICE_MODEL = "XP-Pen Deco 640"  # Enrol and verify on this one tablet model (F23, ENG_REPORT G4)
+CAMPAIGN_GENUINE_PER_MODALITY = 12      # Genuine signatures per volunteer on tablet and on paper
+CAMPAIGN_PRACTICE_SIGNINGS = 3          # Tablet practice signatures first; never saved
+CAMPAIGN_BREAK_AFTER = 6                # Short break after this many tablet genuines
+CAMPAIGN_FORGERY_ATTEMPTS = 2           # A forger's attempts per victim; "Sign again" before the 2nd
+SHEET_GRID = (4, 2)                     # Paper sheet boxes: rows, columns (8 per A4 sheet)
+SHEET_DPI = 300                         # Printed sheet and scanned PDFs are drawn at this resolution
+SHEET_MARGIN = 0.05                     # Fraction of each box cut away, so the printed border stays out
+# Ink crop for scanned paper boxes (tools/capture_session.py, ENG_REPORT A6). The app's crop_to_ink
+# drops faint ballpoint strokes; this one scores ink against the local paper, so shadows cancel.
+INK_BACKGROUND_KERNEL = 51              # Median blur size (px) that estimates the paper under the ink
+INK_MIN_CONTRAST = 18                   # Ink is at least this much darker than its local paper (0-255)
+INK_MIN_SATURATION = 10                 # ...and coloured: grey shadows, creases and page edges are not (0 lets folds in)
+INK_HUE_RANGE = (95, 165)               # Blue ballpoint, OpenCV hue 0-179
+INK_CLUSTER_GAP = 61                    # Ink pieces closer than this (px) belong to one signature
+INK_MIN_PIXELS = 200                    # Fewer ink pixels than this: no signature in the box
+INK_CROP_PAD = 0.08                     # Margin around the ink, as a fraction of its longer side
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
-# The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%. See SUMMARY.md Part 9 §10.
+# The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.
 # Capture hardware must supply timestamps (channel 3 of standard 7-channel tablet data).
 TEMPORAL_CHANNELS = "dt"                # "xyp" for the legacy 3-channel weights
 # Input feature dimension per channel mode. Used to build model input width dynamically.
-TEMPORAL_CHANNEL_WIDTHS = {"xyp": 3, "dt": 4, "tilt": 5}
+TEMPORAL_CHANNEL_WIDTHS = {"xyp": 3, "dt": 4, "tilt": 5,
+                           # Research only (AGENTS.md exception): dt + tilt, with a fill
+                           # value for corpora without tilt. The fill is in the name
+                           # because a checkpoint records its width, not its fill.
+                           "dt_tilt0": 6, "dt_tilt1": 6, "dt_tilt_flag": 7}
+# Tilt mode -> fill value for corpora that carry no tilt.
+TILT_CHANNEL_MODES = {"dt_tilt0": 0.0, "dt_tilt1": 1.0, "dt_tilt_flag": 0.0}
+# dt_tilt_flag only: chance a training-side SVC2004 sequence has its tilt hidden.
+TEMPORAL_TILT_HIDE_PROB = 0.5
 TEMPORAL_INPUT_FEATURES = TEMPORAL_CHANNEL_WIDTHS[TEMPORAL_CHANNELS]
 TEMPORAL_EMBEDDING_DIM = 128
 TEMPORAL_HIDDEN_SIZE = 256
@@ -155,9 +188,22 @@ PAIRS_IMPOSTOR_PER_WRITER = 276
 # Benchmark evaluation always scores strictly against skilled forgeries per AGENTS.md.
 RANDOM_IMPOSTOR_RATIO = 0.5
 
+# UTSig forgery types added to the TRAINING writers' negatives. Validation and test
+# always keep skilled forgeries only. On disk each writer also has 36 Simple and
+# 3 Opposite Hand forgeries that the shipped recipe never used.
+UTSIG_TRAIN_FORGERY_TYPES = ("Skilled",)
+# Hold each UTSig training writer at the pair count its skilled forgeries alone
+# give (27 x 6 = 162 per side), so adding forgery types does not also add pairs.
+UTSIG_TRAIN_HOLD_PAIRS = False
+
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by hard-negative mining
+# Research arms for the time gap, off in the shipped recipe: a triplet term
+# (anchor genuine, positive genuine, negative skilled forgery) added to the
+# contrastive loss, and temporal positives drawn only across recording sessions.
+TEMPORAL_TRIPLET_WEIGHT = 0.0
+TEMPORAL_CROSS_SESSION_POSITIVES = False
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
 NUM_EPOCHS = 50
@@ -174,6 +220,9 @@ SPATIAL_FC_HIDDEN = 0
 # Gradient checkpointing segments to reduce peak memory usage. Set 0 to disable. Wide trunk uses 4 segments to fit mini-batches in 4 GB VRAM.
 SPATIAL_GRAD_CHECKPOINT = 4
 
+# Seed for the writer split, pair sampling and training. Every published number uses 42.
+SEED = 42
+
 # Writer-independent partition ratios (train, val, test).
 SPATIAL_SPLIT_RATIOS = (0.7, 0.15, 0.15)
 TEMPORAL_SPLIT_RATIOS = (0.5, 0.25, 0.25)
@@ -184,7 +233,7 @@ TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
 
 # ─── Enrollment Evaluation Protocol ──────────────────────────────────
 # Operational protocol: subjects register K=5 genuine signatures, and probe signatures match against nearest enrolled reference embedding.
-# K = 5 aligns with standard benchmark protocols (SVC2004). See AGENTS.md and SUMMARY.md.
+# K = 5 aligns with standard benchmark protocols (SVC2004). See AGENTS.md.
 NUM_ENROLLMENT_REFERENCES = 5
 
 # Number of independent reference draws averaged during evaluation to minimize sample variation.
@@ -193,6 +242,13 @@ ENROLLMENT_TRIALS = 10
 # Data augmentation flags.
 TEMPORAL_AUGMENT = False
 SPATIAL_AUGMENT = True
+
+# Training reads the SVC2004 and DeepSignDB files as float32, the way the loaders once
+# did; every scorer reads them as float64. float32 cannot hold every millisecond past
+# 2**24 ms, and SVC2004's clock runs to 7.5e7 ms, so on most of its files 10 ms steps
+# come out as 8, 12 or 16 ms. That rounding is the only noise the shipped dt recipe
+# trains with: on exact timestamps the same recipe is 2.8 EER points worse in-domain.
+TEMPORAL_TRAIN_FLOAT32_PARSE = True
 
 # Augmentation strengths. These were function defaults inside `src/data/dataset.py`
 # and restated a second time at the call site, so retuning one left the other stale.
@@ -203,9 +259,24 @@ SPATIAL_AUG_MAX_SHEAR = 0.08
 SPATIAL_AUG_MAX_SCALE = 0.08
 SPATIAL_AUG_MAX_TRANSLATE = 0.04
 SPATIAL_AUG_STROKE_PROB = 0.0           # Measured 2026-09-26: stroke dilate/erode jitter costs 1.23 pooled EER points (report L9)
+# Scanner effects (E3, report F9 follow-up): off by default, so the shipped recipe draws
+# the same random stream and every released seed reproduces. Switched on per run with
+# --aug-blur, --aug-ink-gain-min and --aug-noise.
+SPATIAL_AUG_BLUR_SIGMA = 0.0            # Max Gaussian blur sigma in pixels
+SPATIAL_AUG_INK_GAIN_MIN = 1.0          # Ink intensity scaled by U(min, 1); 1.0 is off
+SPATIAL_AUG_NOISE_STD = 0.0             # Max additive noise sigma on the [0, 1] image
 TEMPORAL_AUG_MAX_ROTATION_DEG = 6.0
 TEMPORAL_AUG_JITTER = 0.02
 TEMPORAL_AUG_MAX_SPEED_CHANGE = 0.15
+# Device-spec augmentation (E2, --device-augment): a training trajectory re-recorded as
+# another tablet inside the capture spec (README hardware table: >= 200 Hz, >= 1024
+# pressure levels) would deliver it after ingest. The ranges are the spec's envelope, not
+# measured device statistics: report rates common tablets ship with, and pressure curves
+# from soft to firm.
+TEMPORAL_DEVICE_AUG_RATE_HZ = (200.0, 300.0)
+TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA = (0.67, 1.5)
+TEMPORAL_DEVICE_AUG_PRESSURE_GAIN = (0.85, 1.0)
+TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS = 1024
 
 # Target sampling rate for online trajectories, and the period that follows from
 # it. Everything inside src/ derives from these two: features.py's Nyquist term,
@@ -230,26 +301,42 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 
 # ─── Fusion & Decision ───────────────────────────────────────────────
 # Modal combination score calculation: S_final = α · S_spatial + (1 − α) · S_temporal
-# ALPHA_DEFAULT = 0.5 was measured, not assumed. On paired SigComp2011 writers
-# (25 writer-disjoint splits, alpha fitted on 10 writers and scored on the other
-# 10) the fixed 0.5 scored 13.85% against 14.57% for a per-split grid search;
-# the fitted value was 0.548 +/- 0.122, statistically the default. Cascade, AND,
-# likelihood-ratio and band rules all measured worse than the plain average
-# (SUMMARY.md Part 9, sections 7 and 25). Do not grid-search alpha on small
-# calibration sets; it overfits.
-ALPHA_DEFAULT = 0.5                     # Measured: equal weighting is the optimum
+# Chosen on the 132 BiosecurID-SONOF paired writers (lowest fused EER, K=5, 10 draws),
+# then confirmed on the 14 NFI writers, who took no part in choosing it.
+ALPHA_DEFAULT = 0.4                     # Measured: SONOF optimum; equal weighting (0.5) scored worse on both
 ALPHA_GRID_STEP = 0.05
+
+# Signings asked for at verification, of each kind (paper and tablet). The GUI reads this as its
+# default and may offer it as a toggle (1 or 2); verify() averages however many it is given, and
+# every signing must pass its input gate or that kind of evidence is dropped. The thresholds below
+# are shared: at a fixed threshold averaging can only lower FAR. Measured 2026-10-21, pen, K = 5,
+# 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06% to 13.70% a
+# session later and from 8.42% to 6.04% at the same sitting.
+VERIFICATION_SIGNINGS = 1
+
+# Step-up verification, off until the GUI can show "Sign again" (AGENTS.md). One signing of each
+# kind first: a fused score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is
+# rejected, and anything between asks for one more signing of each kind, whose mean with the first
+# must reach STEP_UP_TWO. Fused decisions only, with VERIFICATION_SIGNINGS left at 1. Calibrated on
+# 132 BiosecurID-SONOF writers three sessions after enrolment, forgers assumed to repeat their first
+# attempt (the worst case for false accepts), at most 30% asked twice: 11.4% of genuine signers
+# refused at 5.1% of forgeries passed, against 15.7% for one signing at 5%; 18% asked twice.
+VERIFICATION_STEP_UP = False
+STEP_UP_REJECT = 0.4229
+STEP_UP_ACCEPT = 0.7514
+STEP_UP_TWO = 0.7470
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
-# See AGENTS.md and SUMMARY.md.
 SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
+# Pen-alone threshold. 0.7381 (the FAR 5% point on SONOF) was tried and reverted: AGENTS.md keeps FAR
+# low first, and at 0.7381 DeepSignDB MCYT and BiosecureDS2 accepted 11.6% and 12.0% of skilled
+# forgeries. No fixed pen-alone threshold meets FAR 5% on every new collection (their FAR 5% points
+# run from 0.72 to 0.83); the deployment's own writers set it.
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-# Fused tau: EER point of 0.5*s + 0.5*t on the 24 paired writers held out by
-# both branches (10 SigComp2011 + 14 SigComp2009/NFI), K=5, 10 draws, measured
-# 2026-09-18 (SUMMARY.md Part 9 section 28). The previous 0.8196 was the midpoint
-# of the two branch thresholds and refused 15% of genuine users on those writers.
-DECISION_THRESHOLD = 0.7751             # Measured fused threshold (EER point on clean paired writers)
+# Fused threshold: EER point of 0.4*s + 0.6*t on the 132 SONOF paired writers, which
+# neither branch trained on. On NFI it gives FAR 3.73%, FRR 3.19% (was 2.85%, 6.70% at 0.7751).
+DECISION_THRESHOLD = 0.7564             # Measured fused threshold (EER point on BiosecurID-SONOF)
 
 # ─── Runtime Budget (AGENTS.md Hard Constraints) ─────────────────────
 # These were documented in AGENTS.md as hard constraints but existed nowhere in

@@ -11,10 +11,14 @@ from config.settings import (MIN_BBOX_PIXELS, MIN_TRAJECTORY_POINTS,
                              SPATIAL_INPUT_SIZE, TEMPORAL_INPUT_FEATURES)
 from src.data.dataset import (
     pin_holdout,
+    save_split_record,
+    load_split_record,
+    check_split_against_record,
     SpatialSignatureDataset,
     TemporalSignatureDataset,
     collate_temporal_pairs,
     generate_skilled_pairs,
+    augment_device,
     augment_trajectory,
     augment_image,
     preprocess_image,
@@ -22,6 +26,7 @@ from src.data.dataset import (
     trajectory_gate,
     writer_independent_split,
 )
+from src.data.parsers import MAX_GAP_MS
 
 
 class TestTrajectoryGate:
@@ -48,6 +53,26 @@ class TestTrajectoryGate:
 
     def test_normalized_trajectory_passes(self):
         passed, details = trajectory_gate(self._normalized())
+        assert passed, details
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    @pytest.mark.parametrize("step_ms", [1.0, 12.0])
+    def test_dt_on_the_wrong_grid_is_rejected(self, step_ms):
+        """A 1 ms grid (old fixtures) and a 12 ms one (250 Hz decimated by 3) both sit
+        inside [0, 1]; only the median shows they are not the 10 ms grid."""
+        traj = self._normalized()
+        traj[:, 3] = step_ms / MAX_GAP_MS
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "dt median" in details["error"]
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    def test_pen_lifts_do_not_move_the_dt_median(self):
+        traj = self._normalized()
+        traj[::10, 3] = 1.0   # one clipped pen lift every 10 samples
+        passed, details = trajectory_gate(traj)
         assert passed, details
 
     def test_raw_device_units_are_rejected(self):
@@ -280,6 +305,13 @@ class TestGenerateSkilledPairs:
             assert writer1 == writer2, f"cross-writer impostor leaked in: {s1} vs {s2}"
             assert kind1.startswith("g") and kind2.startswith("f")
 
+    def test_default_negatives_are_same_writer_forgeries(self):
+        """Verify that default negative pairs are same-writer skilled forgeries."""
+        pairs, labels = generate_skilled_pairs(self._writers())
+        cross = [(s1, s2) for (s1, s2), y in zip(pairs, labels)
+                 if y == 0 and s1.split("_")[0] != s2.split("_")[0]]
+        assert cross == [], f"{len(cross)} cross-writer negatives, e.g. {cross[0]}"
+
     def test_genuine_pairs_are_same_writer_genuines(self):
         """Every label-1 pair must be two genuine samples from one writer."""
         pairs, labels = generate_skilled_pairs(self._writers(), random_impostor_ratio=0.0)
@@ -345,6 +377,21 @@ class TestGenerateSkilledPairs:
         assert mixed.count(1) == baseline.count(1)
         assert mixed.count(0) == mixed.count(1)
 
+    def test_pair_caps_hold_one_writer_below_the_budget(self):
+        """
+        A per-writer cap must bind that writer only. The UTSig forgery-type arm
+        holds UTSig at its skilled-only 162 pairs per side while every other
+        writer keeps the full budget, so adding forgeries does not also add pairs.
+        """
+        _, labels = generate_skilled_pairs(self._writers(n=2, n_genuine=6, n_forged=6),
+                                           num_genuine_per_writer=10,
+                                           num_forged_per_writer=10,
+                                           random_impostor_ratio=0.0,
+                                           pair_caps={"w0": 3})
+        # w0 is held at 3 per side; w1 keeps min(10, C(6,2)=15, 36) = 10.
+        assert labels.count(1) == 3 + 10
+        assert labels.count(0) == 3 + 10
+
     def test_random_impostor_never_pairs_a_writer_with_themselves(self):
         """A 'random impostor' drawn from the same writer would be a positive mislabelled 0."""
         pairs, labels = generate_skilled_pairs(self._writers(n=3),
@@ -356,14 +403,7 @@ class TestGenerateSkilledPairs:
                 assert s1.split("_")[0] != s2.split("_")[0]
 
     def test_ratio_zero_reproduces_the_skilled_only_pairing(self):
-        """
-        Ratio 0 must give the pre-2026-08-04 pairing: every negative a same-writer
-        forgery, no cross-writer pair anywhere.
-
-        This used to compare against the *default*, which was 0.0. The default is
-        now 0.5 — the shipped value — so the assertion has to name the behaviour
-        it wants rather than inherit it.
-        """
+        """Verify ratio 0 produces skilled forgery negatives without cross-writer pairs."""
         pairs, labels = generate_skilled_pairs(self._writers(), seed=7,
                                                random_impostor_ratio=0.0)
         for (s1, s2), y in zip(pairs, labels):
@@ -528,6 +568,14 @@ class TestTemporalDatasetAugmentation:
         pairs, labels = self._pairs()
         ds = TemporalSignatureDataset(pairs, labels, augment=True)
         assert float(ds[0][2]) == 1.0
+
+    def test_device_augment_applies_only_when_asked(self):
+        seq = TestDeviceAugmentation._traj()
+        pairs, labels = [(seq, seq.copy())], [1.0]
+        plain = TemporalSignatureDataset(pairs, labels)[0][0]
+        device = TemporalSignatureDataset(pairs, labels, device_augment=True)[0][0]
+        assert torch.equal(plain, torch.tensor(seq))
+        assert device.shape != plain.shape or not torch.allclose(device, plain)
 
 
 class TestSkilledPairBalance:
@@ -732,12 +780,7 @@ class TestPinnedHoldout:
             assert not set(a) & set(b)
 
     def test_split_does_not_depend_on_input_order(self):
-        """
-        2026-09-18: a holdout list generated from an unsorted dict-key order
-        differed from the sorted split by 40 of 65 writers, and a checkpoint
-        pinned to it was then scored on writers it had trained on. The split
-        must depend on the seed and the set of IDs, never on their order.
-        """
+        """Verify that partitioning is deterministic and independent of input list order."""
         ids = [f"w{i}" for i in range(100)]
         shuffled = list(reversed(ids))
         assert writer_independent_split(ids, 0.7, 0.15, 0.15, seed=42) == \
@@ -868,3 +911,150 @@ class TestAugmentTrajectoryPreservesWidth:
         ]).astype(np.float32)
         out = augment_trajectory(traj, np.random.default_rng(0))
         assert out[:, 3].min() >= 0.0 and out[:, 3].max() <= 1.0
+
+
+class TestSpatialScannerAugmentation:
+    """
+    Scanner effects the shipped augmentation never varied (L6 measured the affine ranges
+    and the stroke jitter only): blur, ink darkness and background noise. Off by default,
+    and off must leave the shipped recipe's random stream untouched, or every released
+    spatial seed would stop reproducing.
+    """
+
+    @staticmethod
+    def _image():
+        img = np.zeros((1, 155, 220), dtype=np.float32)
+        img[0, 60:95, 30:190] = 1.0
+        return img
+
+    def test_default_recipe_consumes_the_same_random_stream(self):
+        # Captured on the code before the scanner effects existed (2026-10-08).
+        rng = np.random.default_rng(5)
+        out = augment_image(self._image(), rng)
+        assert rng.random() == 0.40847320541999865
+        assert float(out.sum()) == pytest.approx(6166.539, abs=0.01)
+
+    def test_blur_spreads_the_ink(self):
+        plain = augment_image(self._image(), np.random.default_rng(0))
+        blurred = augment_image(self._image(), np.random.default_rng(0), blur_sigma_max=2.0)
+        assert (blurred > 0).sum() > (plain > 0).sum()
+
+    def test_ink_gain_dims_the_ink_and_keeps_the_background_black(self):
+        plain = augment_image(self._image(), np.random.default_rng(0))
+        dimmed = augment_image(self._image(), np.random.default_rng(0), ink_gain_min=0.5)
+        assert dimmed.sum() < plain.sum()
+        assert dimmed[0, 0, 0] == 0.0 and dimmed[0, -1, -1] == 0.0
+
+    def test_noise_stays_in_the_unit_range(self):
+        out = augment_image(self._image(), np.random.default_rng(0), noise_std_max=0.2)
+        assert out.min() >= 0.0 and out.max() <= 1.0
+        assert not np.array_equal(out, augment_image(self._image(), np.random.default_rng(0)))
+
+
+class TestDeviceAugmentation:
+    """
+    Re-record a trajectory as another tablet inside the capture spec would deliver it
+    (README hardware table: >= 200 Hz decimated to the model rate, >= 1024 pressure levels).
+    """
+
+    @staticmethod
+    def _traj(n=200):
+        t = np.linspace(0, 1, n)
+        dt = np.full(n, 0.1, dtype=np.float32)   # 10 ms of the 100 ms clip
+        dt[100] = 1.0                            # one pen lift
+        return np.column_stack([np.sin(6 * t), np.cos(4 * t), 0.2 + 0.6 * t, dt]).astype(np.float32)
+
+    def test_channels_and_dtype_are_preserved(self):
+        out = augment_device(self._traj(), np.random.default_rng(0))
+        assert out.shape[1] == 4 and out.dtype == np.float32
+
+    def test_a_200_hz_tablet_keeps_the_timeline_and_the_coordinates(self):
+        traj = self._traj()
+        out = augment_device(traj, np.random.default_rng(0), rate_range_hz=(200.0, 200.0))
+        assert len(out) == len(traj)
+        assert np.allclose(out[:, :2], traj[:, :2])
+
+    def test_integer_decimation_of_a_270_hz_tablet_lands_on_90_hz(self):
+        traj = self._traj()
+        out = augment_device(traj, np.random.default_rng(0), rate_range_hz=(270.0, 270.0))
+        assert len(out) == round(len(traj) * 0.9)
+        # A regular 10 ms gap becomes 11.1 ms on the slower effective clock.
+        assert np.median(out[:, 3]) == pytest.approx(0.1 / 0.9, rel=1e-3)
+        assert out[:, 3].max() <= 1.0
+
+    def test_pressure_keeps_its_order_and_the_unit_range(self):
+        traj = self._traj()
+        out = augment_device(traj, np.random.default_rng(3), rate_range_hz=(200.0, 200.0))
+        order = np.argsort(traj[:, 2], kind="stable")
+        assert np.all(np.diff(out[order, 2]) >= 0)
+        assert out[:, 2].min() >= 0.0 and out[:, 2].max() <= 1.0
+
+    def test_pressure_is_quantised_to_the_spec_levels(self):
+        out = augment_device(self._traj(), np.random.default_rng(1), pressure_levels=1024)
+        steps = out[:, 2] * 1023
+        assert np.allclose(steps, np.round(steps), atol=1e-3)
+
+
+class TestTiltHiding:
+    @staticmethod
+    def _seq(present=1.0, width=7):
+        n = 20
+        cols = [np.linspace(0, 1, n), np.linspace(1, 0, n), np.full(n, 0.5),
+                np.full(n, 0.1), np.full(n, 0.3), np.full(n, 0.6)]
+        if width == 7:
+            cols.append(np.full(n, present))
+        return np.column_stack(cols).astype(np.float32)
+
+    def test_prob_one_hides_tilt_and_flag(self):
+        seq = self._seq()
+        a, b, _ = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=1.0)[0]
+        for side in (a, b):
+            assert torch.equal(side[:, 4:], torch.zeros(len(seq), 3))
+            assert torch.equal(side[:, :4], torch.tensor(seq[:, :4]))
+
+    def test_prob_zero_is_identity_and_draws_nothing(self):
+        seq = self._seq()
+        ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0])
+        before = ds._rng.bit_generator.state
+        a, _, _ = ds[0]
+        assert ds._rng.bit_generator.state == before
+        assert torch.equal(a, torch.tensor(seq))
+
+    def test_absent_tilt_is_never_touched(self):
+        seq = self._seq(present=0.0)
+        a, _, _ = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=1.0)[0]
+        assert torch.equal(a, torch.tensor(seq))
+
+    def test_same_seed_same_pattern(self):
+        seq = self._seq()
+        pairs = [(seq, seq.copy())] * 20
+
+        def pattern():
+            ds = TemporalSignatureDataset(pairs, [1.0] * 20, tilt_hide_prob=0.5, seed=7)
+            return [float(ds[i][0][0, 6]) for i in range(20)]
+        first = pattern()
+        assert first == pattern()
+        assert 0.0 in first and 1.0 in first
+
+    def test_refuses_non_flag_width(self):
+        seq = self._seq(width=6)
+        ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=0.5)
+        with pytest.raises(ValueError, match="7"):
+            ds[0]
+
+
+class TestSplitRecordChannels:
+    def _save(self, tmp_path, mode):
+        w = os.path.join(tmp_path, "m.pth")
+        save_split_record(w, ["a"], ["b"], ["c"], ["d"], 42, temporal_channels=mode)
+        return w
+
+    def test_tilt_mode_is_recorded_and_dt_is_not(self, tmp_path):
+        assert load_split_record(self._save(tmp_path, "dt_tilt1"))["temporal_channels"] == "dt_tilt1"
+        assert "temporal_channels" not in load_split_record(self._save(tmp_path, "dt"))
+
+    def test_mismatched_mode_is_refused(self, tmp_path):
+        w = self._save(tmp_path, "dt_tilt1")
+        with pytest.raises(ValueError, match="dt_tilt1"):
+            check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt0")
+        assert check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt1")

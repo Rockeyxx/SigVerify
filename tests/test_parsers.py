@@ -14,6 +14,7 @@ import pytest
 
 from config.settings import (
     BHSIG260_DIR,
+    BIOSECURID_SONOF_DIR,
     CEDAR_DIR,
     DEEPSIGNDB_DIR,
     MOBISIG_DIR,
@@ -23,12 +24,17 @@ from config.settings import (
     UTSIG_DIR,
 )
 from src.data.parsers import (
+    EXTRA_CHANNEL_SUPPORT,
+    MAX_GAP_MS,
     SIGCOMP_DECIMATION,
     deepsigndb_source,
+    load_deepsigndb_file,
     load_sigcomp2011_file,
+    load_sonof_online_file,
     load_svc2004_file,
     merge_datasets,
     parse_bhsig260,
+    parse_biosecurid_sonof_pairs,
     parse_cedar,
     parse_deepsigndb,
     parse_mobisig,
@@ -190,6 +196,30 @@ class TestLoadSVC2004File:
         with open(path, "w") as fh:
             fh.write("99\n100 200 1000 0\n110 210 1010 1\n")
         assert load_svc2004_file(path).shape == (2, 3)
+
+    def test_dt_is_exact_when_the_device_clock_is_large(self, tmp_path):
+        """
+        SVC2004's clock runs across days (up to 7.5e7 ms). float32 holds every
+        integer only below 2**24, so differencing a float32 timestamp turned 10 ms
+        steps into 8 and 16 ms and marked false pen-up gaps.
+        """
+        rows = [[100 + i, 200 + i, 70_000_000 + 10 * i, 1, 1500, 700, 500] for i in range(50)]
+        seq = load_svc2004_file(self._write(tmp_path / "U1S1.TXT", rows), extra_channels="dt")
+        assert np.allclose(seq[1:, 3], 10.0 / MAX_GAP_MS, atol=1e-6)
+
+    def test_float32_parse_keeps_the_dt_the_shipped_recipe_trained_on(self, tmp_path):
+        """
+        Training asks for the old float32 read. Its rounded clock turns 10 ms
+        steps into 8 and 16 ms, and that is the only noise the shipped dt recipe
+        trains with: on exact timestamps the recipe is 2.8 EER points worse.
+        Every score keeps the exact read above.
+        """
+        rows = [[100 + i, 200 + i, 70_000_000 + 10 * i, 1, 1500, 700, 500] for i in range(50)]
+        path = self._write(tmp_path / "U1S1.TXT", rows)
+        rounded = np.diff(np.float32(70_000_000 + 10 * np.arange(50))) / MAX_GAP_MS
+        assert not np.allclose(rounded, 10.0 / MAX_GAP_MS)  # the clock is large enough to round
+        seq = load_svc2004_file(path, extra_channels="dt", float32_parse=True)
+        assert np.allclose(seq[1:, 3], rounded, atol=1e-6)
 
 
 class TestParseSVC2004:
@@ -704,6 +734,36 @@ class TestParseDeepSignDB:
         assert deepsigndb_source(9999, "Development") is None
 
 
+class TestLoadDeepSignDBFile:
+    """One DeepSignDB file: count header, then x, y, timestamp, ..., pressure."""
+
+    def test_dt_is_exact_when_the_device_clock_is_large(self, tmp_path):
+        """
+        BiosecureDS2 and e-BioSign clocks pass 2**24 ms, where float32 stops
+        holding every integer, so a float32 read turned 10 ms steps into 8 and
+        16 ms before the difference was taken.
+        """
+        path = tmp_path / "u0240_g_synthetic.txt"
+        rows = [f"{100 + i} {200 + i} {70_000_000 + 10 * i} 1 1500 700 500" for i in range(50)]
+        path.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        seq = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels="dt")
+        assert len(seq) == 50
+        assert np.allclose(seq[1:, 3], 10.0 / MAX_GAP_MS, atol=1e-6)
+
+    def test_float32_parse_keeps_the_dt_the_shipped_recipe_trained_on(self, tmp_path):
+        """
+        Training reads DeepSignDB as float32 too, as the loader once did, so the
+        research families trained on it are reproduced exactly.
+        """
+        path = tmp_path / "u0240_g_synthetic.txt"
+        rows = [f"{100 + i} {200 + i} {70_000_000 + 10 * i} 1 1500 700 500" for i in range(50)]
+        path.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        rounded = np.diff(np.float32(70_000_000 + 10 * np.arange(50))) / MAX_GAP_MS
+        seq = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels="dt", float32_parse=True)
+        assert len(seq) == 50
+        assert np.allclose(seq[1:, 3], rounded, atol=1e-6)
+
+
 @pytest.mark.skipif(not _have(DEEPSIGNDB_DIR), reason="DeepSignDB not licensed/downloaded")
 def test_real_deepsigndb_counts():
     """
@@ -878,6 +938,67 @@ class TestTemporalGapChannel:
         assert writers["sigcomp_Dutch_001"]["genuine"][0].shape[1] == 4
 
 
+class TestTiltChannelModes:
+    """dt + tilt modes: real tilt on SVC2004 Task 2, the mode's fill elsewhere."""
+
+    _write_hwr = TestTemporalGapChannel._write_hwr
+    _write_svc_task2 = TestTemporalGapChannel._write_svc_task2
+    DECIMATED_FORCE = TestTemporalGapChannel.DECIMATED_FORCE
+
+    @pytest.mark.parametrize("mode,width", [("dt_tilt0", 6), ("dt_tilt1", 6), ("dt_tilt_flag", 7)])
+    def test_svc_carries_real_dt_and_tilt(self, tmp_path, mode, width):
+        svc = os.path.join(tmp_path, "U1S1.TXT")
+        self._write_svc_task2(svc, [0, 10, 50, 60, 70])
+        out = load_svc2004_file(svc, extra_channels=mode)
+        dt = load_svc2004_file(svc, extra_channels="dt")
+        tilt = load_svc2004_file(svc, extra_channels="tilt")
+        assert out.shape == (5, width)
+        np.testing.assert_array_equal(out[:, :4], dt)
+        np.testing.assert_array_equal(out[:, 4:6], tilt[:, 3:5])
+        if mode == "dt_tilt_flag":
+            np.testing.assert_array_equal(out[:, 6], 1.0)
+
+    @pytest.mark.parametrize("mode,fill,width", [("dt_tilt0", 0.0, 6), ("dt_tilt1", 1.0, 6),
+                                                 ("dt_tilt_flag", 0.0, 7)])
+    def test_sigcomp_fills_tilt(self, tmp_path, mode, fill, width):
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+        out = load_sigcomp2011_file(path, extra_channels=mode)
+        dt = load_sigcomp2011_file(path, extra_channels="dt")
+        assert out.shape == (len(dt), width)
+        np.testing.assert_array_equal(out[:, :4], dt)
+        np.testing.assert_array_equal(out[:, 4:6], fill)
+        if mode == "dt_tilt_flag":
+            np.testing.assert_array_equal(out[:, 6], 0.0)
+
+    @pytest.mark.parametrize("mode,fill,width", [("dt_tilt0", 0.0, 6), ("dt_tilt1", 1.0, 6),
+                                                 ("dt_tilt_flag", 0.0, 7)])
+    def test_deepsigndb_fills_tilt(self, tmp_path, mode, fill, width):
+        path = tmp_path / "u0240_g_synthetic.txt"
+        rows = [f"{100 + i} {200 + i} {70_000_000 + 10 * i} 1 1500 700 500" for i in range(50)]
+        path.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        out = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels=mode)
+        dt = load_deepsigndb_file(str(path), "BiosecureDS2", extra_channels="dt")
+        assert out.shape == (len(dt), width)
+        np.testing.assert_array_equal(out[:, :4], dt)
+        np.testing.assert_array_equal(out[:, 4:6], fill)
+        if mode == "dt_tilt_flag":
+            np.testing.assert_array_equal(out[:, 6], 0.0)
+
+    def test_sigcomp_still_refuses_plain_tilt(self, tmp_path):
+        path = os.path.join(tmp_path, "001_01.HWR")
+        self._write_hwr(path)
+        with pytest.raises(ValueError, match="tilt"):
+            load_sigcomp2011_file(path, extra_channels="tilt")
+
+    def test_settings_and_support_agree(self):
+        from config.settings import TEMPORAL_CHANNEL_WIDTHS, TILT_CHANNEL_MODES
+        assert set(TILT_CHANNEL_MODES) <= set(TEMPORAL_CHANNEL_WIDTHS)
+        for corpus, modes in EXTRA_CHANNEL_SUPPORT.items():
+            if "dt" in modes:
+                assert set(TILT_CHANNEL_MODES) <= modes, corpus
+
+
 class TestLoadNfi2009File:
     """SigComp2009 / NFI online: header line, five columns, pressure -1 in the air.
 
@@ -918,3 +1039,93 @@ class TestLoadNfi2009File:
         sig = load_sigcomp2011_file(str(p2011), extra_channels="dt")
 
         np.testing.assert_allclose(nfi, sig)
+
+
+class TestBiosecurIDSonof:
+    """BiosecurID-SONOF: a pen recording and a scan of the same signing, joined by name.
+
+    Pen `OnlineReal/u1NNNsSSSS_sgKKKK.mat` (x, y, p at 100 Hz, pen-up as p = 0, no
+    clock), scan `OfflineReal/u0NNN/u0NNNsSSSS_sgKKKK{g|f}.png`. Slots 1, 2, 6, 7
+    are genuine, 3 to 5 skilled forgeries. A fused number is only as good as this
+    join, so the tests pin it by name, not by sort order.
+    """
+
+    @staticmethod
+    def _mat(path, pressures):
+        from scipy.io import savemat
+        n = len(pressures)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        savemat(path, {"x": np.arange(n, dtype=np.uint16)[None] * 3 + 9000,
+                       "y": np.arange(n, dtype=np.uint16)[None] * 2 + 18000,
+                       "p": np.asarray(pressures, dtype=np.uint16)[None]})
+
+    def _archive(self, root, writers=(1, 2), sessions=(1, 2)):
+        for u in writers:
+            for s in sessions:
+                for slot in range(1, 8):
+                    stem = f"s{s:04d}_sg{slot:04d}"
+                    self._mat(str(root / "OnlineReal" / f"u{1000 + u}{stem}.mat"), [500] * 10)
+                    label = "g" if slot in (1, 2, 6, 7) else "f"
+                    _touch(str(root / "OfflineReal" / f"u{u:04d}" / f"u{u:04d}{stem}{label}.png"))
+
+    def test_pen_up_is_dropped_and_dt_is_the_dropped_run(self, tmp_path):
+        from config.settings import TEMPORAL_INPUT_FEATURES, TEMPORAL_SAMPLE_PERIOD_MS
+        from src.data.parsers import MAX_GAP_MS
+        path = str(tmp_path / "u1001s0001_sg0001.mat")
+        self._mat(path, [400] * 5 + [0] * 3 + [600] * 5)
+
+        sample = load_sonof_online_file(path, extra_channels="dt")
+
+        assert sample.shape == (10, TEMPORAL_INPUT_FEATURES)
+        # No decimation at 100 Hz; the gap across the 3 in-air rows is 4 periods.
+        expected = np.full(10, TEMPORAL_SAMPLE_PERIOD_MS / MAX_GAP_MS, dtype=np.float32)
+        expected[0], expected[5] = 0.0, 4 * TEMPORAL_SAMPLE_PERIOD_MS / MAX_GAP_MS
+        np.testing.assert_allclose(sample[:, 3], expected)
+        np.testing.assert_allclose(sample[:5, 2], 400 / 1023.0, rtol=1e-6)
+
+    def test_too_little_ink_raises(self, tmp_path):
+        path = str(tmp_path / "u1001s0001_sg0001.mat")
+        self._mat(path, [0, 0, 300, 0])
+        with pytest.raises(ValueError, match="fewer than 2 pen-down"):
+            load_sonof_online_file(path)
+
+    def test_pairs_join_by_name_and_labels_follow_the_slot(self, tmp_path):
+        self._archive(tmp_path)
+
+        writers = parse_biosecurid_sonof_pairs(str(tmp_path))
+
+        assert sorted(writers) == ["sonof_u1001", "sonof_u1002"]
+        rec = writers["sonof_u1002"]
+        assert len(rec["genuine"]) == 8 and len(rec["forged"]) == 6
+        for label in ("genuine", "forged"):
+            for png, mat in rec[label]:
+                # Same signing: scan folder = pen user - 1000, same session and slot.
+                assert os.path.basename(png)[5:-5] == os.path.basename(mat)[5:-4]
+                assert int(os.path.basename(png)[1:5]) + 1000 == int(os.path.basename(mat)[1:5])
+                assert png.endswith("g.png") == (label == "genuine")
+
+    def test_a_scan_with_the_wrong_label_stops_the_parse(self, tmp_path):
+        self._archive(tmp_path, writers=(1,), sessions=(1,))
+        good = tmp_path / "OfflineReal" / "u0001" / "u0001s0001_sg0003f.png"
+        good.rename(good.with_name("u0001s0001_sg0003g.png"))
+        with pytest.raises(ValueError, match="slot"):
+            parse_biosecurid_sonof_pairs(str(tmp_path))
+
+    def test_a_missing_scan_stops_the_parse(self, tmp_path):
+        self._archive(tmp_path, writers=(1,), sessions=(1,))
+        os.remove(tmp_path / "OfflineReal" / "u0001" / "u0001s0001_sg0006g.png")
+        with pytest.raises(FileNotFoundError, match="u0001s0001_sg0006"):
+            parse_biosecurid_sonof_pairs(str(tmp_path))
+
+
+@pytest.mark.skipif(not _have(BIOSECURID_SONOF_DIR), reason="BiosecurID-SONOF not licensed/downloaded")
+def test_real_biosecurid_sonof_counts():
+    """132 writers, each 16 genuine and 12 skilled forgeries, every one with its scan."""
+    from config.settings import TEMPORAL_INPUT_FEATURES
+    writers = parse_biosecurid_sonof_pairs(BIOSECURID_SONOF_DIR)
+    assert len(writers) == 132
+    assert all(len(r["genuine"]) == 16 and len(r["forged"]) == 12 for r in writers.values())
+    png, mat = writers["sonof_u1001"]["genuine"][0]
+    sample = load_sonof_online_file(mat, extra_channels="dt")
+    assert sample.shape[1] == TEMPORAL_INPUT_FEATURES and np.all(np.isfinite(sample))
+    assert sample[:, 2].std() > 0.0

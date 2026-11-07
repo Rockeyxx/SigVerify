@@ -1,13 +1,8 @@
-"""
-interfaces.py — Signature Verification System
+"""GUI interfaces for signature verification.
 
-Thin GUI-facing wrapper around Omar's real integration facade
-(src/verification.py). This module does NOT reimplement any model or
-scoring logic — it only converts between the GUI's storage format
-(base64 strings in JSON) and the real SignatureService's format
-(raw bytes embeddings).
-
-Dynamic (tablet) verification is not wired yet — pending src/capture/.
+This module provides a GUI wrapper around SignatureService (src/verification.py).
+It converts between GUI storage formats (base64-encoded strings) and raw embedding
+byte formats used by the service.
 """
 
 import os
@@ -38,11 +33,11 @@ def warm_up() -> None:
 
 
 def _prepare_image(path: str) -> str:
-    """
-    Full preparation pipeline for any image before it reaches the model:
-    1. Crop to ink + binarize (fixes phone-photo framing/lighting issues)
-    2. Copy to an ASCII-safe temp path (fixes cv2.imread failing silently
-       on non-ASCII paths, e.g. Arabic "Desktop" folder names)
+    """Prepare an image before sending it to the model.
+
+    Steps:
+      1. Crop to ink and clean background noise.
+      2. Copy to an ASCII-safe temporary path to prevent filename encoding issues.
     """
     cleaned_path = crop_to_ink(path)
 
@@ -57,16 +52,12 @@ def _prepare_image(path: str) -> str:
 
 
 def enroll_client(image_paths: list) -> dict:
-    """
-    Runs each reference image through the real spatial model.
+    """Enroll client reference images using the spatial model.
 
-    Returns a dict (NOT a bare list anymore):
-        {
-            "embeddings": [base64 str, ...],
-            "spatial_origin": "scan",   # these are real scanned/photographed images
-        }
-    The caller (enrollment.py) must save spatial_origin alongside the
-    embeddings — verify_client() requires it later.
+    Returns:
+        A dictionary containing:
+          - "embeddings": list of base64-encoded embedding strings.
+          - "spatial_origin": origin type ("scan").
     """
     safe_paths = [_prepare_image(p) for p in image_paths]
     service = _get_service()

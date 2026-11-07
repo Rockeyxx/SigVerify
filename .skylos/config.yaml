@@ -20,7 +20,6 @@ exclude:
 # that trusted the report would break the notebook.
 whitelist_documented:
   "plot_loss_curve": "called by Signature_Verification_Pipeline.ipynb cells 5 and 10"
-  "SPATIAL_DATASETS": "imported by Signature_Verification_Pipeline.ipynb cell 3"
 
 gate:
   fail_on_critical: true

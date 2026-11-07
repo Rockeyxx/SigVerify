@@ -1,6 +1,4 @@
-"""
-Verification Panel — Signature Verification System
-"""
+"""Verification Panel for the signature verification graphical interface."""
 
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QComboBox,

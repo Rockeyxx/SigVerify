@@ -1,9 +1,8 @@
-"""
-Paired Multimodal Calibration Engine.
+"""Multimodal calibration script.
 
 Renders online trajectories into paired spatial images, evaluates both branches
-on the exact same signatures across validation writers, and derives the true
-empirically optimal fusion weight alpha and decision threshold tau.
+on the same signatures across validation writers, and finds the optimal
+fusion weight alpha and decision threshold tau.
 """
 
 from __future__ import annotations
@@ -17,11 +16,12 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (
-    MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
     SIGCOMP2011_DIR,
+    SPATIAL_WEIGHTS_PATH,
     SVC2004_TASK2_DIR,
     TEMPORAL_CHANNELS,
+    TEMPORAL_WEIGHTS_PATH,
     TEMPORAL_SPLIT_RATIOS,
 )
 from scripts.evaluate import compute_eer, compute_far_frr
@@ -147,9 +147,9 @@ def evaluate_paired_corpus(
 def main():
     parser = argparse.ArgumentParser(description="Calibrate multimodal fusion parameters")
     parser.add_argument("--spatial-weights",
-                        default=os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth"))
+                        default=SPATIAL_WEIGHTS_PATH)
     parser.add_argument("--temporal-weights",
-                        default=os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth"))
+                        default=TEMPORAL_WEIGHTS_PATH)
     parser.add_argument("--data-dirs", nargs="+",
                         default=[SVC2004_TASK2_DIR, SIGCOMP2011_DIR])
     parser.add_argument("--seed", type=int, default=42)
@@ -203,7 +203,7 @@ def main():
     f_eer, _ = compute_eer(f_test_gen, f_test_imp)
     f_far, f_frr = compute_far_frr(f_test_gen, f_test_imp, tau)
 
-    # Fixed alpha = 0.5 (Project default; SUMMARY.md §7 proved fixed beats fitted across 25 splits)
+    # Fixed alpha = 0.5 default baseline.
     from config.settings import ALPHA_DEFAULT
     fixed_gen = ALPHA_DEFAULT * s_test_gen + (1.0 - ALPHA_DEFAULT) * t_test_gen
     fixed_imp = ALPHA_DEFAULT * s_test_imp + (1.0 - ALPHA_DEFAULT) * t_test_imp
@@ -217,7 +217,7 @@ def main():
     print(f"{f'FUSED (fitted a={alpha:.2f})':<22}{f_eer * 100:>9.2f}%{f_far * 100:>9.2f}%{f_frr * 100:>9.2f}%{tau:>12.4f}")
     print(f"{f'FUSED (fixed a={ALPHA_DEFAULT:.2f})':<22}{fixed_eer * 100:>9.2f}%{fixed_far * 100:>9.2f}%{fixed_frr * 100:>9.2f}%{fixed_tau:>12.4f}")
     print("====================================================")
-    print("Note: ALPHA_DEFAULT = 0.5 remains fixed in config/settings.py per SUMMARY.md §7.")
+    print("Note: ALPHA_DEFAULT = 0.5 remains fixed in config/settings.py.")
 
 
 if __name__ == "__main__":

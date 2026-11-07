@@ -84,7 +84,8 @@ jobs:
 
       - name: Run pytest
         run: |
-          pytest tests/ -v --tb=short --junitxml=pytest-results.xml
+          # -m "" overrides pytest.ini: CI runs the slow and archived tests too.
+          pytest tests/ -m "" -v --tb=short --junitxml=pytest-results.xml
 
 
       - name: Upload test results
