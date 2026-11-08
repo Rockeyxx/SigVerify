@@ -125,3 +125,9 @@ def test_clearing_the_canvas_clears_the_raw_events(app):
     _sign(widget.canvas, _strokes())
     widget.canvas.clear_canvas()
     assert widget.canvas.raw_events == []
+
+
+def test_capture_info_records_the_pen_input_qt_was_started_with(app, monkeypatch):
+    """platformName() says only "windows" for both Windows inputs; the manifest needs which."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "windows:nowmpointer")
+    assert SignatureCaptureWidget().capture_info()["qt_platform"] == "windows:nowmpointer"

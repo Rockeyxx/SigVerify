@@ -138,6 +138,7 @@ MIN_TRAJECTORY_POINTS = 10              # Trajectories below 10 points lack suff
 MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean threshold
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
 TRAJECTORY_DT_MEDIAN_TOLERANCE = 0.10   # Median dt may sit at most 10% off one 10 ms grid step
+WINDOWS_PEN_API = "wintab"               # Windows pen input: "wintab" (tablet driver, full pressure range) or "ink" (Windows Ink, 1024 steps; G10)
 CAPTURE_DEVICE_MODEL = "XP-Pen Deco 640"  # Enrol and verify on this one tablet model (F23, ENG_REPORT G4)
 CAMPAIGN_GENUINE_PER_MODALITY = 12      # Genuine signatures per volunteer on tablet and on paper
 CAMPAIGN_PRACTICE_SIGNINGS = 3          # Tablet practice signatures first; never saved

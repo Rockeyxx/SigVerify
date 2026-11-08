@@ -88,7 +88,9 @@ class SignatureCaptureWidget(QWidget):
         """What enrolment stores beside the template, so verification can insist on the same
         tablet model and operating system (F23; spec decisions D7 and D9)."""
         return {"device_model": CAPTURE_DEVICE_MODEL, "os": platform.system(),
-                "qt_platform": QGuiApplication.platformName()}
+                # platformName() is "windows" for both Windows pen inputs; the started spec
+                # (e.g. "windows:nowmpointer" for Wintab) tells them apart.
+                "qt_platform": os.environ.get("QT_QPA_PLATFORM") or QGuiApplication.platformName()}
 
 
 class DrawingCanvas(QWidget):
