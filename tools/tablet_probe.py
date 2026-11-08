@@ -419,7 +419,7 @@ def main():
     ap.add_argument("--out", default=None, help="run folder; default: ./probe-run-<time>")
     ap.add_argument("--analyse", default=None, help="re-analyse a saved run folder and exit")
     ap.add_argument("--pen-api", choices=["ink", "wintab"], default=None,
-                    help="Windows pen input (default: WINDOWS_PEN_API, wintab)")
+                    help="Windows pen input (default: wintab when the tablet driver is installed, else ink)")
     args = ap.parse_args()
 
     if args.analyse:

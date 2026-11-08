@@ -925,7 +925,8 @@ def main():
                     help="write the printable paper sheet and exit (.pdf: front and back, A4)")
     ap.add_argument("--root", default=INHOUSE_DIR, help="data folder (default: INHOUSE_DIR)")
     ap.add_argument("--pen-api", choices=sorted(PEN_PLATFORM), default=None,
-                    help="Windows pen input (default: WINDOWS_PEN_API, wintab); use ink if the pen draws nothing")
+                    help="Windows pen input (default: wintab when the tablet driver is installed, else ink); "
+                         "use ink if the pen draws nothing")
     args = ap.parse_args()
     if args.make_sheet:
         make_sheet(args.make_sheet)
