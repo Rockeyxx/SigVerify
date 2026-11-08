@@ -18,6 +18,8 @@ Two properties carry the whole method:
 
 import numpy as np
 import pytest
+# Closed experiment: skipped by default, run in CI (see pytest.ini).
+pytestmark = pytest.mark.archived
 import torch
 
 from tools.sig2vec import (FEATURES, Sig2Vec, average_precision_loss,

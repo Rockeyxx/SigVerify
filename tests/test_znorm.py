@@ -16,6 +16,11 @@ because the per-user SVM tried earlier made EER 2-3x worse; it failed because
 random-forgery negatives cannot teach a skilled-forgery boundary. Z-norm never
 sees a negative, so that failure does not carry over.
 """
+import pytest
+
+# Closed experiment: skipped by default, run in CI (see pytest.ini).
+pytestmark = pytest.mark.archived
+
 
 import numpy as np
 

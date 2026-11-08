@@ -363,14 +363,35 @@ class ContrastiveLoss(nn.Module):
     Minimizes Euclidean distance for genuine pairs and pushes impostor
     pairs beyond the contrastive margin threshold.
     Supports hard-negative mining to focus on difficult forgeries.
+
+    With triplet_weight > 0 (research arms, off by default) it adds
+    triplet_weight * mean(relu(d(a, p) - d(a, n) + triplet_margin)) over the
+    genuine rows, on the same unnormalised embeddings: anchor embedding1,
+    positive embedding2, and `negative` holding one row per genuine row, in order.
     """
 
-    def __init__(self, margin=1.0, hard_negative_ratio=0.5):
+    def __init__(self, margin=1.0, hard_negative_ratio=0.5, triplet_weight=0.0,
+                 triplet_margin=None):
         super().__init__()
         self.margin = margin
         self.hard_negative_ratio = hard_negative_ratio
+        self.triplet_weight = triplet_weight
+        self.triplet_margin = margin if triplet_margin is None else triplet_margin
 
-    def forward(self, embedding1, embedding2, label):
+    def forward(self, embedding1, embedding2, label, negative=None):
+        loss = self._contrastive(embedding1, embedding2, label)
+        if negative is None or self.triplet_weight <= 0:
+            return loss
+        is_genuine = label > 0.5
+        if not is_genuine.any():
+            return loss
+        anchor = embedding1[is_genuine]
+        d_ap = F.pairwise_distance(anchor, embedding2[is_genuine], p=2)
+        d_an = F.pairwise_distance(anchor, negative, p=2)
+        triplet = F.relu(d_ap - d_an + self.triplet_margin)
+        return loss + self.triplet_weight * triplet.mean()
+
+    def _contrastive(self, embedding1, embedding2, label):
         distance = F.pairwise_distance(embedding1, embedding2, p=2)
 
         genuine_loss = label * distance.pow(2)

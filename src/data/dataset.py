@@ -30,6 +30,7 @@ from torch.utils.data import Dataset
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
+    TILT_CHANNEL_MODES,
     SPATIAL_INPUT_SIZE,
     SPATIAL_SQUARE_PAD,
     MIN_BBOX_PIXELS,
@@ -49,8 +50,10 @@ from config.settings import (
     TEMPORAL_DEVICE_AUG_RATE_HZ, TEMPORAL_DEVICE_AUG_PRESSURE_GAMMA,
     TEMPORAL_DEVICE_AUG_PRESSURE_GAIN, TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS,
     SPATIAL_SPLIT_RATIOS,
+    TEMPORAL_SAMPLE_PERIOD_MS, TRAJECTORY_DT_MEDIAN_TOLERANCE,
 )
 from src.data.renderer import render_trajectory_to_image
+from src.data.parsers import MAX_GAP_MS
 
 # Channel names used in gate error messages, based on configured temporal features.
 _CHANNEL_NAMES = {
@@ -294,6 +297,17 @@ def trajectory_gate(trajectory):
             return False, {**details, "error":
                             "dt outside [0, 1] — it is the inter-sample gap clipped at "
                             "100 ms and scaled, not a raw timestamp."}
+        # One grid step is TEMPORAL_SAMPLE_PERIOD_MS of the MAX_GAP_MS clip (0.1 for 10 of 100 ms).
+        # Pen lifts are a minority of points, so the median sits on the step.
+        step = TEMPORAL_SAMPLE_PERIOD_MS / MAX_GAP_MS
+        median_dt = float(np.median(trajectory[:, 3]))
+        details["dt_median"] = round(median_dt, 4)
+        if abs(median_dt - step) > TRAJECTORY_DT_MEDIAN_TOLERANCE * step:
+            return False, {**details, "error":
+                            f"dt median {median_dt:.4f} is a {median_dt * MAX_GAP_MS:.1f} ms "
+                            f"grid, expected {step:.4f} ({TEMPORAL_SAMPLE_PERIOD_MS:.0f} ms). "
+                            "Resample by timestamp onto the 10 ms grid (AGENTS.md, "
+                            "Device timing and pressure)."}
 
     return True, details
 
@@ -323,8 +337,13 @@ def split_record_path(weights_path):
 
 
 def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, split_seed,
-                      holdout_writers=None, input_size=None, max_gap_ms=None):
-    """Save the writer split record beside the trained model weights."""
+                      holdout_writers=None, input_size=None, max_gap_ms=None,
+                      train_only_dirs=None, temporal_channels=None):
+    """Save the writer split record beside the trained model weights.
+
+    train_only_dirs (corpora whose writers joined training after the split) is
+    written only when set, so every other record keeps its exact shape.
+    """
     record = {
         "data_dirs": [str(d) for d in data_dirs],
         "split_seed": split_seed,
@@ -335,6 +354,11 @@ def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, spl
         # Save max gap threshold for dt delta calculations.
         "max_gap_ms": float(max_gap_ms) if max_gap_ms else None,
     }
+    if train_only_dirs:
+        record["train_only_dirs"] = [str(d) for d in train_only_dirs]
+    if temporal_channels in TILT_CHANNEL_MODES:
+        # Only tilt modes record it, so every existing record keeps its shape.
+        record["temporal_channels"] = temporal_channels
     with open(split_record_path(weights_path), "w") as fh:
         json.dump(record, fh, indent=1)
     return record
@@ -350,7 +374,8 @@ def load_split_record(weights_path):
 
 
 def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True,
-                               input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None):
+                               input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None,
+                               temporal_channels=None):
     """Check that evaluation split matches the record saved during training.
 
     Ensures no training writer is evaluated as a test subject, and that
@@ -371,6 +396,12 @@ def check_split_against_record(weights_path, train_ids, test_ids, require_same_t
         raise ValueError(
             f"Refusing to score {weights_path} with MAX_GAP_MS={max_gap_ms:g}: it was "
             f"trained with {recorded_gap:g}. Set SIGVER_MAX_GAP_MS={recorded_gap:g} to score it.")
+    recorded_mode = record.get("temporal_channels")
+    if recorded_mode and temporal_channels is not None and recorded_mode != temporal_channels:
+        raise ValueError(
+            f"Refusing to score {weights_path} with --temporal-channels {temporal_channels}: "
+            f"it was trained as {recorded_mode}. A different fill loads cleanly and "
+            f"gives a plausible wrong number.")
     scoring = set(test_ids)
     leaked = sorted(scoring & set(record["train"]))
     if leaked:
@@ -422,7 +453,8 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
                            num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
-                           random_impostor_ratio=0.0):
+                           random_impostor_ratio=0.0, pair_caps=None, cross_session=False,
+                           return_writers=False):
     """Generate training or evaluation pairs under the skilled forgery setting.
 
     Positive pairs consist of two genuine signatures from the same writer.
@@ -435,16 +467,23 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         num_forged_per_writer: target count of negative pairs per writer.
         seed: random seed for reproducibility.
         random_impostor_ratio: fraction of negative pairs drawn from other writers.
+        pair_caps: optional {writer: max pairs per side} binding those writers only.
+        cross_session: draw positives only across sessions for writers whose
+            "genuine_session" names two or more. The count stays the same, so
+            when the cross-session pairs run short they are reused in order.
+            Negatives are the same draw as without it.
+        return_writers: also return the writer each pair was drawn for.
 
     Returns:
-        (pairs: list of (sample1, sample2), labels: list of int)
+        (pairs: list of (sample1, sample2), labels: list of int), plus
+        writers: list of str when return_writers is set.
     """
     if not 0.0 <= random_impostor_ratio <= 1.0:
         raise ValueError(
             f"random_impostor_ratio must be in [0, 1], got {random_impostor_ratio}")
 
     rng = random.Random(seed)
-    pairs, labels = [], []
+    pairs, labels, owners = [], [], []
 
     for writer in samples_by_writer:
         genuine = samples_by_writer[writer].get("genuine", [])
@@ -461,12 +500,21 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
             len(genuine) * (len(genuine) - 1) // 2,
             len(genuine) * len(forged),
         )
+        if pair_caps and writer in pair_caps:
+            num_pairs = min(num_pairs, pair_caps[writer])
 
         # Draw genuine pairs without replacement from all unique combinations.
-        genuine_space = list(itertools.combinations(genuine, 2))
+        genuine_space = list(itertools.combinations(range(len(genuine)), 2))
         rng.shuffle(genuine_space)
-        for s1, s2 in genuine_space[:num_pairs]:
-            pairs.append((s1, s2))
+        sessions = samples_by_writer[writer].get("genuine_session")
+        if cross_session and sessions and len(set(sessions) - {None}) > 1:
+            # Filtering the shuffled list leaves the RNG where the default leaves
+            # it, so the negatives below are the same draw.
+            across = [(i, j) for i, j in genuine_space
+                      if None not in (sessions[i], sessions[j]) and sessions[i] != sessions[j]]
+            genuine_space = list(itertools.islice(itertools.cycle(across), num_pairs))
+        for i, j in genuine_space[:num_pairs]:
+            pairs.append((genuine[i], genuine[j]))
             labels.append(1)
 
         # Split negative pairs into skilled forgeries and random impostors.
@@ -479,6 +527,7 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         for s1, s2 in impostor_space[:num_skilled]:
             pairs.append((s1, s2))
             labels.append(0)
+        owners.extend([writer] * (len(pairs) - len(owners)))
 
         # Random impostor pairs (authentic signature vs different writer's genuine signature).
         others = [w for w in samples_by_writer if w != writer
@@ -490,7 +539,10 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
             pairs.append((rng.choice(genuine),
                           rng.choice(samples_by_writer[other]["genuine"])))
             labels.append(0)
+            owners.append(writer)
 
+    if return_writers:
+        return pairs, labels, owners
     return pairs, labels
 
 
@@ -498,12 +550,14 @@ def collate_temporal_pairs(batch):
     """Collate variable-length trajectory pairs into a padded batch for the LSTM.
 
     Args:
-        batch: list of (seq1 [L1, C], seq2 [L2, C], label) tuples.
+        batch: list of (seq1 [L1, C], seq2 [L2, C], label) tuples, or with a
+            fourth negative [L3, C] in the triplet arms.
 
     Returns:
-        (padded1, lengths1, padded2, lengths2, labels)
+        (padded1, lengths1, padded2, lengths2, labels), plus
+        (padded3, lengths3) when the items carry a negative.
     """
-    seqs1, seqs2, labels = zip(*batch)
+    seqs1, seqs2, labels, *negatives = zip(*batch)
 
     lengths1 = torch.tensor([len(s) for s in seqs1], dtype=torch.long)
     lengths2 = torch.tensor([len(s) for s in seqs2], dtype=torch.long)
@@ -511,7 +565,13 @@ def collate_temporal_pairs(batch):
     padded1 = torch.nn.utils.rnn.pad_sequence(list(seqs1), batch_first=True)
     padded2 = torch.nn.utils.rnn.pad_sequence(list(seqs2), batch_first=True)
 
-    return padded1, lengths1, padded2, lengths2, torch.stack(list(labels))
+    out = (padded1, lengths1, padded2, lengths2, torch.stack(list(labels)))
+    if negatives:
+        # Triplet arms: a skilled forgery of each pair's writer rides along.
+        negs = negatives[0]
+        out += (torch.nn.utils.rnn.pad_sequence(list(negs), batch_first=True),
+                torch.tensor([len(s) for s in negs], dtype=torch.long))
+    return out
 
 
 def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
@@ -691,14 +751,32 @@ class TemporalSignatureDataset(Dataset):
     """PyTorch Dataset loading temporal signature trajectory pairs for Siamese training."""
 
     def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42,
-                 device_augment=False):
+                 device_augment=False, negatives=None, tilt_hide_prob=0.0):
         self.pairs = pairs
         self.labels = labels
+        # Triplet arms only: one skilled forgery of each pair's writer.
+        self.negatives = negatives
         self.augment = augment
         self.augment_scale = augment_scale
         self.device_augment = device_augment
+        # dt_tilt_flag research arm only; 0 draws nothing, so other recipes cannot move.
+        self.tilt_hide_prob = tilt_hide_prob
         self._seed = seed
         self._rng = np.random.default_rng(seed)
+
+    def _maybe_hide_tilt(self, sequence):
+        """Hide real tilt (cols 4-5) and clear `present` (col 6) with tilt_hide_prob."""
+        if not self.tilt_hide_prob:
+            return sequence
+        sequence = np.asarray(sequence)
+        if sequence.shape[1] != 7:
+            raise ValueError(f"tilt hiding needs the 7-wide dt_tilt_flag layout, "
+                             f"got width {sequence.shape[1]}")
+        if sequence[0, 6] != 1.0 or self._rng.random() >= self.tilt_hide_prob:
+            return sequence
+        hidden = sequence.copy()
+        hidden[:, 4:7] = 0.0
+        return hidden
 
     def _augment(self, sequence):
         """Perturb a trajectory with scaled augmentation parameters."""
@@ -720,8 +798,19 @@ class TemporalSignatureDataset(Dataset):
             # Each side as if captured on its own tablet inside the spec.
             seq1 = augment_device(seq1, self._rng)
             seq2 = augment_device(seq2, self._rng)
-        return (
+        seq1 = self._maybe_hide_tilt(seq1)
+        seq2 = self._maybe_hide_tilt(seq2)
+        item = (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),
             torch.tensor(self.labels[index], dtype=torch.float32),
         )
+        if self.negatives is None:
+            return item
+        negative = self.negatives[index]
+        if self.augment:
+            negative = self._augment(negative)
+        if self.device_augment:
+            negative = augment_device(negative, self._rng)
+        negative = self._maybe_hide_tilt(negative)
+        return item + (torch.tensor(negative, dtype=torch.float32),)

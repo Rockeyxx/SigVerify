@@ -30,6 +30,7 @@ from config.settings import (
     SIGCOMP2011_DIR,
     SVC2004_DIR,
     TEMPORAL_SAMPLE_PERIOD_MS,
+    TILT_CHANNEL_MODES,
     UTSIG_DIR,
 )
 
@@ -89,6 +90,8 @@ _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
 _MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
                            re.IGNORECASE)
 _DEEPSIGN_FILE = re.compile(r"^u(\d+)_([gs])_.+\.txt$", re.IGNORECASE)
+# BiosecurID names carry their session ("u1202s0003_sg0001"); MCYT names carry none.
+_DEEPSIGN_SESSION = re.compile(r"_u\d+s(\d{4})_sg\d+\.txt$", re.IGNORECASE)
 
 
 def _require_dir(path, label):
@@ -131,9 +134,17 @@ def normalize_trajectory(xy, pressure, extra=None):
 
 
 def merge_datasets(target, incoming):
-    """Merge incoming writer samples into target dictionary, appending samples per writer."""
+    """Merge incoming writer samples into target dictionary, appending samples per writer.
+
+    "genuine_session", when either side has it, stays aligned with "genuine";
+    samples whose corpus records no session get None.
+    """
     for writer_id, record in incoming.items():
         existing = target.setdefault(writer_id, _new_writer())
+        if "genuine_session" in existing or "genuine_session" in record:
+            sessions = existing.get("genuine_session", [None] * len(existing["genuine"]))
+            sessions.extend(record.get("genuine_session", [None] * len(record["genuine"])))
+            existing["genuine_session"] = sessions
         existing["genuine"].extend(record["genuine"])
         existing["forged"].extend(record["forged"])
     return target
@@ -247,6 +258,19 @@ def parse_utsig(root=UTSIG_DIR, forgery_types=("Skilled",)):
     return writers
 
 
+def _tilt_mode_extra(dt, tilt, mode):
+    """[L,1] dt plus [L,2] tilt (None -> the mode's fill), plus `present` in flag mode."""
+    n = len(dt)
+    present = tilt is not None
+    if tilt is None:
+        tilt = np.full((n, 2), TILT_CHANNEL_MODES[mode], dtype=np.float32)
+    columns = [np.asarray(dt, dtype=np.float32).reshape(n, 1),
+               np.asarray(tilt, dtype=np.float32)]
+    if mode == "dt_tilt_flag":
+        columns.append(np.full((n, 1), 1.0 if present else 0.0, dtype=np.float32))
+    return np.column_stack(columns)
+
+
 def load_svc2004_file(path, extra_channels=None, float32_parse=False):
     """Load an SVC2004 signature file into a normalized trajectory array.
 
@@ -272,16 +296,20 @@ def load_svc2004_file(path, extra_channels=None, float32_parse=False):
             f"'{extra_channels}' — only 7-column Task2 files can."
         )
     if extra_channels:
+        gaps = np.zeros(len(rows), dtype=np.float32)
+        gaps[1:] = np.diff(rows[:, 2])
+        dt = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        tilt = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
+                                rows[:, 5] / SVC_ALTITUDE_MAX])
         if extra_channels == "tilt":
-            extra = np.column_stack([rows[:, 4] / SVC_AZIMUTH_MAX,
-                                     rows[:, 5] / SVC_ALTITUDE_MAX])
+            extra = tilt
         elif extra_channels == "dt":
-            gaps = np.zeros(len(rows), dtype=np.float32)
-            gaps[1:] = np.diff(rows[:, 2])
-            extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+            extra = dt
+        elif extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(dt, tilt, extra_channels)
         else:
-            raise ValueError(f"Unknown extra_channels '{extra_channels}' "
-                             "— expected 'tilt', 'dt' or None")
+            raise ValueError(f"Unknown extra_channels '{extra_channels}' — expected one of "
+                             f"'tilt', 'dt', {', '.join(map(repr, TILT_CHANNEL_MODES))} or None")
 
     return normalize_trajectory(xy, pressure, extra)
 
@@ -313,9 +341,12 @@ def parse_svc2004(root=SVC2004_DIR, extra_channels=None, float32_parse=False):
         writer_id = f"svc_{user}"
         label = "genuine" if sample <= 20 else "forged"
 
-        writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
-                                                           float32_parse))
+        record = writers.setdefault(writer_id, {**_new_writer(), "genuine_session": []})
+        record[label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
+                                               float32_parse))
+        if label == "genuine":
+            # Ten genuines per session, recorded about two weeks apart (D8).
+            record["genuine_session"].append(1 if sample <= 10 else 2)
 
     return writers
 
@@ -377,11 +408,13 @@ def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCO
         )
 
     extra = None
-    if extra_channels == "dt":
+    if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
         # Compute elapsed time between pen-down samples based on sampling period.
         gaps = np.zeros(len(pen_down), dtype=np.float32)
         gaps[1:] = np.diff(pen_down) * SIGCOMP_SAMPLE_MS
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        if extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(extra, None, extra_channels)
     elif extra_channels is not None:
         raise ValueError(
             f"{corpus} cannot supply '{extra_channels}' — the archive ships "
@@ -445,6 +478,36 @@ def parse_biosecurid_sonof_pairs(root=BIOSECURID_SONOF_DIR):
             raise FileNotFoundError(f"No scan for {filename}: expected u{scan_user:04d}{stem}")
         record = writers.setdefault(f"sonof_u{pen_user:04d}", _new_writer())
         record["genuine" if genuine else "forged"].append((scan, os.path.join(online, filename)))
+    return writers
+
+
+_SONOF_SCAN_FILE = re.compile(r"^u(\d{4})s\d{4}_sg(\d{4})([gf])\.png$", re.IGNORECASE)
+
+
+def parse_biosecurid_sonof_scans(root=BIOSECURID_SONOF_DIR):
+    """Parse the SONOF scans (OfflineReal) as an offline corpus.
+
+    Writer IDs follow the pen files (`sonof_u1001` is scan folder u0001), so a
+    writer list carries over to the fused pairs. A label that disagrees with its
+    slot raises, as in parse_biosecurid_sonof_pairs.
+    """
+    offline = os.path.join(root, "OfflineReal")
+    _require_dir(offline, "BiosecurID-SONOF OfflineReal")
+    writers = {}
+    for writer_dir in sorted(os.listdir(offline)):
+        full_dir = os.path.join(offline, writer_dir)
+        if not os.path.isdir(full_dir):
+            continue
+        for filename in sorted(os.listdir(full_dir)):
+            match = _SONOF_SCAN_FILE.match(filename)
+            if not match:
+                continue
+            genuine = int(match.group(2)) in SONOF_GENUINE_SLOTS
+            if genuine != (match.group(3).lower() == "g"):
+                raise ValueError(f"Scan {filename} carries the wrong label for its slot.")
+            record = writers.setdefault(
+                f"sonof_u{int(match.group(1)) + SONOF_ONLINE_ID_OFFSET:04d}", _new_writer())
+            record["genuine" if genuine else "forged"].append(os.path.join(full_dir, filename))
     return writers
 
 
@@ -579,11 +642,13 @@ def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False)
         )
 
     extra = None
-    if extra_channels == "dt":
+    if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
         # Calculate time delta between consecutive samples.
         gaps = np.zeros(len(rows), dtype=np.float32)
         gaps[1:] = np.diff(rows[:, 2])
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
+        if extra_channels in TILT_CHANNEL_MODES:
+            extra = _tilt_mode_extra(extra, None, extra_channels)
     elif extra_channels is not None:
         raise ValueError(
             f"DeepSignDB cannot supply '{extra_channels}' — only 'dt' is "
@@ -626,10 +691,13 @@ def parse_deepsigndb(root=DEEPSIGNDB_DIR, split="Development", modality="stylus"
         writer_id = f"deepsign_{source}-{split_tag}_{int(match.group(1)):04d}"
         label = "genuine" if match.group(2).lower() == "g" else "forged"
 
-        writers.setdefault(writer_id, _new_writer())
-        writers[writer_id][label].append(
+        record = writers.setdefault(writer_id, {**_new_writer(), "genuine_session": []})
+        record[label].append(
             load_deepsigndb_file(os.path.join(directory, filename), source,
                                  extra_channels, float32_parse))
+        if label == "genuine":
+            session = _DEEPSIGN_SESSION.search(filename)
+            record["genuine_session"].append(int(session.group(1)) if session else None)
 
     return writers
 
@@ -692,14 +760,16 @@ _PARSERS = {
     "sigcomp2011": parse_sigcomp2011,
     "sigcomp2011_offline": parse_sigcomp2011_offline,
     "deepsigndb": parse_deepsigndb,
+    # Scans only; the pen files are read through parse_biosecurid_sonof_pairs.
+    "biosecurid_sonof": parse_biosecurid_sonof_scans,
 }
 
 # Supported additional channels by dataset.
 EXTRA_CHANNEL_SUPPORT = {
-    "svc2004": frozenset({"tilt", "dt"}),
-    "svc2004_task2": frozenset({"tilt", "dt"}),
-    "sigcomp2011": frozenset({"dt"}),
-    "deepsigndb": frozenset({"dt"}),
+    "svc2004": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
+    "svc2004_task2": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
+    "sigcomp2011": frozenset({"dt", *TILT_CHANNEL_MODES}),
+    "deepsigndb": frozenset({"dt", *TILT_CHANNEL_MODES}),
 }
 
 

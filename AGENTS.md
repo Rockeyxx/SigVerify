@@ -31,6 +31,11 @@ numbers and the reason. Most ideas that get proposed again are already in it.
 dead for anyone who clones. Inline the fact instead. Full conventions are in the
 `docs-style` skill.
 
+**Design documents from the EGM plugin go in one local folder.** Briefs, drafts
+and review reports are gitignored and never committed.
+
+EGM artifact directory: .egm
+
 ---
 
 ## Drift Prevention
@@ -44,11 +49,21 @@ them, even if they appear in the literature review or older drafts:
 - **No SQLCipher / whole-file DB encryption** — encryption is
   application-layer AES-256-GCM only
 - **No extra _captured_ channels beyond the four in the contract** — the capture
-  contract is `[1, L, 4]`, `(X, Y, Pressure, dt)`. The device must not be asked
-  for azimuth, altitude, or tilt. A timestamp is standard across digitizers and
-  forms `dt`, whereas channels that common hardware cannot deliver are excluded.
-  Features **derived** from these four channels inside the model are allowed
-  and expected (see Temporal Branch below).
+  contract is `[1, L, 4]`, `(X, Y, Pressure, dt)`. A timestamp is standard
+  across digitizers and forms `dt`, whereas channels that common hardware cannot
+  deliver are excluded. The XPPen Deco 640 does report tilt X and Y, so the
+  capture widget keeps them in its raw event log for research, but nothing
+  passes them to the model. Features **derived** from these four channels
+  inside the model are allowed and expected (see Temporal Branch below).
+- **Research exception: the tilt channel modes.** `dt_tilt0`, `dt_tilt1` (6
+  channels) and `dt_tilt_flag` (7) add SVC2004's azimuth and altitude to `dt`,
+  with a constant fill for corpora that have no tilt. Use them only through the
+  `--temporal-channels` flag of `scripts/train.py` and `scripts/benchmark.py`.
+  `TEMPORAL_CHANNELS` stays `dt`, and the capture and `verify()` contract stays
+  `[L, 4]`. This ban is lifted only if a tilt arm passes its pre-registered rule
+  against the shipped `dt` family (six paired seeds) and is shipped. Until then,
+  no tilt checkpoint goes through `verify()`, the gate or the config-driven
+  scorers, and no document may claim that tilt helps the shipped model.
 - **No cloud APIs, no remote inference, no discrete GPU at inference**
 
 ---
@@ -158,9 +173,10 @@ stored references takes 0.08 s (0.28 s on one core); never quote it as the budge
 - Input tensor: **`[1, L, 4]`** — `(X, Y, Pressure, dt)`, variable length `L`.
   The width is **not** a literal anywhere in the code: it is
   `TEMPORAL_INPUT_FEATURES`, derived from `TEMPORAL_CHANNELS` in
-  `config/settings.py` (`xyp` → 3, `dt` → 4, `tilt` → 5). Flipping that one
-  setting moves the gate, the parsers and the test suite together, so a
-  checkpoint trained under any of the three stays reproducible. `dt` is what
+  `config/settings.py` (`xyp` → 3, `dt` → 4, `tilt` → 5, and the research-only
+  `dt_tilt0`/`dt_tilt1` → 6, `dt_tilt_flag` → 7, see Drift Prevention). Flipping
+  that one setting moves the gate, the parsers and the test suite together, so a
+  checkpoint trained under any of them stays reproducible. `dt` is what
   ships and is what `models/weights/temporal_lstm.pth` was trained as
 - **Derived dynamics:** the model appends one per-frame delta per input channel
   to form a `[1, L, TEMPORAL_INPUT_FEATURES x 2]` tensor _internally_, before the
@@ -181,13 +197,15 @@ stored references takes 0.08 s (0.28 s on one core); never quote it as the budge
   to robustness.
 - **Inference:** if no pressure sensor is available, impute `P = 1.0` and set the
   degraded-mode flag in the GUI.
-- **Tilt (azimuth and altitude) is not used, even though it helps.** On SVC2004
-  Task 2 (40 writers, seed 42, 3-channel control 19.55% at K=10), adding azimuth
-  and altitude reached 11.17%, 8.38 points better. It is banned under Drift
-  Prevention because the target tablet may not report it: tilt is not confirmed
-  on the XPPen Deco 640 (flagged below), and the user decided to wait until the
-  tablet is bought. Do not build for tilt before then. `button` is almost always
-  1.0 and carries no information.
+- **Tilt (azimuth and altitude) is not in the shipped model.** On SVC2004 Task 2
+  alone (40 writers, one seed, no `dt`, 3-channel control 19.55% at K=10),
+  adding azimuth and altitude reached 11.17%. That run says nothing about tilt
+  on top of `dt` with SigComp2011, which has no tilt, in training. The XPPen
+  Deco 640 reports tilt X and Y in degrees (about ±60), not SVC2004's azimuth
+  and altitude, so a tilt model would also need a conversion before it could
+  run on the device. Tilt stays banned from the contract except for the
+  research modes under Drift Prevention. `button` is almost always 1.0 and
+  carries no information.
 - `dt` is the time between two sampled points. SigComp2011 has no clock column,
   but it samples at a fixed 200 Hz and records pen-up travel as `force = 0`, which
   `load_sigcomp2011_file` drops. The length of the dropped run is the elapsed
@@ -250,9 +268,10 @@ report **7**: `X, Y, timestamp, button/contact, azimuth, altitude, pressure` —
 the same shape as SVC2004 Task2, which is why Task2 is the dataset that matches
 the deployment device.
 
-The target device is an **XPPen Deco 640**, which reports position and pressure
-but no tilt or azimuth. The 3-channel contract is therefore what the hardware
-can actually deliver, not merely a preference. (not confirmed yet editable)
+The target device is an **XPPen Deco 640**. Measured on the tablet: it reports
+position, pressure (0 to 16383) and tilt X and Y, at 250 Hz on the host clock
+with no device timestamp. The contract keeps four of these channels; tilt is
+recorded in the raw event log only (research exception under Drift Prevention).
 
 `src/capture/` is responsible for narrowing whatever the device produces down
 to the **4** channels the model takes — `X, Y, Pressure, dt`, i.e. `[L, 4]`.
@@ -276,7 +295,7 @@ connecting it to `verify()`.
 | Pressure                | **Kept** — scaled to `[0.0, 1.0]`; absent ⇒ impute `1.0` + degraded flag |
 | Timestamp               | **Kept** — as `dt`, the gap to the previous sample, clipped 100 ms → `[0,1]` |
 | Button / contact state  | Dropped — it is pen-down/up, **not** a pressure substitute               |
-| Azimuth, altitude, tilt | Dropped                                                                  |
+| Azimuth, altitude, tilt | Dropped from the contract (raw log only; research modes in train/benchmark) |
 
 - Capture **must** normalize via `src.data.parsers.normalize_trajectory()` —
   the same function the training parsers call. Any separate normalization path

@@ -102,7 +102,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 `src/gui/`, `src/capture/`, and `src/database/` are interface stubs — docstrings and `# TODO` markers, no executable logic. They are not evidence of delivered functionality or standards compliance; see [Standards & Compliance](#standards--compliance).
 
 - **PyQt5 Desktop Interface** (`src/gui/`) Planned interactive enrollment and verification workflows.
-- **Digitizer Tablet Abstraction** (`src/capture/`) Planned hardware abstraction layer for USB digitizer pads (e.g., XPPen Deco 640) via Wintab (Windows) and evdev / OpenTabletDriver (Linux).
+- **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
 - **Encrypted Biometric Store** (`src/database/`) Planned SQLite template store enforcing AES 256 GCM application-layer encryption and ISO/IEC 24745 compliance (only derived embeddings persisted).
 
 ---
@@ -489,21 +489,44 @@ the audit log.
 
 ### Signature Capture
 
-Full pen-down to pen-up signature capture implemented via
-`src/capture/tablet.py`, using PyQt5 Tablet Events on the XPPen Deco 640.
+`src/capture/tablet.py` records the XPPen Deco 640 through PyQt5 tablet events and turns each
+signature into the `[L, 4]` array (x, y, pressure, dt) defined in `AGENTS.md`.
 
-![Screen before signature](assets/screenshots/Screen_before_sign.png)
-![Screen After signature](assets/screenshots/Screen_after_sign.png)
-![Tablet capture result](assets/screenshots/Tablet_capture_result.png)
+`tools/capture_session.py` is the data collection app built on it. One volunteer, one sitting:
+3 practice signatures (not saved), 12 tablet signatures with a break after 6, then the paper
+sheet. Print the sheet with `python tools/capture_session.py --make-sheet sheet.pdf` (A4, actual
+size, two-sided). Import the scan as a PDF or as images, in any page order: the page with the
+most signatures is taken as the front. The scan is cut into one image per box. Every tablet event, with hover and
+tilt, is saved as CSV. Each paper box is saved in colour, with its ink crop beside it, and the
+operator can delete or replace a box before ending the session. The paper can also be imported
+later. Starting a code, or a forger and volunteer pair, that already has files opens a menu to
+continue the tablet, import or review the paper, redo tablet signatures, or delete. Files go to
+`data/inhouse/`, one manifest row each.
 
+![Capture session, signing on the tablet (example signature)](assets/screenshots/capture_session_signing.png)
+![Capture session, paper import with the ink crops (example signature)](assets/screenshots/capture_session_paper.png)
 
-The captured trajectory passes both quality gates (pre- and
-post-normalization) and produces the final `[L, 4]` array —
-X, Y, Pressure, dt — matching the capture contract defined in
-`AGENTS.md`.
+One full session on Linux (Hyprland, Wayland), one signer:
 
-**Status:** Windows path complete and tested. Linux (Arch) path is
-pending.
+| Measure | Result |
+| --- | --- |
+| Tablet signatures passing the input gate | 12 of 12 |
+| Tablet report interval, median | 4.0 ms (250 Hz) |
+| Points per signature on the 10 ms grid | 60 to 70 |
+| Paper boxes whose ink crop holds the whole signature | 13 of 13 (phone scan of folded A4; faint strokes show small gaps in 4) |
+
+**Status:** tested on Linux and Windows with the tablet. On Windows the app picks the pen input
+at start: Wintab when the XPPen driver is installed, Windows Ink otherwise; `--pen-api wintab`
+or `--pen-api ink` forces one. The manifest records the OS, the pen input and the tablet model.
+
+| Measure (Windows, Qt 5.15.2) | Wintab (XPPen driver 4.0.21) | Windows Ink | Linux |
+| --- | --- | --- | --- |
+| Report interval, median | 4.0 ms after clock repair (arrives in bursts of 4 every 16 ms) | 4.0 ms | 4.0 ms |
+| Pressure step | 1/16383 | 1/1024 | 1/16384 |
+| Saved session signatures passing the input gate | 12 of 12 | 12 of 12 | 12 of 12 |
+
+The same signer's pressure read about 1.5 times higher on Windows with the driver than on Linux,
+so enrol and verify on one operating system.
 
 ## Standards & Compliance
 
@@ -523,12 +546,16 @@ Configuration control and the deviation log are in place; IEEE 730-2014's verifi
 
 Digitizer hardware requirements for deployment:
 
-| Specification       | Requirement           | System Handling                                              |
-| ------------------- | --------------------- | ------------------------------------------------------------ |
-| **Report Rate**     | $\ge 200\text{ Hz}$   | Decimated to 100 Hz model rate on ingest                     |
-| **Resolution**      | $\ge 2540\text{ LPI}$ | Coordinate normalization via per-signature z-score           |
-| **Pressure Levels** | $\ge 1024$ levels     | Scaled to $[0.0, 1.0]$; flat 1.0 imputation in degraded mode |
-| **Interface**       | USB HID               | Windows (Wintab), Linux (`evdev` / OpenTabletDriver)         |
+| Specification       | Requirement                                                   | System Handling                                                                                      |
+| ------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **Report Rate**     | $\ge 200\text{ Hz}$                                           | Resampled by timestamp onto a 10 ms grid (100 Hz model rate); never decimated by an integer factor   |
+| **Timestamp**       | One timestamp per sample, monotonic                           | Clock repaired before resampling: a wrapping counter is unwrapped, a burst sharing one timestamp is spread evenly |
+| **Resolution**      | $\ge 2540\text{ LPI}$                                         | Coordinate normalization via per-signature z-score                                                   |
+| **Pressure Levels** | $\ge 1024$ levels, with the maximum reported by the driver    | Scaled to $[0.0, 1.0]$ by the device's reported maximum; flat 1.0 imputation in degraded mode       |
+| **Device Model**    | The same model for enrolment and verification                 | Not supported across models: on the same 65 people, references from one tablet scored another's probes at 13 to 42% EER |
+| **Interface**       | USB HID                                                       | Qt tablet events: Windows (Wintab through the tablet driver, else Windows Ink), Linux                |
+
+Matching specifications do not make tablets interchangeable. Three tablets rated at 200 Hz stamped time three different ways and reported pressure maxima of 833, 1023 and 511, so these rows are requirements on the capture path, not only on the hardware.
 
 ---
 

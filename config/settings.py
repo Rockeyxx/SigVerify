@@ -50,6 +50,7 @@ DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 # (OfflineReal/) of the same signing. **Restricted License Dataset**, as DeepSignDB:
 # evaluation and calibration only; no weight trained on it ships.
 BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
+INHOUSE_DIR = os.path.join(DATA_DIR, "inhouse")      # XPPen campaign: <participant>/ + manifest.csv
 
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
@@ -136,13 +137,40 @@ TEMPORAL_ENSEMBLE_TEMPLATE = "temporal_dt_s{seed}.pth"
 MIN_TRAJECTORY_POINTS = 10              # Trajectories below 10 points lack sufficient detail
 MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean threshold
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
+TRAJECTORY_DT_MEDIAN_TOLERANCE = 0.10   # Median dt may sit at most 10% off one 10 ms grid step
+WINDOWS_PEN_API = "wintab"               # Windows pen input: "wintab" (tablet driver, full pressure range) or "ink" (Windows Ink, 1024 steps; G10)
+CAPTURE_DEVICE_MODEL = "XP-Pen Deco 640"  # Enrol and verify on this one tablet model (F23, ENG_REPORT G4)
+CAMPAIGN_GENUINE_PER_MODALITY = 12      # Genuine signatures per volunteer on tablet and on paper
+CAMPAIGN_PRACTICE_SIGNINGS = 3          # Tablet practice signatures first; never saved
+CAMPAIGN_BREAK_AFTER = 6                # Short break after this many tablet genuines
+CAMPAIGN_FORGERY_ATTEMPTS = 2           # A forger's attempts per victim; "Sign again" before the 2nd
+SHEET_GRID = (4, 2)                     # Paper sheet boxes: rows, columns (8 per A4 sheet)
+SHEET_DPI = 300                         # Printed sheet and scanned PDFs are drawn at this resolution
+SHEET_MARGIN = 0.05                     # Fraction of each box cut away, so the printed border stays out
+# Ink crop for scanned paper boxes (tools/capture_session.py, ENG_REPORT A6). The app's crop_to_ink
+# drops faint ballpoint strokes; this one scores ink against the local paper, so shadows cancel.
+INK_BACKGROUND_KERNEL = 51              # Median blur size (px) that estimates the paper under the ink
+INK_MIN_CONTRAST = 18                   # Ink is at least this much darker than its local paper (0-255)
+INK_MIN_SATURATION = 10                 # ...and coloured: grey shadows, creases and page edges are not (0 lets folds in)
+INK_HUE_RANGE = (95, 165)               # Blue ballpoint, OpenCV hue 0-179
+INK_CLUSTER_GAP = 61                    # Ink pieces closer than this (px) belong to one signature
+INK_MIN_PIXELS = 200                    # Fewer ink pixels than this: no signature in the box
+INK_CROP_PAD = 0.08                     # Margin around the ink, as a fraction of its longer side
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
 # The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.
 # Capture hardware must supply timestamps (channel 3 of standard 7-channel tablet data).
 TEMPORAL_CHANNELS = "dt"                # "xyp" for the legacy 3-channel weights
 # Input feature dimension per channel mode. Used to build model input width dynamically.
-TEMPORAL_CHANNEL_WIDTHS = {"xyp": 3, "dt": 4, "tilt": 5}
+TEMPORAL_CHANNEL_WIDTHS = {"xyp": 3, "dt": 4, "tilt": 5,
+                           # Research only (AGENTS.md exception): dt + tilt, with a fill
+                           # value for corpora without tilt. The fill is in the name
+                           # because a checkpoint records its width, not its fill.
+                           "dt_tilt0": 6, "dt_tilt1": 6, "dt_tilt_flag": 7}
+# Tilt mode -> fill value for corpora that carry no tilt.
+TILT_CHANNEL_MODES = {"dt_tilt0": 0.0, "dt_tilt1": 1.0, "dt_tilt_flag": 0.0}
+# dt_tilt_flag only: chance a training-side SVC2004 sequence has its tilt hidden.
+TEMPORAL_TILT_HIDE_PROB = 0.5
 TEMPORAL_INPUT_FEATURES = TEMPORAL_CHANNEL_WIDTHS[TEMPORAL_CHANNELS]
 TEMPORAL_EMBEDDING_DIM = 128
 TEMPORAL_HIDDEN_SIZE = 256
@@ -161,9 +189,22 @@ PAIRS_IMPOSTOR_PER_WRITER = 276
 # Benchmark evaluation always scores strictly against skilled forgeries per AGENTS.md.
 RANDOM_IMPOSTOR_RATIO = 0.5
 
+# UTSig forgery types added to the TRAINING writers' negatives. Validation and test
+# always keep skilled forgeries only. On disk each writer also has 36 Simple and
+# 3 Opposite Hand forgeries that the shipped recipe never used.
+UTSIG_TRAIN_FORGERY_TYPES = ("Skilled",)
+# Hold each UTSig training writer at the pair count its skilled forgeries alone
+# give (27 x 6 = 162 per side), so adding forgery types does not also add pairs.
+UTSIG_TRAIN_HOLD_PAIRS = False
+
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by hard-negative mining
+# Research arms for the time gap, off in the shipped recipe: a triplet term
+# (anchor genuine, positive genuine, negative skilled forgery) added to the
+# contrastive loss, and temporal positives drawn only across recording sessions.
+TEMPORAL_TRIPLET_WEIGHT = 0.0
+TEMPORAL_CROSS_SESSION_POSITIVES = False
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
 NUM_EPOCHS = 50

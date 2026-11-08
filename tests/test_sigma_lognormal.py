@@ -19,6 +19,8 @@ assumed.
 
 import numpy as np
 import pytest
+# Closed experiment: skipped by default, run in CI (see pytest.ini).
+pytestmark = pytest.mark.archived
 
 from tools.sigma_lognormal import (LognormalStroke, decompose, distort,
                                    reconstruct, stroke_velocity, synthesize)

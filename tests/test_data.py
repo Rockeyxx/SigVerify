@@ -11,6 +11,9 @@ from config.settings import (MIN_BBOX_PIXELS, MIN_TRAJECTORY_POINTS,
                              SPATIAL_INPUT_SIZE, TEMPORAL_INPUT_FEATURES)
 from src.data.dataset import (
     pin_holdout,
+    save_split_record,
+    load_split_record,
+    check_split_against_record,
     SpatialSignatureDataset,
     TemporalSignatureDataset,
     collate_temporal_pairs,
@@ -23,6 +26,7 @@ from src.data.dataset import (
     trajectory_gate,
     writer_independent_split,
 )
+from src.data.parsers import MAX_GAP_MS
 
 
 class TestTrajectoryGate:
@@ -49,6 +53,26 @@ class TestTrajectoryGate:
 
     def test_normalized_trajectory_passes(self):
         passed, details = trajectory_gate(self._normalized())
+        assert passed, details
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    @pytest.mark.parametrize("step_ms", [1.0, 12.0])
+    def test_dt_on_the_wrong_grid_is_rejected(self, step_ms):
+        """A 1 ms grid (old fixtures) and a 12 ms one (250 Hz decimated by 3) both sit
+        inside [0, 1]; only the median shows they are not the 10 ms grid."""
+        traj = self._normalized()
+        traj[:, 3] = step_ms / MAX_GAP_MS
+        passed, details = trajectory_gate(traj)
+        assert not passed
+        assert "dt median" in details["error"]
+
+    @pytest.mark.skipif(TEMPORAL_INPUT_FEATURES < 4,
+                        reason="no dt channel under the current contract")
+    def test_pen_lifts_do_not_move_the_dt_median(self):
+        traj = self._normalized()
+        traj[::10, 3] = 1.0   # one clipped pen lift every 10 samples
+        passed, details = trajectory_gate(traj)
         assert passed, details
 
     def test_raw_device_units_are_rejected(self):
@@ -352,6 +376,21 @@ class TestGenerateSkilledPairs:
         assert mixed.count(0) == baseline.count(0)
         assert mixed.count(1) == baseline.count(1)
         assert mixed.count(0) == mixed.count(1)
+
+    def test_pair_caps_hold_one_writer_below_the_budget(self):
+        """
+        A per-writer cap must bind that writer only. The UTSig forgery-type arm
+        holds UTSig at its skilled-only 162 pairs per side while every other
+        writer keeps the full budget, so adding forgeries does not also add pairs.
+        """
+        _, labels = generate_skilled_pairs(self._writers(n=2, n_genuine=6, n_forged=6),
+                                           num_genuine_per_writer=10,
+                                           num_forged_per_writer=10,
+                                           random_impostor_ratio=0.0,
+                                           pair_caps={"w0": 3})
+        # w0 is held at 3 per side; w1 keeps min(10, C(6,2)=15, 36) = 10.
+        assert labels.count(1) == 3 + 10
+        assert labels.count(0) == 3 + 10
 
     def test_random_impostor_never_pairs_a_writer_with_themselves(self):
         """A 'random impostor' drawn from the same writer would be a positive mislabelled 0."""
@@ -954,3 +993,68 @@ class TestDeviceAugmentation:
         out = augment_device(self._traj(), np.random.default_rng(1), pressure_levels=1024)
         steps = out[:, 2] * 1023
         assert np.allclose(steps, np.round(steps), atol=1e-3)
+
+
+class TestTiltHiding:
+    @staticmethod
+    def _seq(present=1.0, width=7):
+        n = 20
+        cols = [np.linspace(0, 1, n), np.linspace(1, 0, n), np.full(n, 0.5),
+                np.full(n, 0.1), np.full(n, 0.3), np.full(n, 0.6)]
+        if width == 7:
+            cols.append(np.full(n, present))
+        return np.column_stack(cols).astype(np.float32)
+
+    def test_prob_one_hides_tilt_and_flag(self):
+        seq = self._seq()
+        a, b, _ = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=1.0)[0]
+        for side in (a, b):
+            assert torch.equal(side[:, 4:], torch.zeros(len(seq), 3))
+            assert torch.equal(side[:, :4], torch.tensor(seq[:, :4]))
+
+    def test_prob_zero_is_identity_and_draws_nothing(self):
+        seq = self._seq()
+        ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0])
+        before = ds._rng.bit_generator.state
+        a, _, _ = ds[0]
+        assert ds._rng.bit_generator.state == before
+        assert torch.equal(a, torch.tensor(seq))
+
+    def test_absent_tilt_is_never_touched(self):
+        seq = self._seq(present=0.0)
+        a, _, _ = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=1.0)[0]
+        assert torch.equal(a, torch.tensor(seq))
+
+    def test_same_seed_same_pattern(self):
+        seq = self._seq()
+        pairs = [(seq, seq.copy())] * 20
+
+        def pattern():
+            ds = TemporalSignatureDataset(pairs, [1.0] * 20, tilt_hide_prob=0.5, seed=7)
+            return [float(ds[i][0][0, 6]) for i in range(20)]
+        first = pattern()
+        assert first == pattern()
+        assert 0.0 in first and 1.0 in first
+
+    def test_refuses_non_flag_width(self):
+        seq = self._seq(width=6)
+        ds = TemporalSignatureDataset([(seq, seq.copy())], [1.0], tilt_hide_prob=0.5)
+        with pytest.raises(ValueError, match="7"):
+            ds[0]
+
+
+class TestSplitRecordChannels:
+    def _save(self, tmp_path, mode):
+        w = os.path.join(tmp_path, "m.pth")
+        save_split_record(w, ["a"], ["b"], ["c"], ["d"], 42, temporal_channels=mode)
+        return w
+
+    def test_tilt_mode_is_recorded_and_dt_is_not(self, tmp_path):
+        assert load_split_record(self._save(tmp_path, "dt_tilt1"))["temporal_channels"] == "dt_tilt1"
+        assert "temporal_channels" not in load_split_record(self._save(tmp_path, "dt"))
+
+    def test_mismatched_mode_is_refused(self, tmp_path):
+        w = self._save(tmp_path, "dt_tilt1")
+        with pytest.raises(ValueError, match="dt_tilt1"):
+            check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt0")
+        assert check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt1")
