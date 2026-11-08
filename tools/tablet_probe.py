@@ -418,6 +418,8 @@ def main():
     ap.add_argument("--device", default=None, help="evdev node; default: auto-detect the XPPen pen")
     ap.add_argument("--out", default=None, help="run folder; default: ./probe-run-<time>")
     ap.add_argument("--analyse", default=None, help="re-analyse a saved run folder and exit")
+    ap.add_argument("--pen-api", choices=["ink", "wintab"], default=None,
+                    help="Windows pen input (default: WINDOWS_PEN_API, wintab)")
     args = ap.parse_args()
 
     if args.analyse:
@@ -433,7 +435,12 @@ def main():
         sys.exit("XPPen pen node not found in /proc/bus/input/devices; is the tablet plugged in?")
     folder = Path(args.out or Path.cwd() / time.strftime("probe-run-%Y%m%d-%H%M%S"))
     folder.mkdir(parents=True, exist_ok=True)
+    if not LINUX:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from src.capture.pen_input import choose_pen_input
+        choose_pen_input(args.pen_api)
     meta = dict(device=node or "none (Qt stream only)", platform=sys.platform,
+                pen_input=os.environ.get("QT_QPA_PLATFORM", ""),
                 started=time.strftime("%Y-%m-%d %H:%M:%S"), scale=args.scale,
                 tasks=[[k, s * args.scale] for k, s, _ in STEPS])
     stop = threading.Event()

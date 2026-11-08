@@ -514,8 +514,11 @@ One full session on Linux (Hyprland, Wayland), one signer:
 | Points per signature on the 10 ms grid | 60 to 70 |
 | Paper boxes whose ink crop holds the whole signature | 13 of 13 (phone scan of folded A4; faint strokes show small gaps in 4) |
 
-**Status:** tested on Linux with the tablet. Windows ran the earlier capture widget; the current
-capture path is not yet tested there.
+**Status:** tested on Linux and Windows with the tablet. On Windows (Qt 5.15.2, its default
+pen input) the tablet also reports every 4.0 ms (250 Hz) with no repeated timestamps, tilt is
+present, and pressure comes in steps of 1/1024 of full scale (Linux: 1/16384). In one Windows
+session the input gate accepted 3 of 3 practice and 12 of 12 saved signatures (64 to 73
+points each), and the manifest records the OS, Qt platform and tablet model.
 
 ## Standards & Compliance
 

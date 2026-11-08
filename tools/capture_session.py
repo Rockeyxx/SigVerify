@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, 
                              QVBoxLayout, QWidget)
 
 from src.capture.ink import ink_box, ink_crop  # noqa: E402,F401  (ink_box: tests)
+from src.capture.pen_input import PEN_PLATFORM, choose_pen_input  # noqa: E402
 from src.capture.tablet import SignatureCaptureWidget  # noqa: E402
 
 PARTICIPANT = re.compile(r"^P\d{2,3}$")
@@ -923,6 +924,8 @@ def main():
     ap.add_argument("--make-sheet", metavar="PNG|PDF",
                     help="write the printable paper sheet and exit (.pdf: front and back, A4)")
     ap.add_argument("--root", default=INHOUSE_DIR, help="data folder (default: INHOUSE_DIR)")
+    ap.add_argument("--pen-api", choices=sorted(PEN_PLATFORM), default=None,
+                    help="Windows pen input (default: WINDOWS_PEN_API, wintab); use ink if the pen draws nothing")
     args = ap.parse_args()
     if args.make_sheet:
         make_sheet(args.make_sheet)
@@ -930,6 +933,7 @@ def main():
         print(f"sheet written to {args.make_sheet}: print at 100% (actual size) on A4{two_sided}; "
               "scan each full page, front first")
         return
+    choose_pen_input(args.pen_api)
     app = QApplication(sys.argv)
     window = CaptureSession(root=args.root)
     window.show()
