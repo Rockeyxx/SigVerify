@@ -40,7 +40,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip  # skylos: ignore[SKY-D337] the only extra index is download.pytorch.org (PyTorch's own), for the CPU wheel
           # torch comes from the CPU index and ONLY the CPU index. The previous
           # `-r requirements.txt --extra-index-url <pytorch>` merged both indexes
           # and let pip pick whichever held the higher version — normally the
