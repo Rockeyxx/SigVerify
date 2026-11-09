@@ -221,7 +221,8 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
             SIGN_AGAIN; two signings of each kind are then decided at STEP_UP_TWO.
 
     Returns:
-        Dictionary with decision, confidence score, routing mode, and degraded flags.
+        Dictionary with decision, confidence score, routing mode, degraded flag,
+        reasons, and the threshold the decision was taken against.
     """
     if auto_render_spatial and spatial is not None and temporal is not None:
         s_model, s_references, *s_probe_parts = spatial
@@ -283,6 +284,9 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
+    # The acceptance bar applied, for the audit log. On a step-up first round it is
+    # STEP_UP_ACCEPT even when the outcome is SIGN_AGAIN or a reject below STEP_UP_REJECT.
+    result["threshold"] = engine.threshold
     # Below STEP_UP_ACCEPT on a first signing: the same fused score against the floor.
     if step_up_round == 1 and result["decision"] == "Forged":
         floor = FusionEngine(alpha=ALPHA_DEFAULT, threshold=STEP_UP_REJECT)
