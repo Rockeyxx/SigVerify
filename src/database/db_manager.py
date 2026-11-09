@@ -206,7 +206,7 @@ class DatabaseManager:
                         decision TEXT,
                         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )""")
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")  # skylos: ignore[SKY-D211] PRAGMA takes no bound parameter; module int constant
  
     # ---------------------------------------------------------------- crypto
     @staticmethod
@@ -426,10 +426,22 @@ class DatabaseManager:
                 rows,
             )
  
-    _CLIENT_SELECT = """
+    _CLIENT_BY_ID = """
         SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
                u.image_refs_nonce, u.spatial_origin, u.enrolled_at, u.updated_at
-        FROM users u JOIN employees e ON e.id = u.enrolled_by"""
+        FROM users u JOIN employees e ON e.id = u.enrolled_by
+        WHERE u.user_id = ?"""
+    _CLIENTS_ALL = """
+        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
+               u.image_refs_nonce, u.spatial_origin, u.enrolled_at, u.updated_at
+        FROM users u JOIN employees e ON e.id = u.enrolled_by
+        ORDER BY u.rowid ASC"""
+    _CLIENTS_OF_EMPLOYEE = """
+        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
+               u.image_refs_nonce, u.spatial_origin, u.enrolled_at, u.updated_at
+        FROM users u JOIN employees e ON e.id = u.enrolled_by
+        WHERE u.enrolled_by = ?
+        ORDER BY u.rowid ASC"""
  
     def _assemble_client(self, conn, row) -> dict:
         user_id, display_name, _, owner_name, refs_ct, refs_nonce, origin, enrolled_at, updated_at = row
@@ -451,17 +463,17 @@ class DatabaseManager:
     def get_client_record(self, user_id: str, employee_id: int = None):
         """Decrypted client record, or None. With employee_id, only that employee's clients."""
         with closing(self.get_connection()) as conn:
-            row = conn.execute(self._CLIENT_SELECT + " WHERE u.user_id = ?", (user_id,)).fetchone()
+            row = conn.execute(self._CLIENT_BY_ID, (user_id,)).fetchone()
             if row is None or (employee_id is not None and row[2] != employee_id):
                 return None
             return self._assemble_client(conn, row)
  
     def list_client_records(self, employee_id: int = None) -> list:
-        sql, params = self._CLIENT_SELECT, ()
-        if employee_id is not None:
-            sql, params = sql + " WHERE u.enrolled_by = ?", (employee_id,)
         with closing(self.get_connection()) as conn:
-            rows = conn.execute(sql + " ORDER BY u.rowid ASC", params).fetchall()
+            if employee_id is None:
+                rows = conn.execute(self._CLIENTS_ALL).fetchall()
+            else:
+                rows = conn.execute(self._CLIENTS_OF_EMPLOYEE, (employee_id,)).fetchall()
             return [self._assemble_client(conn, r) for r in rows]
  
     def has_client(self, user_id: str, employee_id: int = None) -> bool:
@@ -543,14 +555,17 @@ class DatabaseManager:
         self.add_references(user_id, modality, [embedding], model_version,
                             spatial_origin=spatial_origin, source="added")
         with closing(self.get_connection()) as conn, conn:
-            where, params = "user_id = ? AND modality = ? AND spatial_origin IS ?", (user_id, modality, spatial_origin)
-            total = conn.execute(f"SELECT COUNT(*) FROM enrollments WHERE {where}", params).fetchone()[0]
+            params = (user_id, modality, spatial_origin)
+            total = conn.execute(
+                "SELECT COUNT(*) FROM enrollments WHERE user_id = ? AND modality = ? AND spatial_origin IS ?",
+                params,
+            ).fetchone()[0]
             excess = total - max_per_set
             if excess > 0:
                 conn.execute(
-                    f"""DELETE FROM enrollments WHERE id IN (
+                    """DELETE FROM enrollments WHERE id IN (
                             SELECT id FROM enrollments
-                            WHERE {where} AND source = 'added'
+                            WHERE user_id = ? AND modality = ? AND spatial_origin IS ? AND source = 'added'
                             ORDER BY id ASC LIMIT ?)""",
                     params + (excess,),
                 )
