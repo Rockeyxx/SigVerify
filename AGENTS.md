@@ -555,7 +555,12 @@ signatures lowered FRR from 13.90% to 8.07% while FAR at the same threshold rose
                                # percentage likelihood of being genuine.
     "routing": str,            # "multimodal", "spatial_only", or "temporal_only"
     "degraded": bool,          # True if a modality was dropped or pressure was imputed
-    "reasons": list[str]       # Explanations if degraded or gate failure occurred
+    "reasons": list[str],      # Explanations if degraded or gate failure occurred
+    "threshold": float         # The acceptance bar applied, for the audit log:
+                               # DECISION_THRESHOLD fused, SPATIAL_/TEMPORAL_DECISION_
+                               # THRESHOLD alone, STEP_UP_ACCEPT on a step-up first
+                               # signing (also when it returns "Sign again" or a reject
+                               # below STEP_UP_REJECT), STEP_UP_TWO on the second.
 }
 ```
 
