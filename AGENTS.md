@@ -470,7 +470,9 @@ requires `reference_spatial_origin` whenever spatial references are passed, and
 raises instead of guessing. On a mismatch it drops the spatial branch (routing
 `temporal_only`, `degraded: True`, and a reason naming both origins). A unimodal
 spatial call with mismatched references raises. **The database therefore stores
-`spatial_origin` next to each spatial template, with `model_version`.** A user who
+`spatial_origin` next to each spatial template, with `model_version`** (store
+`config.settings.MODEL_VERSION`, the release tag of the shipped weights; a template whose
+tag differs from the running one must be re-enrolled). A user who
 must be verified both by tablet and by scan enrolls through both paths and holds
 two spatial reference sets.
 | **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
