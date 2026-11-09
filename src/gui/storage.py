@@ -68,7 +68,7 @@ def _read_or_create_passphrase(data_dir: str, db_path: str) -> str:
         return env
     key_path = os.path.join(data_dir, KEY_FILENAME)
     if os.path.exists(key_path):
-        with open(key_path, "r", encoding="utf-8") as f:
+        with open(key_path, "r", encoding="utf-8") as f:  # skylos: ignore[SKY-D215,SKY-D325] key file in the fixed data folder (SIGVER_HOME set by the operator)
             return f.read().strip()
     if os.path.exists(db_path):
         raise RuntimeError(
@@ -78,9 +78,9 @@ def _read_or_create_passphrase(data_dir: str, db_path: str) -> str:
         )
     passphrase = secrets.token_hex(32)
     try:
-        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # skylos: ignore[SKY-D215,SKY-D324] O_EXCL refuses an existing file or symlink
     except FileExistsError:  # another process created it first
-        with open(key_path, "r", encoding="utf-8") as f:
+        with open(key_path, "r", encoding="utf-8") as f:  # skylos: ignore[SKY-D215,SKY-D325] key file in the fixed data folder (SIGVER_HOME set by the operator)
             return f.read().strip()
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(passphrase)
