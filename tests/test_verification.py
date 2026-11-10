@@ -163,6 +163,19 @@ class TestEmbed:
         assert embedding.shape == (128,)
 
 
+class TestModelVersion:
+    def test_model_version_names_a_release_tag(self):
+        """
+        src/gui/storage.py stores MODEL_VERSION beside every template, and reads it with
+        getattr(..., "unspecified"): without the constant every row would say
+        "unspecified" and no template could ever be flagged stale after a weight change.
+        """
+        import re
+
+        from config import settings
+        assert re.fullmatch(r"v\d+\.\d+\.\d+", getattr(settings, "MODEL_VERSION", ""))
+
+
 class TestVerify:
     """Contract ③/④: one entrypoint returning the GUI's dict, no distance math outside."""
 
@@ -205,7 +218,8 @@ class TestVerify:
         # `reasons` is additive: a list, empty on a clean multimodal verdict, and
         # carrying the gate's own message for every piece of evidence that was
         # dropped. `degraded: True` alone could not say *why*.
-        assert set(result) == {"decision", "confidence", "routing", "degraded", "reasons"}
+        assert set(result) == {"decision", "confidence", "routing", "degraded", "reasons",
+                               "threshold"}
         assert isinstance(result["reasons"], list)
         os.unlink(path)
 
@@ -245,6 +259,33 @@ class TestVerify:
         )
         assert result["routing"] == "multimodal"
         assert result["decision"] in ("Genuine", "Forged")
+
+    def test_threshold_is_the_one_the_routing_used(self):
+        """
+        The audit log stores `threshold` beside the decision. It must be the bar that was
+        actually applied, which changes with routing: fused, spatial alone, pen alone, or
+        whatever a caller's own engine carries.
+        """
+        from config.settings import (DECISION_THRESHOLD, SPATIAL_DECISION_THRESHOLD,
+                                     TEMPORAL_DECISION_THRESHOLD)
+        smodel, srefs, spath = self._spatial_setup()
+        tmodel, trefs, traj = self._temporal_setup()
+        try:
+            cases = [
+                (verify(spatial=(smodel, srefs, spath), temporal=(tmodel, trefs, traj),
+                        step_up=False), DECISION_THRESHOLD),
+                (verify(spatial=(smodel, srefs, spath)), SPATIAL_DECISION_THRESHOLD),
+                (verify(temporal=(tmodel, trefs, traj)), TEMPORAL_DECISION_THRESHOLD),
+                (verify(spatial=(smodel, srefs, spath), engine=FusionEngine(threshold=0.5)), 0.5),
+            ]
+        finally:
+            os.unlink(spath)
+        # The three defaults must differ, or a swapped constant would still pass.
+        assert len({DECISION_THRESHOLD, SPATIAL_DECISION_THRESHOLD,
+                    TEMPORAL_DECISION_THRESHOLD}) == 3
+        for result, expected in cases:
+            assert result["threshold"] == expected
+            assert (result["decision"] == "Genuine") == (result["confidence"] / 100 >= expected)
 
     def test_failed_quality_gate_drops_the_spatial_branch(self):
         """
@@ -464,6 +505,20 @@ class TestStepUp:
         assert self._verify(target, signings=2)["decision"] == "Genuine"
         assert self._verify(target, signings=2, step_up=False)["decision"] == "Forged"
         assert self._verify((STEP_UP_REJECT + STEP_UP_TWO) / 2, signings=2)["decision"] == "Forged"
+
+    def test_threshold_reports_the_acceptance_bar_of_each_round(self):
+        # Round one is accepted at STEP_UP_ACCEPT whatever the outcome (Genuine, Sign again or
+        # Forged); round two at STEP_UP_TWO. Genuine iff the score reaches `threshold` holds.
+        from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT, STEP_UP_TWO
+        from src.verification import SIGN_AGAIN
+        assert STEP_UP_ACCEPT != STEP_UP_TWO
+        middle = (STEP_UP_REJECT + STEP_UP_ACCEPT) / 2
+
+        close = self._verify(middle)
+        assert close["decision"] == SIGN_AGAIN
+        assert close["threshold"] == STEP_UP_ACCEPT
+        assert self._verify(STEP_UP_REJECT / 2)["threshold"] == STEP_UP_ACCEPT
+        assert self._verify(middle, signings=2)["threshold"] == STEP_UP_TWO
 
     def test_there_is_never_a_third_signing(self):
         from config.settings import STEP_UP_ACCEPT, STEP_UP_REJECT

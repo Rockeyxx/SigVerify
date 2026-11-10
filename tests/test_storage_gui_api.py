@@ -304,3 +304,51 @@ def test_key_file_is_private(people, isolated_storage):
     assert stat.S_IMODE(os.stat(isolated_storage / "db.key").st_mode) == 0o600
     assert stat.S_IMODE(os.stat(isolated_storage).st_mode) == 0o700
  
+
+# ------------------------------------------- confirmed signings (PR #30 API)
+def test_non_final_decisions_are_not_logged_or_counted(people):
+    storage.append_verification_log("c", "Error", 0.0, "multimodal", "alice")
+    storage.append_verification_log("c", "Forged", 10.0, "multimodal", "alice")
+    assert [e["decision"] for e in storage.get_verification_log("alice")] == ["Forged"]
+    assert storage.get_verification_stats("alice")["total"] == 1
+
+
+def test_reference_embeddings_are_enrolled_then_added(people):
+    enrolled = spatial(5)
+    storage.save_client_enrollment("C", [], [], "alice", spatial_embeddings=enrolled)
+    added = b64(512, 99)
+    assert storage.add_confirmed_reference("c", added, "alice") is True
+    refs, origin = storage.get_reference_embeddings("C", "alice")
+    assert (refs, origin) == (enrolled + [added], "scan")
+
+
+def test_reference_embeddings_of_unknown_or_foreign_client(people):
+    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=spatial(5))
+    assert storage.get_reference_embeddings("ghost", "alice") == ([], "scan")
+    assert storage.get_reference_embeddings("c", "bob") == ([], "scan")
+
+
+def test_confirmed_reference_refused_for_another_employee_or_unknown_client(people):
+    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=spatial(5))
+    assert storage.add_confirmed_reference("c", b64(512, 7), "bob") is False
+    assert storage.add_confirmed_reference("ghost", b64(512, 7), "alice") is False
+    assert storage.get_reference_embeddings("c", "alice")[0] == spatial(5)
+
+
+def test_confirmed_references_cap_drops_oldest_added_never_enrolled(people):
+    enrolled = spatial(5)
+    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=enrolled)
+    added = [b64(512, 100 + i) for i in range(5)]
+    for emb in added:
+        assert storage.add_confirmed_reference("c", emb, "alice")
+    refs = storage.get_reference_embeddings("c", "alice")[0]
+    assert len(refs) == storage.MAX_SPATIAL_REFERENCES == 8
+    assert refs == enrolled + added[2:]
+
+
+def test_confirmed_reference_keeps_the_client_origin(people):
+    storage.save_client_enrollment("c", [], [b64(128, 1)], "alice",
+                                   spatial_embeddings=spatial(5), spatial_origin="render")
+    added = b64(512, 50)
+    assert storage.add_confirmed_reference("c", added, "alice")
+    assert storage.get_reference_embeddings("c", "alice") == (spatial(5) + [added], "render")

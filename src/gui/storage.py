@@ -48,6 +48,16 @@ DB_FILENAME = "signatures.db"
 KEY_FILENAME = "db.key"
 HOME_ENV_VAR = "SIGVER_HOME"
  
+# The third decision of step-up verification (src.verification.SIGN_AGAIN).
+# Restated here so storage never imports PyTorch. It is not a verdict, so it is
+# never logged and never counted (AGENTS.md, step-up rules).
+SIGN_AGAIN = "Sign again"
+FINAL_DECISIONS = ("Genuine", "Forged")
+ 
+# Cap on spatial references per client, enrolled + added (AGENTS.md: the measured
+# arms held 6 to 8).
+MAX_SPATIAL_REFERENCES = 8
+ 
 _db = None
 _db_lock = threading.Lock()
  
@@ -292,7 +302,8 @@ def count_clients_enrolled_this_month(employee_username: str = None) -> int:
  
 def append_verification_log(client_id: str, decision: str, confidence: float,
                             modality_state: str, employee_username: str):
-    if decision == "Sign again":  # step-up prompt, not a final verdict
+    if decision not in FINAL_DECISIONS:
+        # "Sign again" is a request, not a verdict: one event per visit, final verdict only.
         return
     emp_id = _employee_id(employee_username or "")
     _get_db().log_verification(
@@ -332,3 +343,39 @@ def get_verification_stats(employee_username: str = None) -> dict:
     genuine_rate = (genuine / total * 100) if total > 0 else 0.0
     return {"total": total, "genuine": genuine, "genuine_rate": round(genuine_rate, 1)}
  
+ 
+# ============================================================
+# REFERENCES (enrolled + confirmed signings added later)
+# ============================================================
+ 
+def get_reference_embeddings(client_id: str, employee_username: str = None) -> tuple:
+    """Returns (base64 embeddings, spatial_origin): enrolled references first,
+    then confirmed signings added later. The database keeps added signings in the
+    client's own origin set, so a spatial probe is scored only against its origin."""
+    record = get_client(client_id, employee_username)
+    if record is None:
+        return [], "scan"
+    return list(record["spatial_embeddings"]), record["spatial_origin"] or "scan"
+ 
+ 
+def add_confirmed_reference(client_id: str, embedding_b64: str, employee_username: str) -> bool:
+    """Append one confirmed signing's spatial embedding to the client's references.
+ 
+    Call it only when decision == "Genuine", degraded is False, and the employee
+    confirmed the person's identity (AGENTS.md). Stores the embedding only,
+    encrypted, in the client's spatial_origin set. When the cap is reached the
+    OLDEST ADDED signing is dropped; the enrolled references are never dropped.
+    """
+    key = _norm(client_id or "")
+    emp_id = _employee_id(employee_username or "")
+    if not key or emp_id is None:
+        return False
+    db = _get_db()
+    record = db.get_client_record(key, emp_id)
+    if record is None or record["spatial_origin"] is None:
+        return False
+    raw = _decode_embeddings([embedding_b64], "Confirmed signing")[0]
+    db.add_confirmed_reference(key, "spatial", raw, MODEL_VERSION,
+                               spatial_origin=record["spatial_origin"],
+                               max_per_set=MAX_SPATIAL_REFERENCES)
+    return True
