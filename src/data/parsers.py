@@ -428,7 +428,7 @@ def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCO
 
 def load_nfi2009_file(path, extra_channels=None):
     """Load a SigComp2009 online signature file into a normalized trajectory array."""
-    with open(path, encoding="latin-1") as handle:
+    with open(path, encoding="latin-1") as handle:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = handle.read().splitlines()
     points = [line.split() for line in lines[1:]]
     rows = np.array([[float(c) for c in cols[:3]] for cols in points if len(cols) == 5],

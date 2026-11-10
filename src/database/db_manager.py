@@ -431,16 +431,11 @@ class DatabaseManager:
                u.image_refs_nonce, u.spatial_origin, u.enrolled_at, u.updated_at
         FROM users u JOIN employees e ON e.id = u.enrolled_by
         WHERE u.user_id = ?"""
-    _CLIENTS_ALL = """
+    _CLIENTS = """
         SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
                u.image_refs_nonce, u.spatial_origin, u.enrolled_at, u.updated_at
         FROM users u JOIN employees e ON e.id = u.enrolled_by
-        ORDER BY u.rowid ASC"""
-    _CLIENTS_OF_EMPLOYEE = """
-        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
-               u.image_refs_nonce, u.spatial_origin, u.enrolled_at, u.updated_at
-        FROM users u JOIN employees e ON e.id = u.enrolled_by
-        WHERE u.enrolled_by = ?
+        WHERE ? IS NULL OR u.enrolled_by = ?
         ORDER BY u.rowid ASC"""
  
     def _assemble_client(self, conn, row) -> dict:
@@ -470,10 +465,7 @@ class DatabaseManager:
  
     def list_client_records(self, employee_id: int = None) -> list:
         with closing(self.get_connection()) as conn:
-            if employee_id is None:
-                rows = conn.execute(self._CLIENTS_ALL).fetchall()
-            else:
-                rows = conn.execute(self._CLIENTS_OF_EMPLOYEE, (employee_id,)).fetchall()
+            rows = conn.execute(self._CLIENTS, (employee_id, employee_id)).fetchall()
             return [self._assemble_client(conn, r) for r in rows]
  
     def has_client(self, user_id: str, employee_id: int = None) -> bool:

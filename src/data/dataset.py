@@ -359,7 +359,7 @@ def save_split_record(weights_path, train_ids, val_ids, test_ids, data_dirs, spl
     if temporal_channels in TILT_CHANNEL_MODES:
         # Only tilt modes record it, so every existing record keeps its shape.
         record["temporal_channels"] = temporal_channels
-    with open(split_record_path(weights_path), "w") as fh:
+    with open(split_record_path(weights_path), "w") as fh:  # skylos: ignore[SKY-D215,SKY-D324] beside the operator-supplied --weights-dir checkpoint
         json.dump(record, fh, indent=1)
     return record
 
@@ -369,7 +369,7 @@ def load_split_record(weights_path):
     path = split_record_path(weights_path)
     if not os.path.exists(path):
         return None
-    with open(path) as fh:
+    with open(path) as fh:  # skylos: ignore[SKY-D215,SKY-D325] beside the operator-supplied checkpoint path
         return json.load(fh)
 
 
