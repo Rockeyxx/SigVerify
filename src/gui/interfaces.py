@@ -26,6 +26,12 @@ def _get_service() -> RealSignatureService:
         _service = RealSignatureService(device="cpu")
     return _service
 
+def warm_up() -> None:
+    """Load both models and run a blank sample through each.
+    Call once when the app opens, on a background thread (AGENTS.md)."""
+    _get_service().warm_up()
+
+
 def _prepare_image(path: str) -> str:
     """Prepare an image before sending it to the model.
 
@@ -62,14 +68,30 @@ def enroll_client(image_paths: list) -> dict:
     }
 
 
-def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_image_path: str) -> dict:
-    """Verify a probe image against stored client reference embeddings."""
+def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_image_path) -> dict:
+    """Verify a probe image against stored client reference embeddings.
+
+    probe_image_path may be one path or a list of paths (several signings:
+    the score is their mean). Under step-up the second call passes both
+    signings, first signing first. The result's "decision" may be
+    "Sign again" once step-up is on and a fused paper+tablet check is used.
+    """
     service = _get_service()
     ref_bytes = [base64.b64decode(b) for b in reference_embeddings_b64]
-    safe_probe_path = _prepare_image(probe_image_path)
+    if isinstance(probe_image_path, (list, tuple)):
+        probe = [_prepare_image(p) for p in probe_image_path]
+    else:
+        probe = _prepare_image(probe_image_path)
     return service.verify(
         mode="unimodal",
-        probe_image=safe_probe_path,
+        probe_image=probe,
         reference_spatial=ref_bytes,
         reference_spatial_origin=spatial_origin,
     )
+
+
+def embed_confirmed_signing(probe_image_path: str) -> str:
+    """Embed one confirmed signing for adding to the client's references.
+    Same path as enrollment, so the same quality gate applies. Returns base64."""
+    result = _get_service().enroll_unimodal([_prepare_image(probe_image_path)], modality="spatial")
+    return base64.b64encode(result["embeddings"][0]).decode("ascii")

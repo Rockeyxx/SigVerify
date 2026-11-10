@@ -4,10 +4,13 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
     QVBoxLayout, QFileDialog
 )
-from src.gui.workers import VerifyWorker
+from src.gui.workers import VerifyWorker, ConfirmedSigningWorker
 
 import src.gui.storage as storage
 import src.gui.interfaces as interfaces
+
+# Third decision of step-up verification (src.verification.SIGN_AGAIN).
+SIGN_AGAIN = "Sign again"
 
 
 class VerificationPanel(QWidget):
@@ -15,6 +18,12 @@ class VerificationPanel(QWidget):
         super().__init__()
         self.selected_image_path = None
         self.current_employee_username = None
+        # Step-up state: the first signing is kept while the second is requested.
+        self._first_probe_path = None
+        self._awaiting_second = False
+        # The last accepted visit, kept so the employee can confirm it.
+        self._last_accepted_paths = None
+        self._last_accepted_client = None
 
         layout = QVBoxLayout()
         layout.setContentsMargins(30, 24, 30, 24)
@@ -30,6 +39,7 @@ class VerificationPanel(QWidget):
 
         self.clientIdInput = QLineEdit()
         self.clientIdInput.setPlaceholderText("Enter the client's name / ID")
+        self.clientIdInput.textChanged.connect(self._reset_visit)
         layout.addWidget(self.clientIdInput)
 
         section2 = QLabel("MODALITY")
@@ -78,6 +88,13 @@ class VerificationPanel(QWidget):
         self.degradedModeIndicator.setProperty("role", "warning")
         layout.addWidget(self.degradedModeIndicator)
 
+        # Shown only after an accepted, non-degraded result (AGENTS.md: references
+        # grow only from confirmed Genuine, non-degraded visits).
+        self.confirmButton = QPushButton("Confirm identity and add to references")
+        self.confirmButton.clicked.connect(self.confirm_identity)
+        self.confirmButton.setVisible(False)
+        layout.addWidget(self.confirmButton)
+
         layout.addStretch()
         self.setLayout(layout)
 
@@ -94,6 +111,15 @@ class VerificationPanel(QWidget):
         self.degradedModeIndicator.setText(
             "⚠ Degraded Mode: no dynamic input device connected"
         )
+
+    def _reset_visit(self):
+        """A new visit: forget any pending first signing and any unconfirmed result."""
+        self._first_probe_path = None
+        self._awaiting_second = False
+        self._last_accepted_paths = None
+        self._last_accepted_client = None
+        self.confirmButton.setVisible(False)
+        self.selectProbeButton.setText("Select Probe Image")
 
     def select_probe_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -120,16 +146,14 @@ class VerificationPanel(QWidget):
             )
             return
 
-        embeddings_b64 = client.get("spatial_embeddings", [])
+        # Enrolled references plus confirmed signings added on earlier visits.
+        embeddings_b64, spatial_origin = storage.get_reference_embeddings(
+            client_id, employee_username=self.current_employee_username)
         if not embeddings_b64:
             self._show_idle_message(
                 f"'{client_id}' has no stored embeddings — re-save their enrollment."
             )
             return
-
-        # Spatial origin ('scan' or 'render') recorded during enrollment.
-        # This informs the verification service of the original input modality.
-        spatial_origin = client.get("spatial_origin", "scan")
 
         if not self.selected_image_path:
             self._show_idle_message("Please select a probe image")
@@ -138,9 +162,16 @@ class VerificationPanel(QWidget):
         self.verifyButton.setEnabled(False)
         self.verifyButton.setText("Verifying…")
         self._show_idle_message("Processing…")
+        self.confirmButton.setVisible(False)
 
         self._pending_client_id = client_id
-        self._verify_worker = VerifyWorker(embeddings_b64, spatial_origin, self.selected_image_path)
+        if self._awaiting_second:
+            # Second round: both signings, first signing first. Never a third.
+            probes = [self._first_probe_path, self.selected_image_path]
+        else:
+            probes = self.selected_image_path
+        self._pending_probes = probes
+        self._verify_worker = VerifyWorker(embeddings_b64, spatial_origin, probes)
         self._verify_worker.finished.connect(self._on_verify_success)
         self._verify_worker.failed.connect(self._on_verify_failure)
         self._verify_worker.start()
@@ -149,6 +180,28 @@ class VerificationPanel(QWidget):
         client_id = self._pending_client_id
         decision = result["decision"]
         confidence = round(result["confidence"], 1)
+
+        if decision == SIGN_AGAIN and not self._awaiting_second:
+            # Not a verdict. Neutral request only: no score, no hint of how close it was.
+            self._first_probe_path = self.selected_image_path
+            self._awaiting_second = True
+            self.selected_image_path = None
+            self.probeFileLabel.setText("No file selected")
+            self.selectProbeButton.setText("Select Second Signing")
+            self._show_idle_message("Please sign once more and select the new signing.")
+            self.verifyButton.setEnabled(True)
+            self.verifyButton.setText("Verify")
+            return
+        if decision == SIGN_AGAIN:
+            # Should never happen (the second call returns only Genuine or Forged).
+            # Fail closed rather than asking a third time.
+            decision = "Forged"
+
+        accepted_paths = (list(self._pending_probes) if isinstance(self._pending_probes, list)
+                          else [self._pending_probes])
+        self._first_probe_path = None
+        self._awaiting_second = False
+        self.selectProbeButton.setText("Select Probe Image")
 
         self.resultDisplay.setText(f"[{decision}, {confidence}%]")
         role = "result-genuine" if decision == "Genuine" else "result-forged"
@@ -167,8 +220,38 @@ class VerificationPanel(QWidget):
             employee_username=self.current_employee_username or "unknown"
         )
 
+        if decision == "Genuine" and not result.get("degraded"):
+            self._last_accepted_paths = accepted_paths
+            self._last_accepted_client = client_id
+            self.confirmButton.setVisible(True)
+
         self.verifyButton.setEnabled(True)
         self.verifyButton.setText("Verify")
+
+    def confirm_identity(self):
+        """The employee confirms the person's identity: add this visit to the references."""
+        if not self._last_accepted_paths:
+            return
+        self.confirmButton.setEnabled(False)
+        self._confirm_worker = ConfirmedSigningWorker(self._last_accepted_paths)
+        self._confirm_worker.finished.connect(self._on_confirmed)
+        self._confirm_worker.failed.connect(self._on_confirm_failed)
+        self._confirm_worker.start()
+
+    def _on_confirmed(self, embeddings_b64: list):
+        for emb in embeddings_b64:
+            storage.add_confirmed_reference(
+                self._last_accepted_client, emb,
+                self.current_employee_username or "unknown")
+        self._last_accepted_paths = None
+        self.confirmButton.setEnabled(True)
+        self.confirmButton.setVisible(False)
+        self.degradedModeIndicator.setText("")
+        self.modalityStateLabel.setText("Signing added to the client's references.")
+
+    def _on_confirm_failed(self, message: str):
+        self.confirmButton.setEnabled(True)
+        self._show_idle_message(message)
 
     def _on_verify_failure(self, error_message: str):
         self._show_idle_message(error_message)

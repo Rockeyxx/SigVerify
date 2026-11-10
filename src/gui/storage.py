@@ -26,6 +26,16 @@ ENROLLMENTS_FILE = os.path.join(DATA_DIR, "enrollments.json")
 LOG_FILE = os.path.join(DATA_DIR, "verification_log.json")
 
 
+# The third decision of step-up verification (src.verification.SIGN_AGAIN).
+# Restated here so storage never imports PyTorch. It is not a verdict, so it is
+# never logged and never counted (AGENTS.md, step-up rules).
+SIGN_AGAIN = "Sign again"
+FINAL_DECISIONS = ("Genuine", "Forged")
+
+# Cap on spatial references per client (AGENTS.md: the measured arms held 6 to 8).
+MAX_SPATIAL_REFERENCES = 8
+
+
 def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -239,6 +249,9 @@ def count_clients_enrolled_this_month(employee_username: str = None) -> int:
 
 def append_verification_log(client_id: str, decision: str, confidence: float,
                               modality_state: str, employee_username: str):
+    if decision not in FINAL_DECISIONS:
+        # "Sign again" is a request, not a verdict: one event per visit, final verdict only.
+        return
     data = _load_json("log", {"events": []})
     data["events"].append({
         "client_key": _norm(client_id),
@@ -269,7 +282,52 @@ def get_last_verification_for_client(client_id: str, employee_username: str = No
 
 def get_verification_stats(employee_username: str = None) -> dict:
     events = get_verification_log(employee_username)
+    events = [e for e in events if e.get("decision") in FINAL_DECISIONS]
     total = len(events)
     genuine = sum(1 for e in events if e.get("decision") == "Genuine")
     genuine_rate = (genuine / total * 100) if total > 0 else 0.0
     return {"total": total, "genuine": genuine, "genuine_rate": round(genuine_rate, 1)}
+
+
+# ============================================================
+# REFERENCES (enrolled + confirmed signings added later)
+# ============================================================
+
+def get_reference_embeddings(client_id: str, employee_username: str = None) -> tuple:
+    """Returns (base64 embeddings, spatial_origin): enrolled references first,
+    then confirmed signings added later. Only added ones with the same origin
+    are used, because a spatial probe is scored only against its own origin."""
+    record = get_client(client_id, employee_username)
+    if record is None:
+        return [], "scan"
+    origin = record.get("spatial_origin", "scan")
+    refs = list(record.get("spatial_embeddings", []))
+    for item in record.get("added_references", []):
+        if item.get("spatial_origin") == origin:
+            refs.append(item["embedding"])
+    return refs, origin
+
+
+def add_confirmed_reference(client_id: str, embedding_b64: str, employee_username: str) -> bool:
+    """Append one confirmed signing's embedding to the client's references.
+
+    Call it only when decision == "Genuine", degraded is False, and the employee
+    confirmed the person's identity (AGENTS.md). Stores the embedding only, with
+    its date and spatial_origin. When the cap is reached the OLDEST ADDED
+    signing is dropped; the enrolled references are never dropped.
+    """
+    data = load_enrollments()
+    record = data["clients"].get(_norm(client_id))
+    if record is None or record.get("enrolled_by", "").lower() != employee_username.lower():
+        return False
+    added = record.setdefault("added_references", [])
+    added.append({
+        "embedding": embedding_b64,
+        "added_at": datetime.now().isoformat(timespec="seconds"),
+        "spatial_origin": record.get("spatial_origin", "scan"),
+    })
+    room = max(0, MAX_SPATIAL_REFERENCES - len(record.get("spatial_embeddings", [])))
+    while len(added) > room:
+        added.pop(0)
+    _save_json("enrollments", data)
+    return True
