@@ -8,6 +8,18 @@ and doesn't show "Not Responding" during enrollment/verification.
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+WEIGHTS_MESSAGE = "Model weights not found. See README → Model Weights & GitHub Releases."
+
+
+def _missing_file_message(error: FileNotFoundError) -> str:
+    """Say which kind of file is missing: the model weights, or an image."""
+    text = str(error)
+    if "weights" in text.lower():
+        return WEIGHTS_MESSAGE
+    name = getattr(error, "filename", None) or text
+    return (f"A file could not be found: {name}. "
+            "Check that the image still exists and select it again.")
+
 
 class EnrollWorker(QThread):
     finished = pyqtSignal(dict)      # emits: {"embeddings": [...], "spatial_origin": "scan"}
@@ -22,8 +34,8 @@ class EnrollWorker(QThread):
         try:
             result = interfaces.enroll_client(self.image_paths)
             self.finished.emit(result)
-        except FileNotFoundError:
-            self.failed.emit("Model weights not found. See README → Model Weights & GitHub Releases.")
+        except FileNotFoundError as e:
+            self.failed.emit(_missing_file_message(e))
         except ValueError as e:
             self.failed.emit(f"One or more images failed the quality gate: {e}")
         except Exception as e:
@@ -47,8 +59,8 @@ class VerifyWorker(QThread):
                 self.reference_embeddings_b64, self.spatial_origin, self.probe_image_path
             )
             self.finished.emit(result)
-        except FileNotFoundError:
-            self.failed.emit("Model weights not found. See README → Model Weights & GitHub Releases.")
+        except FileNotFoundError as e:
+            self.failed.emit(_missing_file_message(e))
         except ValueError as e:
             self.failed.emit(f"Verification failed: {e}")
         except Exception as e:

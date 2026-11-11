@@ -22,6 +22,7 @@ from src.gui.dashboard import DashboardScreen
 from src.gui.clients_page import ClientsPage
 from src.gui.profile_page import ProfilePage
 from src.gui.styles import STYLE
+from src.gui.workers import WarmUpWorker
 import src.gui.storage as storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +255,12 @@ class MainWindow(QMainWindow):
         self.resize(900, 680)
         self.current_employee = None
         self._build_auth_stack()
+
+        # AGENTS.md: call SignatureService.warm_up() once when the app opens, on a
+        # background thread, so the first verification does not pay the model load.
+        # Started here (not after login) and kept on self so the thread is not garbage-collected.
+        self._warm_up_worker = WarmUpWorker()
+        self._warm_up_worker.start()
 
     def _build_auth_stack(self):
         self.auth_stack = QStackedWidget()

@@ -5,6 +5,8 @@ Clients are scoped per employee: an employee can only load/edit
 clients they personally enrolled.
 """
 
+import os
+
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
@@ -17,9 +19,11 @@ from src.gui.image_cleanup import crop_to_ink, SignatureNotFoundError
 
 import src.gui.storage as storage
 import src.gui.interfaces as interfaces
+from config.settings import NUM_ENROLLMENT_REFERENCES
 
-REQUIRED_IMAGE_REFERENCES = 5
-REQUIRED_DYNAMIC_REFERENCES = 5
+# One source of truth for K (config/settings.py), not a literal 5 here.
+REQUIRED_IMAGE_REFERENCES = NUM_ENROLLMENT_REFERENCES
+REQUIRED_DYNAMIC_REFERENCES = NUM_ENROLLMENT_REFERENCES
 
 
 class ImagePreviewDialog(QDialog):
@@ -139,7 +143,7 @@ class EnrollmentPanel(QWidget):
         image_actions_row.addWidget(self.removeImageButton)
         layout.addLayout(image_actions_row)
 
-        self.imageCountLabel = QLabel("0/5 image references")
+        self.imageCountLabel = QLabel(f"0/{REQUIRED_IMAGE_REFERENCES} image references")
         self.imageCountLabel.setProperty("role", "muted")
         layout.addWidget(self.imageCountLabel)
 
@@ -151,7 +155,7 @@ class EnrollmentPanel(QWidget):
         self.captureDynamicButton.setEnabled(False)
         layout.addWidget(self.captureDynamicButton)
 
-        self.dynamicCountLabel = QLabel("0/5 dynamic references — pending tablet integration")
+        self.dynamicCountLabel = QLabel(f"0/{REQUIRED_DYNAMIC_REFERENCES} dynamic references — pending tablet integration")
         self.dynamicCountLabel.setProperty("role", "warning")
         layout.addWidget(self.dynamicCountLabel)
 
@@ -251,9 +255,22 @@ class EnrollmentPanel(QWidget):
         except SignatureNotFoundError as e:
             self._set_status_error(str(e))
             return
+        except FileNotFoundError:
+            self._set_status_error(
+                "That image file could not be found. Select it again.")
+            return
 
-        dialog = CropConfirmDialog(cropped_preview, parent=self)
-        if dialog.exec_() != QDialog.Accepted:
+        # The preview is a temporary file: delete it once the employee has answered,
+        # whatever the answer (or an error) is.
+        try:
+            dialog = CropConfirmDialog(cropped_preview, parent=self)
+            accepted = dialog.exec_() == QDialog.Accepted
+        finally:
+            try:
+                os.remove(cropped_preview)
+            except OSError:
+                pass
+        if not accepted:
             self.statusLabel.setText("Discarded — select another image")
             return
 

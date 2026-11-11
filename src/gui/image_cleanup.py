@@ -67,7 +67,13 @@ def crop_to_ink(path: str) -> str:
     if the ink-to-paper ratio doesn't resemble a signature, or if the
     ink is so small in the source photo that no reasonable upscale can
     reach the model's minimum accepted size.
+
+    Raises FileNotFoundError if the file itself is gone, so callers can say so
+    instead of reporting it as a bad photo.
     """
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Image file not found: {path}")
+
     try:
         pil = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
         image = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
