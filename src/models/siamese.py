@@ -20,6 +20,7 @@ from config.settings import (
     SPATIAL_HEAD_DROPOUT, SPATIAL_TRUNK,
     TEMPORAL_EMBEDDING_DIM, TEMPORAL_HIDDEN_SIZE, TEMPORAL_INPUT_FEATURES,
     TEMPORAL_NUM_LAYERS, PRESSURE_DROPOUT_RATE,
+    TEMPORAL_CONV_FILTERS, TEMPORAL_CONV_KERNEL,
     ALPHA_DEFAULT, DECISION_THRESHOLD,
 )
 
@@ -239,7 +240,8 @@ class TemporalSiamese(nn.Module):
     def __init__(self, input_features=TEMPORAL_INPUT_FEATURES, hidden_size=TEMPORAL_HIDDEN_SIZE,
                  num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
                  pressure_dropout=PRESSURE_DROPOUT_RATE, derive_deltas=True,
-                 bidirectional=True):
+                 bidirectional=True, conv_filters=TEMPORAL_CONV_FILTERS,
+                 conv_kernel=TEMPORAL_CONV_KERNEL):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.bidirectional = bool(bidirectional)
@@ -252,6 +254,17 @@ class TemporalSiamese(nn.Module):
 
         # When derive_deltas is True, per-frame velocity deltas double the input features.
         lstm_features = input_features * 2 if derive_deltas else input_features
+
+        # Research arm (off by default): local stroke context. The conv output is joined to
+        # each sample, so the LSTM keeps every channel it has today. No normalisation layer:
+        # its statistics would differ between a padded batch and a single signature.
+        self.conv = None
+        if conv_filters:
+            if conv_kernel % 2 == 0:
+                raise ValueError(f"conv_kernel must be odd to keep the length, got {conv_kernel}")
+            self.conv = nn.Conv1d(lstm_features, conv_filters, conv_kernel,
+                                  padding=conv_kernel // 2)
+            lstm_features += conv_filters
 
         # Bidirectional LSTM to process trajectory sequence in both time directions.
         self.lstm = nn.LSTM(
@@ -274,7 +287,9 @@ class TemporalSiamese(nn.Module):
         """
         weight = state_dict["lstm.weight_ih_l0"]
         hidden_size = weight.shape[0] // 4
-        width = weight.shape[1]
+        conv_weight = state_dict.get("conv.weight")
+        conv_filters = conv_weight.shape[0] if conv_weight is not None else 0
+        width = weight.shape[1] - conv_filters
 
         derive_deltas = bool(state_dict.get("derive_deltas_flag", torch.tensor(1.0)).item())
 
@@ -297,6 +312,8 @@ class TemporalSiamese(nn.Module):
             "embedding_dim": state_dict["embedding.weight"].shape[0],
             "derive_deltas": derive_deltas,
             "bidirectional": "lstm.weight_ih_l0_reverse" in state_dict,
+            "conv_filters": conv_filters,
+            "conv_kernel": conv_weight.shape[2] if conv_weight is not None else TEMPORAL_CONV_KERNEL,
         }
         params.update(overrides)
 
@@ -336,6 +353,16 @@ class TemporalSiamese(nn.Module):
 
         if self.derive_deltas:
             x = self._add_dynamics(x)
+
+        if self.conv is not None:
+            if lengths is not None:
+                # Zero everything past each signature's end: the appended deltas are not zero
+                # there, and the conv must read what a single signature's own padding gives.
+                keep = (torch.arange(x.size(1), device=x.device)[None, :]
+                        < lengths.to(x.device)[:, None])
+                x = x * keep[:, :, None]
+            local = torch.relu(self.conv(x.transpose(1, 2))).transpose(1, 2)
+            x = torch.cat([x, local], dim=-1)
 
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(

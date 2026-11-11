@@ -27,7 +27,7 @@ from config.settings import (
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     CONTRASTIVE_MARGIN, LEARNING_RATE, BATCH_SIZE,
     NUM_EPOCHS, WEIGHT_DECAY, MODEL_WEIGHTS_DIR,
-    TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
+    TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS, TEMPORAL_CONV_FILTERS, TEMPORAL_CONV_KERNEL,
     PRESSURE_DROPOUT_RATE, HARD_NEGATIVE_RATIO, SPATIAL_HEAD_DROPOUT,
     SPATIAL_TRUNK, SPATIAL_CONV_DROPOUT, SPATIAL_FC_HIDDEN,
     SPATIAL_GRAD_CHECKPOINT, SPATIAL_INPUT_SIZE,
@@ -117,6 +117,12 @@ def parse_args(argv=None):
                         help="Temporal LSTM width. 256x2 layers is ~2.2M parameters on "
                              "62 training writers; TA-RNN uses 46+46->23 memory blocks "
                              "and DsDTW a GRU-128, so smaller is worth measuring")
+    parser.add_argument("--conv-filters", type=int, default=TEMPORAL_CONV_FILTERS,
+                        help="Research arm (temporal): filters of a Conv1d stage whose output is "
+                             "joined to each sample before the LSTM. 0 (default) is the shipped "
+                             "model. Recoverable from the checkpoint.")
+    parser.add_argument("--conv-kernel", type=int, default=TEMPORAL_CONV_KERNEL,
+                        help="Samples that conv stage spans (odd). Recoverable from the checkpoint.")
     parser.add_argument("--num-layers", type=int, default=TEMPORAL_NUM_LAYERS,
                         help="Temporal LSTM depth. Inter-layer dropout only exists when "
                              "this is above 1, so dropping to 1 removes that too")
@@ -801,6 +807,8 @@ def main(argv=None):
             # Pre-derived features already include velocity and acceleration.
             # Do not append extra deltas when features are pre-derived.
             derive_deltas=args.temporal_features != "derived",
+            conv_filters=args.conv_filters,
+            conv_kernel=args.conv_kernel,
         ).to(device)
 
         # Distinct filenames so pressure-blind runs do not overwrite

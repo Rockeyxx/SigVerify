@@ -178,6 +178,10 @@ TEMPORAL_INPUT_FEATURES = TEMPORAL_CHANNEL_WIDTHS[TEMPORAL_CHANNELS]
 TEMPORAL_EMBEDDING_DIM = 128
 TEMPORAL_HIDDEN_SIZE = 256
 TEMPORAL_NUM_LAYERS = 1
+# Research arm, off in the shipped model: a Conv1d stage whose output is joined to each sample
+# before the LSTM, so the LSTM also sees a short piece of stroke around the sample.
+TEMPORAL_CONV_FILTERS = 0               # 0 = no conv stage (shipped)
+TEMPORAL_CONV_KERNEL = 5                # Samples the conv spans; 5 is 50 ms at 100 Hz. Odd.
 # Pressure dropout rate during training. Set to 0.0 based on validation results showing higher error rates when pressure dropout was active.
 PRESSURE_DROPOUT_RATE = 0.0
 PRESSURE_IMPUTATION_VALUE = 1.0
