@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_GENUINE_PER_MODALITY,
-                             CAMPAIGN_PRACTICE_SIGNINGS, SHEET_GRID)
+                             CAMPAIGN_PRACTICE_SIGNINGS, INK_MIN_CONTRAST, SHEET_GRID)
 from tools import capture_session as cs
 
 
@@ -207,7 +207,7 @@ def test_paper_import_saves_the_ink_crop_the_model_sees_beside_each_box(app, tmp
     saved = session.save_paper([_inked_sheet(tmp_path)] * 2)
     for path in saved:
         ink = cv2.imread(str(cs.ink_path(path)), cv2.IMREAD_GRAYSCALE)
-        assert ink is not None and set(np.unique(ink)) <= {0, 255}        # binarized, as the app does
+        assert ink is not None and ink.ndim == 2 and np.median(ink) == 255   # grey ink on white paper
         assert ink.shape[0] < cv2.imread(str(path)).shape[0]              # cropped to the ink
     assert len(_manifest_files(tmp_path)) == len(saved)                    # one row per signature
 
@@ -247,14 +247,16 @@ def test_the_ink_crop_keeps_a_faint_broken_signature_and_drops_shadow_and_page_e
     assert left < 340 and right > 660 and top < 300 and bottom > 500         # the whole oval
     assert right < 1000                                                      # not the page edge
     crop = cs.ink_crop(_phone_box())
-    assert set(np.unique(crop)) <= {0, 255} and (crop == 0).any()            # ink black on white
+    assert crop.ndim == 2 and np.median(crop) == 255 and crop.min() < 200    # grey ink on white paper
+    assert len(np.unique(crop)) > 2                                          # grey, not binarized (A9)
 
 
 def _black_pixels_on_and_off_rows(crop, top, y):
     line = slice(y - top - 3, y - top + 4)
     off = np.ones(crop.shape[0], bool)
     off[line] = False
-    return (crop[line] == 0).sum(), (crop[off] == 0).sum()
+    ink = crop < 255 - INK_MIN_CONTRAST
+    return ink[line].sum(), ink[off].sum()
 
 
 def test_the_ink_crop_drops_a_printed_black_line_inside_the_signature_box():

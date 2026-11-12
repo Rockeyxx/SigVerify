@@ -73,18 +73,14 @@ def ink_box(image):
 
 
 def ink_crop(image):
-    """The signature cut out of a colour box and binarized, ink black on white like the app's
-    crop_to_ink output, or None when the box holds no signature (ENG_REPORT A6). A printed line or
-    frame inside the box (long, straight, not blue) is set to paper and the box thresholded again,
-    so it is not drawn and its darkness does not push faint strokes below the threshold (A8)."""
+    """The signature cut out of a colour box as grey ink on white paper, shadows flattened, or None
+    when the box holds no signature (ENG_REPORT A6). A printed line or frame inside the box (long,
+    straight, not blue) is set to paper (A8). The crop is not binarized: the spatial model was
+    trained on grey scans, and binarizing cost 4.6 EER points on SigComp2011 offline (A9)."""
     box = ink_box(image)
     if box is None:
         return None
     top, bottom, left, right = box
     flat = (255 - np.clip(_ink_contrast(image), 0, 255)).astype(np.uint8)[top:bottom, left:right]
-    binary = _binarize(flat)
-    printed = _printed_lines(binary, _is_blue(image)[top:bottom, left:right])
-    if not printed.any():
-        return binary
-    flat[printed] = 255
-    return _binarize(flat)
+    flat[_printed_lines(_binarize(flat), _is_blue(image)[top:bottom, left:right])] = 255
+    return flat
