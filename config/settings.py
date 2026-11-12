@@ -56,6 +56,11 @@ DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 # evaluation and calibration only; no weight trained on it ships.
 BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
 INHOUSE_DIR = os.path.join(DATA_DIR, "inhouse")      # XPPen campaign: <participant>/ + manifest.csv
+# In-house writer split (src/data/campaign.py): every forger is a test writer; each other volunteer
+# goes to test when a hash of SEED and their code falls under this fraction, so nobody changes
+# side as volunteers are added. The record lists participant codes only and is tracked in git.
+INHOUSE_TEST_FRACTION = 0.5
+INHOUSE_SPLIT_PATH = os.path.join(PROJECT_ROOT, "config", "inhouse_split.json")
 
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
