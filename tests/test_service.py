@@ -261,6 +261,32 @@ class TestSignatureService:
         assert len(ensemble) == 6
         assert hasattr(ensemble, "encode")
 
+    def test_ensemble_encode_is_the_mean_of_its_members(self):
+        """
+        Scoring is Euclidean on unnormalised embeddings, so the ensemble must hand back
+        the plain mean of its members, shaped like one member. Untrained members with
+        different seeds stand in for the gitignored checkpoints, so this runs everywhere.
+        """
+        import torch
+
+        from config.settings import TEMPORAL_EMBEDDING_DIM, TEMPORAL_INPUT_FEATURES
+        from src.models.siamese import TemporalSiamese
+        from src.verification import TemporalEnsemble
+
+        members = []
+        for seed in (0, 1, 2):
+            torch.manual_seed(seed)
+            members.append(TemporalSiamese().eval())
+        x = torch.randn(2, 60, TEMPORAL_INPUT_FEATURES, generator=torch.Generator().manual_seed(3))
+
+        with torch.no_grad():
+            each = [m.encode(x) for m in members]
+            got = TemporalEnsemble(members).encode(x)
+
+        assert got.shape == (2, TEMPORAL_EMBEDDING_DIM)
+        assert torch.allclose(got, sum(each) / len(each), atol=1e-6)
+        assert not torch.allclose(got, each[0], atol=1e-4), "members were not distinct"
+
     def test_load_temporal_ensemble_returns_none_when_missing(self, monkeypatch):
         import src.verification as verification
         from src.verification import load_temporal_ensemble
