@@ -86,16 +86,24 @@ def test_start_over_drops_everything(app):
     assert d.done.isHidden() and not d.capture.isHidden()
 
 
-def test_collect_signatures_returns_the_list_or_none(app, monkeypatch):
-    def sign_and_confirm(self):
-        _sign(self)
-        self.confirm()
-        return self.result()
+def _sign_and_confirm(self):
+    _sign(self)
+    self.confirm()
+    return self.result()
 
-    monkeypatch.setattr(collect.CollectDialog, "exec_", sign_and_confirm)
+
+def test_collect_signatures_returns_the_signatures_with_os_and_tablet_or_none(app, monkeypatch):
+    import platform
+
+    import src.capture.tablet as tablet
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: ["XPPen Deco 640 Pen"])
+    monkeypatch.setattr(collect.CollectDialog, "exec_", _sign_and_confirm)
     got = collect_signatures(count=1)
-    assert isinstance(got, list) and len(got) == 1          # count=1 is the verification probe
-    assert got[0].shape[1] == TEMPORAL_INPUT_FEATURES
+    assert set(got) == {"signatures", "os", "device_model", "qt_platform"}
+    assert len(got["signatures"]) == 1                      # count=1 is the verification probe
+    assert got["signatures"][0].shape[1] == TEMPORAL_INPUT_FEATURES
+    assert got["os"] == platform.system() and got["device_model"] == "XPPen Deco 640 Pen"
 
     def close(self):
         self.reject()
@@ -103,6 +111,39 @@ def test_collect_signatures_returns_the_list_or_none(app, monkeypatch):
 
     monkeypatch.setattr(collect.CollectDialog, "exec_", close)
     assert collect_signatures(count=5) is None
+
+
+def test_two_tablets_ask_which_one_and_cancelling_closes(app, monkeypatch):
+    """Qt5 cannot tell which tablet a stroke came from, so the person names it."""
+    import src.capture.tablet as tablet
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: ["XPPen Deco 640 Pen", "Wacom Intuos S Pen"])
+    monkeypatch.setattr(collect.CollectDialog, "exec_", _sign_and_confirm)
+    offered = []
+
+    def pick_second(parent, title, label, items, current, editable):
+        offered.append(list(items))
+        return items[1], True
+
+    monkeypatch.setattr(collect.QInputDialog, "getItem", pick_second)
+    assert collect_signatures(count=1)["device_model"] == "Wacom Intuos S Pen"
+    assert offered == [["XPPen Deco 640 Pen", "Wacom Intuos S Pen"]]
+
+    monkeypatch.setattr(collect.QInputDialog, "getItem", lambda *a: ("", False))
+    assert collect_signatures(count=1) is None
+
+
+def test_one_tablet_asks_nothing(app, monkeypatch):
+    import src.capture.tablet as tablet
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: ["XPPen Deco 640 Pen"])
+    monkeypatch.setattr(collect.CollectDialog, "exec_", _sign_and_confirm)
+
+    def must_not_ask(*_a):
+        raise AssertionError("asked which tablet with only one connected")
+
+    monkeypatch.setattr(collect.QInputDialog, "getItem", must_not_ask)
+    assert collect_signatures(count=1)["device_model"] == "XPPen Deco 640 Pen"
 
 
 def test_the_arabic_toggle_translates_and_right_aligns(app):

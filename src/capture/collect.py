@@ -1,9 +1,10 @@
 """The tablet signing window the GUI calls: n signatures, a thank-you screen, Confirm or Start over.
 
-The GUI owns the model call, the database and the score; this returns raw trajectories only.
+The GUI owns the model call, the database and the score; this returns raw trajectories only,
+with the operating system and the tablet name read from the system.
 """
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PyQt5.QtWidgets import QDialog, QHBoxLayout, QInputDialog, QLabel, QPushButton, QVBoxLayout
 
 from src.capture.tablet import SignatureCaptureWidget
 from src.gui.styles import ACCENT, ACCENT_DARK, PRIMARY_LIGHT, STYLE
@@ -16,6 +17,8 @@ TEXT = {
         "done": "Thank you, {n}/{n} done.",
         "btn_approve": "I approve", "btn_redo": "Redo",
         "btn_confirm": "Confirm", "btn_restart": "Start over",
+        "choose_title": "Choose the tablet",
+        "choose_label": "More than one tablet is connected. Which one will you sign on?",
     },
     "ar": {
         "title": "وقّع على الجهاز اللوحي",
@@ -24,6 +27,8 @@ TEXT = {
         "done": "شكرًا لك، اكتمل {n} من {n}.",
         "btn_approve": "أوافق", "btn_redo": "إعادة",
         "btn_confirm": "تأكيد", "btn_restart": "البدء من جديد",
+        "choose_title": "اختر الجهاز اللوحي",
+        "choose_label": "يوجد أكثر من جهاز لوحي متصل. على أيّها ستوقّع؟",
     },
 }
 
@@ -95,6 +100,19 @@ class CollectDialog(QDialog):
         if self.finished:
             self.accept()
 
+    def choose_tablet(self):
+        """With two or more tablets connected, the person picks the one they sign on: Qt5 does
+        not say which tablet a stroke came from, so the pick is stored as given, unchecked.
+        False when they cancel."""
+        tablets = self.capture.tablets
+        if len(tablets) < 2:
+            return True
+        name, ok = QInputDialog.getItem(self, self._t("choose_title"), self._t("choose_label"),
+                                        tablets, 0, False)
+        if ok:
+            self.capture.device_model = name
+        return ok
+
     def start_over(self):
         self.signatures = []
         self.capture.canvas.clear_canvas()
@@ -141,10 +159,13 @@ class CollectDialog(QDialog):
 def collect_signatures(count=5, parent=None, lang="en"):
     """Open the signing window. count=5 to enrol, count=1 to verify.
 
-    Returns count arrays [L, TEMPORAL_INPUT_FEATURES] (float32, signing order) after Confirm,
-    or None when the window is closed first.
+    Returns, after Confirm, {"signatures": count arrays [L, TEMPORAL_INPUT_FEATURES] (float32,
+    signing order), "os", "device_model", "qt_platform"}: storage keeps the last three with the
+    pen set, because enrolling on one tablet and verifying on another fails (F23).
+    device_model is the tablet name read from the system, or CAPTURE_NO_DRIVER. Returns None
+    when the window is closed first, or the tablet choice is cancelled.
     """
     dialog = CollectDialog(count, parent, lang)
-    if dialog.exec_() == QDialog.Accepted:
-        return list(dialog.signatures)
+    if dialog.choose_tablet() and dialog.exec_() == QDialog.Accepted:
+        return {"signatures": list(dialog.signatures), **dialog.capture.capture_info()}
     return None
