@@ -45,6 +45,7 @@ docs/*
 
 # EGM design briefs, drafts and review reports (local only)
 .egm/
+.vibe-wise/
 
 # Local diagnostics — instruments for answering "why is this number bad",
 # not project code. Nothing imports them and nothing ships with them, so they

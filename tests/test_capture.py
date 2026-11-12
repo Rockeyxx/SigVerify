@@ -110,6 +110,100 @@ def test_capture_info_names_device_os_and_qt_platform(app):
     assert set(info) == {"device_model", "os", "qt_platform"}
 
 
+def _input_node(sys_root, udev_root, event, minor, name, udev_lines):
+    """One /sys/class/input/eventN node and its udev record, as Linux lays them out."""
+    node = sys_root / event
+    (node / "device").mkdir(parents=True)
+    (node / "dev").write_text(f"13:{minor}\n")
+    (node / "device" / "name").write_text(name + "\n")
+    udev_root.mkdir(exist_ok=True)
+    (udev_root / f"c13:{minor}").write_text("".join(f"{line}\n" for line in udev_lines))
+
+
+def test_tablet_names_reads_the_kernel_name_of_the_node_udev_calls_a_tablet(tmp_path):
+    """The Deco 640 makes three nodes with one USB ID; only the pen is the tablet. The pad
+    flag (ID_INPUT_TABLET_PAD) must not count as a tablet."""
+    from src.capture.tablet import tablet_names
+
+    sys_root, udev_root = tmp_path / "input", tmp_path / "udev"
+    _input_node(sys_root, udev_root, "event22", 86, "XPPen Deco 640 Mouse", ["E:ID_INPUT_MOUSE=1"])
+    _input_node(sys_root, udev_root, "event23", 87, "XPPen Deco 640 Keyboard", ["E:ID_INPUT_KEY=1"])
+    _input_node(sys_root, udev_root, "event24", 88, "XPPen Deco 640 Pen",
+                ["E:ID_INPUT=1", "E:ID_INPUT_TABLET=1"])
+    _input_node(sys_root, udev_root, "event25", 89, "Some Tablet Pad", ["E:ID_INPUT_TABLET_PAD=1"])
+    _input_node(sys_root, udev_root, "event3", 67, "AT Translated Set 2 keyboard",
+                ["E:ID_INPUT_KEYBOARD=1"])
+
+    assert tablet_names("Linux", sys_root=str(sys_root), udev_root=str(udev_root)) == [
+        "XPPen Deco 640 Pen"]
+
+
+def test_tablet_names_lists_two_different_tablets_and_one_name_for_two_alike(tmp_path):
+    from src.capture.tablet import tablet_names
+
+    sys_root, udev_root = tmp_path / "input", tmp_path / "udev"
+    _input_node(sys_root, udev_root, "event24", 88, "XPPen Deco 640 Pen", ["E:ID_INPUT_TABLET=1"])
+    _input_node(sys_root, udev_root, "event30", 94, "XPPen Deco 640 Pen", ["E:ID_INPUT_TABLET=1"])
+    assert tablet_names("Linux", sys_root=str(sys_root), udev_root=str(udev_root)) == [
+        "XPPen Deco 640 Pen"]
+
+    _input_node(sys_root, udev_root, "event31", 95, "Wacom Intuos S Pen", ["E:ID_INPUT_TABLET=1"])
+    assert sorted(tablet_names("Linux", sys_root=str(sys_root), udev_root=str(udev_root))) == [
+        "Wacom Intuos S Pen", "XPPen Deco 640 Pen"]
+
+
+def test_tablet_names_is_empty_with_no_tablet_or_no_wintab(tmp_path):
+    from src.capture.tablet import tablet_names
+
+    sys_root, udev_root = tmp_path / "input", tmp_path / "udev"
+    _input_node(sys_root, udev_root, "event3", 67, "AT Translated Set 2 keyboard",
+                ["E:ID_INPUT_KEYBOARD=1"])
+    assert tablet_names("Linux", sys_root=str(sys_root), udev_root=str(udev_root)) == []
+
+    def no_driver():
+        raise OSError("wintab32.dll not found")
+
+    assert tablet_names("Windows", wintab=no_driver) == []
+
+
+class _FakeWintab:
+    """wintab32.dll's WTInfoW for a driver that reports these device names."""
+
+    def __init__(self, names):
+        self.names = names
+
+    def WTInfoW(self, category, index, out):
+        if (category, index) == (1, 4):                      # WTI_INTERFACE, IFC_NDEVICES
+            out.contents.value = len(self.names)
+            return 4
+        name = self.names[category - 100]                   # WTI_DEVICES + n, DVC_NAME
+        assert index == 1
+        if out is None:
+            return 2 * (len(name) + 1)
+        out.value = name
+        return 2 * (len(name) + 1)
+
+
+def test_tablet_names_reads_each_wintab_device_name():
+    from src.capture.tablet import tablet_names
+
+    assert tablet_names("Windows", wintab=lambda: _FakeWintab(["XP-Pen Deco 640"])) == [
+        "XP-Pen Deco 640"]
+    assert tablet_names("Windows", wintab=lambda: _FakeWintab(["Tablet A", "Tablet B"])) == [
+        "Tablet A", "Tablet B"]
+
+
+def test_capture_info_stores_the_name_read_or_no_driver(app, monkeypatch):
+    import src.capture.tablet as tablet
+    from config.settings import CAPTURE_NO_DRIVER
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: ["XPPen Deco 640 Pen"])
+    assert SignatureCaptureWidget().capture_info()["device_model"] == "XPPen Deco 640 Pen"
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: [])
+    assert SignatureCaptureWidget().capture_info()["device_model"] == CAPTURE_NO_DRIVER
+
+
 def test_canvas_keeps_every_event_with_tilt_for_the_logger(app):
     widget = SignatureCaptureWidget()
     widget.canvas.tabletEvent(_event(QEvent.TabletMove, 50, 50, 0.0, 990, xtilt=12, ytilt=-7))  # hover

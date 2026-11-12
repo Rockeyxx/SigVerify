@@ -9,6 +9,7 @@ Enrollment stores continuous embedding vectors in binary format (ISO/IEC 24745:2
 """
 
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -387,21 +388,27 @@ class SignatureService:
         self.use_temporal_ensemble = use_temporal_ensemble
         self._spatial_model = None
         self._temporal_model = None
+        # warm_up() runs on its own thread while the user may already be verifying;
+        # without these locks both threads can find a model missing and load it twice.
+        self._spatial_lock = threading.Lock()
+        self._temporal_lock = threading.Lock()
 
     @property
     def spatial_model(self):
-        if self._spatial_model is None:
-            self._spatial_model = load_model("spatial", self.spatial_weights, self.device)
-        return self._spatial_model
+        with self._spatial_lock:
+            if self._spatial_model is None:
+                self._spatial_model = load_model("spatial", self.spatial_weights, self.device)
+            return self._spatial_model
 
     @property
     def temporal_model(self):
-        if self._temporal_model is None:
-            if self.use_temporal_ensemble:
-                self._temporal_model = self._load_temporal_ensemble()
-            else:
-                self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
-        return self._temporal_model
+        with self._temporal_lock:
+            if self._temporal_model is None:
+                if self.use_temporal_ensemble:
+                    self._temporal_model = self._load_temporal_ensemble()
+                else:
+                    self._temporal_model = load_model("temporal", self.temporal_weights, self.device)
+            return self._temporal_model
 
     def warm_up(self) -> None:
         """

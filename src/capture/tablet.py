@@ -1,4 +1,6 @@
 import sys
+import ctypes
+import glob
 import os
 import platform
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
@@ -8,9 +10,66 @@ from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLay
 from PyQt5.QtGui import QColor, QGuiApplication, QTabletEvent, QPainter, QPen
 from PyQt5.QtCore import Qt, QPointF, pyqtSignal
 
-from config.settings import CAPTURE_DEVICE_MODEL
+from config.settings import CAPTURE_NO_DRIVER
 from src.data.dataset import trajectory_gate
 from src.data.pen_stream import strokes_to_trajectory
+
+# Wintab 1.1 WTInfo categories and indexes.
+WTI_INTERFACE, IFC_NDEVICES, WTI_DEVICES, DVC_NAME = 1, 4, 100, 1
+
+
+def _linux_tablet_names(sys_root, udev_root):
+    """Kernel names of the input nodes udev flags as tablets. One XPPen makes three nodes with
+    one USB ID (Pen, Mouse, Keyboard); only the pen carries ID_INPUT_TABLET."""
+    names = []
+    for node in sorted(glob.glob(os.path.join(sys_root, "event*"))):
+        try:
+            with open(os.path.join(node, "dev")) as f:
+                major_minor = f.read().strip()
+            with open(os.path.join(udev_root, f"c{major_minor}")) as f:
+                if "E:ID_INPUT_TABLET=1" not in f.read().splitlines():
+                    continue
+            with open(os.path.join(node, "device", "name")) as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _wintab_names(load_wintab):
+    """Each device name the tablet driver reports through Wintab; empty without the driver."""
+    try:
+        dll = load_wintab()
+        count = ctypes.c_uint(0)
+        if not dll.WTInfoW(WTI_INTERFACE, IFC_NDEVICES, ctypes.pointer(count)):
+            return []
+        names = []
+        for n in range(count.value):
+            size = dll.WTInfoW(WTI_DEVICES + n, DVC_NAME, None)   # bytes, with the final NUL
+            if not size:
+                continue
+            buf = ctypes.create_unicode_buffer(size // 2 + 1)
+            dll.WTInfoW(WTI_DEVICES + n, DVC_NAME, buf)
+            if buf.value.strip() and buf.value.strip() not in names:
+                names.append(buf.value.strip())
+        return names
+    except (AttributeError, OSError):
+        return []
+
+
+def tablet_names(system=None, sys_root="/sys/class/input", udev_root="/run/udev/data",
+                 wintab=None):
+    """Names of the connected tablets, read from the system: the kernel on Linux, Wintab on
+    Windows. Empty when none can be read (no tablet, or Windows without the driver).
+    Reading takes milliseconds (3.7 ms for 27 input nodes on Linux)."""
+    system = system or platform.system()
+    if system == "Linux":
+        return _linux_tablet_names(sys_root, udev_root)
+    if system == "Windows":
+        return _wintab_names(wintab or (lambda: ctypes.WinDLL("wintab32.dll")))
+    return []
 
 
 class TrajectoryGateError(ValueError):
@@ -53,6 +112,11 @@ class SignatureCaptureWidget(QWidget):
         self.layout.addLayout(btn_layout)
         self.setLayout(self.layout)
 
+        # Read once when the window opens, before anyone presses Enter. With two tablets the
+        # signing window asks which one (CollectDialog.choose_tablet); until then, the first.
+        self.tablets = tablet_names()
+        self.device_model = self.tablets[0] if self.tablets else CAPTURE_NO_DRIVER
+
     def confirm_signature(self):
         try:
             tensor = self.capture_signature()
@@ -86,8 +150,9 @@ class SignatureCaptureWidget(QWidget):
 
     def capture_info(self) -> dict:
         """What enrolment stores beside the template, so verification can insist on the same
-        tablet model and operating system (F23; spec decisions D7 and D9)."""
-        return {"device_model": CAPTURE_DEVICE_MODEL, "os": platform.system(),
+        tablet model and operating system (F23; spec decisions D7 and D9). device_model is the
+        tablet name read from the system, or CAPTURE_NO_DRIVER."""
+        return {"device_model": self.device_model, "os": platform.system(),
                 # platformName() is "windows" for both Windows pen inputs; the started spec
                 # (e.g. "windows:nowmpointer" for Wintab) tells them apart.
                 "qt_platform": os.environ.get("QT_QPA_PLATFORM") or QGuiApplication.platformName()}
