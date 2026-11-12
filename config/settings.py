@@ -161,6 +161,8 @@ INK_HUE_RANGE = (95, 165)               # Blue ballpoint, OpenCV hue 0-179
 INK_CLUSTER_GAP = 61                    # Ink pieces closer than this (px) belong to one signature
 INK_MIN_PIXELS = 200                    # Fewer ink pixels than this: no signature in the box
 INK_CROP_PAD = 0.08                     # Margin around the ink, as a fraction of its longer side
+INK_LINE_MIN_FRACTION = 0.5             # A straight run this long (share of the box side) may be print
+INK_LINE_MAX_BLUE = 0.25                # ...and is removed when less than this share of it is blue
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
 # The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.

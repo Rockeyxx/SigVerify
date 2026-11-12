@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_GENUINE_PER_MODALITY,
-                             CAMPAIGN_PRACTICE_SIGNINGS, SHEET_GRID)
+                             CAMPAIGN_PRACTICE_SIGNINGS, INK_MIN_CONTRAST, SHEET_GRID)
 from tools import capture_session as cs
 
 
@@ -207,7 +207,7 @@ def test_paper_import_saves_the_ink_crop_the_model_sees_beside_each_box(app, tmp
     saved = session.save_paper([_inked_sheet(tmp_path)] * 2)
     for path in saved:
         ink = cv2.imread(str(cs.ink_path(path)), cv2.IMREAD_GRAYSCALE)
-        assert ink is not None and set(np.unique(ink)) <= {0, 255}        # binarized, as the app does
+        assert ink is not None and ink.ndim == 2 and np.median(ink) == 255   # grey ink on white paper
         assert ink.shape[0] < cv2.imread(str(path)).shape[0]              # cropped to the ink
     assert len(_manifest_files(tmp_path)) == len(saved)                    # one row per signature
 
@@ -247,7 +247,40 @@ def test_the_ink_crop_keeps_a_faint_broken_signature_and_drops_shadow_and_page_e
     assert left < 340 and right > 660 and top < 300 and bottom > 500         # the whole oval
     assert right < 1000                                                      # not the page edge
     crop = cs.ink_crop(_phone_box())
-    assert set(np.unique(crop)) <= {0, 255} and (crop == 0).any()            # ink black on white
+    assert crop.ndim == 2 and np.median(crop) == 255 and crop.min() < 200    # grey ink on white paper
+    assert len(np.unique(crop)) > 2                                          # grey, not binarized (A9)
+
+
+def _black_pixels_on_and_off_rows(crop, top, y):
+    line = slice(y - top - 3, y - top + 4)
+    off = np.ones(crop.shape[0], bool)
+    off[line] = False
+    ink = crop < 255 - INK_MIN_CONTRAST
+    return ink[line].sum(), ink[off].sum()
+
+
+def test_the_ink_crop_drops_a_printed_black_line_inside_the_signature_box():
+    # A blue signature over a printed "Signature: ____" line: the line falls inside the box, but it
+    # is straight and not blue, so the crop the model sees must not carry it, and its darkness must
+    # not push the faint blue strokes below the binarization threshold either.
+    top, _, _, _ = cs.ink_box(_phone_box())
+    clean_on, clean_off = _black_pixels_on_and_off_rows(cs.ink_crop(_phone_box()), top, 530)
+    on_line = _phone_box()
+    cv2.line(on_line, (300, 530), (700, 530), (40, 40, 40), 3)              # printed black line
+    assert cs.ink_box(on_line) == cs.ink_box(_phone_box())                   # same box either way
+    line_on, line_off = _black_pixels_on_and_off_rows(cs.ink_crop(on_line), top, 530)
+    assert line_on <= clean_on + 20                                          # the line is not ink
+    assert 0.95 <= line_off / clean_off <= 1.05                              # the signature survives
+
+
+def test_the_ink_crop_keeps_a_straight_blue_flourish():
+    # A long straight stroke in the signature's own blue ink is part of the signature.
+    top, _, _, _ = cs.ink_box(_phone_box())
+    flourish = _phone_box()
+    cv2.line(flourish, (330, 520), (680, 520), (200, 150, 140), 3)          # blue underline
+    assert cs.ink_box(flourish)[0] == top
+    on, _ = _black_pixels_on_and_off_rows(cs.ink_crop(flourish), top, 520)
+    assert on >= 0.8 * 3 * 350                                               # most of it is kept
 
 
 def test_a_box_with_only_shadow_and_page_edge_has_no_signature():
