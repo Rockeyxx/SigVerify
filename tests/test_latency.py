@@ -163,6 +163,39 @@ class TestLatencyBudget:
             f"models loaded {loads} across one enrolment and three verifications; "
             f"each branch must load once and stay resident")
 
+    def test_models_load_once_when_two_threads_ask_together(self, monkeypatch):
+        """
+        The GUI runs warm_up() on its own thread while the user may already be
+        verifying. Two threads that both find a model missing must not both load it
+        (twice the RAM, a slower first result). The slow fake load holds the window open.
+        """
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        import src.verification as verification
+
+        loads = []
+
+        def slow_load(branch, *_a, **_k):
+            loads.append(branch)
+            time.sleep(0.2)
+            return object()
+
+        monkeypatch.setattr(verification, "load_model", slow_load)
+        service = verification.SignatureService()
+        start = threading.Barrier(2)
+
+        def both_models():
+            start.wait()
+            return service.spatial_model, service.temporal_model
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = [f.result() for f in [pool.submit(both_models) for _ in range(2)]]
+        assert loads.count("spatial") == 1 and loads.count("temporal") == 1, (
+            f"two threads loaded {loads}; each branch must load once")
+        assert first == second, "the two threads were handed different model objects"
+
     @needs_spatial
     def test_peak_memory_is_inside_the_ceiling(self, tmp_path):
         import resource
