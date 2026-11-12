@@ -250,6 +250,24 @@ def test_the_ink_crop_keeps_a_faint_broken_signature_and_drops_shadow_and_page_e
     assert set(np.unique(crop)) <= {0, 255} and (crop == 0).any()            # ink black on white
 
 
+def test_the_ink_crop_drops_a_printed_black_line_inside_the_signature_box():
+    # A blue signature over a printed "Signature: ____" line: the line falls inside the box, but it
+    # is not blue, so the crop the model sees must not carry it, and its darkness must not push the
+    # faint blue strokes below the binarization threshold either.
+    clean = cs.ink_crop(_phone_box())
+    on_line = _phone_box()
+    cv2.line(on_line, (300, 530), (700, 530), (40, 40, 40), 3)              # printed black line
+    top, _, _, _ = cs.ink_box(on_line)
+    assert cs.ink_box(on_line) == cs.ink_box(_phone_box())                   # same box either way
+    crop = cs.ink_crop(on_line)
+    line = slice(530 - top - 3, 530 - top + 4)
+    off_line = np.ones(crop.shape[0], bool)
+    off_line[line] = False
+    assert (crop[line] == 0).sum() <= (clean[line] == 0).sum() + 20          # the line is not ink
+    kept = (crop[off_line] == 0).sum() / (clean[off_line] == 0).sum()
+    assert 0.95 <= kept <= 1.05                                              # the signature survives
+
+
 def test_a_box_with_only_shadow_and_page_edge_has_no_signature():
     assert cs.ink_box(_phone_box(signature=False)) is None
     assert cs.ink_crop(_phone_box(signature=False)) is None

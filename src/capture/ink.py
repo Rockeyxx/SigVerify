@@ -21,15 +21,19 @@ def _ink_contrast(image):
     return paper.astype(np.int16) - grey.astype(np.int16)
 
 
+def _is_blue(image):
+    """True where a pixel is blue ink colour; grey shadows, creases, page edges and black print are not."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    return ((hsv[:, :, 1] >= INK_MIN_SATURATION)
+            & (hsv[:, :, 0] >= INK_HUE_RANGE[0]) & (hsv[:, :, 0] <= INK_HUE_RANGE[1]))
+
+
 def ink_box(image):
     """(top, bottom, left, right) of the signature in a colour box, padded, or None.
     Ink is darker than its local paper and blue; grey shadows, creases and the page edge are
     not. The signature is the cluster of ink pieces holding the most ink, so a faint stroke
     broken into small pieces is kept whole and stray marks far from it are left out."""
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    ink = ((_ink_contrast(image) >= INK_MIN_CONTRAST) & (hsv[:, :, 1] >= INK_MIN_SATURATION)
-           & (hsv[:, :, 0] >= INK_HUE_RANGE[0]) & (hsv[:, :, 0] <= INK_HUE_RANGE[1]))
-    ink = ink.astype(np.uint8)
+    ink = ((_ink_contrast(image) >= INK_MIN_CONTRAST) & _is_blue(image)).astype(np.uint8)
     near = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (INK_CLUSTER_GAP,) * 2))
     count, labels = cv2.connectedComponents(near, connectivity=8)
     if count < 2:
@@ -48,11 +52,14 @@ def ink_box(image):
 
 def ink_crop(image):
     """The signature cut out of a colour box and binarized, ink black on white like the app's
-    crop_to_ink output, or None when the box holds no signature (ENG_REPORT A6)."""
+    crop_to_ink output, or None when the box holds no signature (ENG_REPORT A6). Only blue pixels
+    can be ink: a printed black line or text inside the box is set to paper before thresholding,
+    so it is not drawn and its darkness cannot push faint blue strokes below the threshold."""
     box = ink_box(image)
     if box is None:
         return None
     top, bottom, left, right = box
-    flat = (255 - np.clip(_ink_contrast(image), 0, 255)).astype(np.uint8)[top:bottom, left:right]
+    contrast = np.where(_is_blue(image), np.clip(_ink_contrast(image), 0, 255), 0)
+    flat = (255 - contrast).astype(np.uint8)[top:bottom, left:right]
     return cv2.threshold(cv2.GaussianBlur(flat, (3, 3), 0), 0, 255,
                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
