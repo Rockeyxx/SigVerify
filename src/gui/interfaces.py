@@ -23,9 +23,10 @@ _service_lock = threading.Lock()
 
 
 def _get_service() -> RealSignatureService:
-    # One SignatureService for the whole session (AGENTS.md): a second instance
-    # loads the models again. The lock matters now that warm-up runs on its own
-    # thread while the user may already be enrolling or verifying.
+    # One SignatureService for the whole session (AGENTS.md). The lock only makes sure
+    # two threads (warm-up and a worker) do not both create the service object; that is
+    # instant. The models load lazily inside the service (spatial_model / temporal_model),
+    # outside this lock.
     global _service
     with _service_lock:
         if _service is None:

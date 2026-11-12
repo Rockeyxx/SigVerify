@@ -262,6 +262,12 @@ class MainWindow(QMainWindow):
         self._warm_up_worker = WarmUpWorker()
         self._warm_up_worker.start()
 
+    def closeEvent(self, event):
+        # Closing during the ~0.5 s warm-up would print "QThread: Destroyed while thread is
+        # still running", so wait for the worker to finish first.
+        self._warm_up_worker.wait()
+        super().closeEvent(event)
+
     def _build_auth_stack(self):
         self.auth_stack = QStackedWidget()
 

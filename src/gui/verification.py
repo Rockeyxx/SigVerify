@@ -1,8 +1,13 @@
 """Verification Panel for the signature verification graphical interface."""
 
+from PyQt5.QtCore import QRectF, Qt
+from PyQt5.QtGui import QColor, QPainter, QPen
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
     QVBoxLayout, QFileDialog
+)
+from config.settings import (
+    DECISION_THRESHOLD, SPATIAL_DECISION_THRESHOLD, TEMPORAL_DECISION_THRESHOLD
 )
 from src.gui.workers import VerifyWorker, ConfirmedSigningWorker
 
@@ -11,6 +16,51 @@ import src.gui.interfaces as interfaces
 
 # Third decision of step-up verification (src.verification.SIGN_AGAIN).
 SIGN_AGAIN = "Sign again"
+
+
+# The decision threshold depends on which evidence was used (result["routing"]).
+# "confidence" is a similarity x 100, not a probability, so it is shown as a match score
+# against the threshold, never as "% sure".
+_THRESHOLD_BY_ROUTING = {
+    "multimodal": DECISION_THRESHOLD,
+    "spatial_only": SPATIAL_DECISION_THRESHOLD,
+    "temporal_only": TEMPORAL_DECISION_THRESHOLD,
+}
+
+
+def threshold_for(result: dict) -> float:
+    """The threshold (on the same 0-100 scale as the score) this result was judged against."""
+    return _THRESHOLD_BY_ROUTING.get(result.get("routing"), SPATIAL_DECISION_THRESHOLD) * 100
+
+
+class ScoreBar(QWidget):
+    """A 0-100 bar: the match score filled in, the decision threshold marked with a line."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(22)
+        self._score = 0.0
+        self._threshold = 0.0
+        self._genuine = False
+
+    def set_values(self, score: float, threshold: float, genuine: bool):
+        self._score, self._threshold, self._genuine = score, threshold, genuine
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        track = QRectF(0, 7, w, 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#1b3a33"))
+        painter.drawRoundedRect(track, 4, 4)
+        fill = max(0.0, min(100.0, self._score)) / 100.0 * w
+        painter.setBrush(QColor("#1fa37a" if self._genuine else "#e5534b"))
+        painter.drawRoundedRect(QRectF(0, 7, fill, 8), 4, 4)
+        x = max(0.0, min(100.0, self._threshold)) / 100.0 * w
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(int(x), 1, int(x), h - 1)
 
 
 class VerificationPanel(QWidget):
@@ -80,6 +130,15 @@ class VerificationPanel(QWidget):
         self.resultDisplay.setWordWrap(True)
         layout.addWidget(self.resultDisplay)
 
+        self.scoreBar = ScoreBar()
+        self.scoreBar.setVisible(False)
+        layout.addWidget(self.scoreBar)
+
+        self.scoreCaption = QLabel("")
+        self.scoreCaption.setProperty("role", "muted")
+        self.scoreCaption.setVisible(False)
+        layout.addWidget(self.scoreCaption)
+
         self.modalityStateLabel = QLabel("")
         self.modalityStateLabel.setProperty("role", "muted")
         layout.addWidget(self.modalityStateLabel)
@@ -119,6 +178,8 @@ class VerificationPanel(QWidget):
         self._last_accepted_paths = None
         self._last_accepted_client = None
         self.confirmButton.setVisible(False)
+        self.scoreBar.setVisible(False)
+        self.scoreCaption.setVisible(False)
         self.selectProbeButton.setText("Select Probe Image")
 
     def select_probe_image(self):
@@ -203,7 +264,14 @@ class VerificationPanel(QWidget):
         self._awaiting_second = False
         self.selectProbeButton.setText("Select Probe Image")
 
-        self.resultDisplay.setText(f"[{decision}, {confidence}%]")
+        threshold = threshold_for(result)
+        self.resultDisplay.setText(decision)
+        self.scoreBar.set_values(confidence, threshold, decision == "Genuine")
+        self.scoreBar.setVisible(True)
+        self.scoreCaption.setText(
+            f"Match score {confidence:.1f} (line = threshold {threshold:.1f}). "
+            "The score is a similarity, not a probability.")
+        self.scoreCaption.setVisible(True)
         role = "result-genuine" if decision == "Genuine" else "result-forged"
         self.resultDisplay.setProperty("role", role)
         self._refresh_result_style()
@@ -259,6 +327,8 @@ class VerificationPanel(QWidget):
         self.verifyButton.setText("Verify")
 
     def _show_idle_message(self, text):
+        self.scoreBar.setVisible(False)
+        self.scoreCaption.setVisible(False)
         self.resultDisplay.setText(text)
         self.resultDisplay.setProperty("role", "result-idle")
         self._refresh_result_style()
