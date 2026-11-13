@@ -6,9 +6,7 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
     QVBoxLayout, QFileDialog
 )
-from config.settings import (
-    DECISION_THRESHOLD, SPATIAL_DECISION_THRESHOLD, TEMPORAL_DECISION_THRESHOLD
-)
+from src.gui.styles import DANGER, PRIMARY_LIGHT, SUCCESS, TEXT_LIGHT
 from src.gui.workers import VerifyWorker, ConfirmedSigningWorker
 
 import src.gui.storage as storage
@@ -18,19 +16,16 @@ import src.gui.interfaces as interfaces
 SIGN_AGAIN = "Sign again"
 
 
-# The decision threshold depends on which evidence was used (result["routing"]).
-# "confidence" is a similarity x 100, not a probability, so it is shown as a match score
-# against the threshold, never as "% sure".
-_THRESHOLD_BY_ROUTING = {
-    "multimodal": DECISION_THRESHOLD,
-    "spatial_only": SPATIAL_DECISION_THRESHOLD,
-    "temporal_only": TEMPORAL_DECISION_THRESHOLD,
-}
+def threshold_for(result: dict):
+    """The threshold (0-100, same scale as the score) verify() decided against, or None.
 
-
-def threshold_for(result: dict) -> float:
-    """The threshold (on the same 0-100 scale as the score) this result was judged against."""
-    return _THRESHOLD_BY_ROUTING.get(result.get("routing"), SPATIAL_DECISION_THRESHOLD) * 100
+    verify() returns the threshold it applied as result["threshold"] (0-1), including under
+    step-up (STEP_UP_ACCEPT / STEP_UP_TWO), so the line on the bar is always the real one.
+    "confidence" is a similarity x 100, not a probability: it is shown as a match score
+    against this threshold, never as "% sure".
+    """
+    threshold = result.get("threshold")
+    return None if threshold is None else threshold * 100
 
 
 class ScoreBar(QWidget):
@@ -40,10 +35,10 @@ class ScoreBar(QWidget):
         super().__init__()
         self.setFixedHeight(22)
         self._score = 0.0
-        self._threshold = 0.0
+        self._threshold = None
         self._genuine = False
 
-    def set_values(self, score: float, threshold: float, genuine: bool):
+    def set_values(self, score: float, threshold, genuine: bool):
         self._score, self._threshold, self._genuine = score, threshold, genuine
         self.update()
 
@@ -51,16 +46,16 @@ class ScoreBar(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        track = QRectF(0, 7, w, 8)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#1b3a33"))
-        painter.drawRoundedRect(track, 4, 4)
+        painter.setBrush(QColor(PRIMARY_LIGHT))
+        painter.drawRoundedRect(QRectF(0, 7, w, 8), 4, 4)
         fill = max(0.0, min(100.0, self._score)) / 100.0 * w
-        painter.setBrush(QColor("#1fa37a" if self._genuine else "#e5534b"))
+        painter.setBrush(QColor(SUCCESS if self._genuine else DANGER))
         painter.drawRoundedRect(QRectF(0, 7, fill, 8), 4, 4)
-        x = max(0.0, min(100.0, self._threshold)) / 100.0 * w
-        painter.setPen(QPen(QColor("#ffffff"), 2))
-        painter.drawLine(int(x), 1, int(x), h - 1)
+        if self._threshold is not None:
+            x = max(0.0, min(100.0, self._threshold)) / 100.0 * w
+            painter.setPen(QPen(QColor(TEXT_LIGHT), 2))
+            painter.drawLine(int(x), 1, int(x), h - 1)
 
 
 class VerificationPanel(QWidget):
@@ -268,8 +263,9 @@ class VerificationPanel(QWidget):
         self.resultDisplay.setText(decision)
         self.scoreBar.set_values(confidence, threshold, decision == "Genuine")
         self.scoreBar.setVisible(True)
+        against = f" (line = threshold {threshold:.1f})" if threshold is not None else ""
         self.scoreCaption.setText(
-            f"Match score {confidence:.1f} (line = threshold {threshold:.1f}). "
+            f"Match score {confidence:.1f}{against}. "
             "The score is a similarity, not a probability.")
         self.scoreCaption.setVisible(True)
         role = "result-genuine" if decision == "Genuine" else "result-forged"
