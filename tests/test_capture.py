@@ -138,6 +138,18 @@ def test_tablet_names_reads_the_kernel_name_of_the_node_udev_calls_a_tablet(tmp_
         "XPPen Deco 640 Pen"]
 
 
+def test_tablet_names_skips_a_node_whose_dev_number_is_not_major_colon_minor(tmp_path):
+    """The dev file's text becomes part of a udev path, so only "major:minor" is accepted."""
+    from src.capture.tablet import tablet_names
+
+    sys_root, udev_root = tmp_path / "input", tmp_path / "udev"
+    _input_node(sys_root, udev_root, "event24", 88, "XPPen Deco 640 Pen", ["E:ID_INPUT_TABLET=1"])
+    (sys_root / "event24" / "dev").write_text("../flag\n")       # would read udev/c../flag
+    (udev_root / "c..").mkdir()
+    (udev_root / "c.." / "flag").write_text("E:ID_INPUT_TABLET=1\n")
+    assert tablet_names("Linux", sys_root=str(sys_root), udev_root=str(udev_root)) == []
+
+
 def test_tablet_names_lists_two_different_tablets_and_one_name_for_two_alike(tmp_path):
     from src.capture.tablet import tablet_names
 

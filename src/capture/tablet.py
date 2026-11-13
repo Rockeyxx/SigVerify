@@ -3,6 +3,7 @@ import ctypes
 import glob
 import os
 import platform
+import re
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
 import numpy as np
@@ -16,6 +17,8 @@ from src.data.pen_stream import strokes_to_trajectory
 
 # Wintab 1.1 WTInfo categories and indexes.
 WTI_INTERFACE, IFC_NDEVICES, WTI_DEVICES, DVC_NAME = 1, 4, 100, 1
+# A sysfs dev file holds "major:minor"; that text becomes part of the udev record's path.
+_DEV_NUMBER = re.compile(r"\d+:\d+")
 
 
 def _linux_tablet_names(sys_root, udev_root):
@@ -26,7 +29,9 @@ def _linux_tablet_names(sys_root, udev_root):
         try:
             with open(os.path.join(node, "dev")) as f:
                 major_minor = f.read().strip()
-            with open(os.path.join(udev_root, f"c{major_minor}")) as f:
+            if not _DEV_NUMBER.fullmatch(major_minor):
+                continue
+            with open(os.path.join(udev_root, f"c{major_minor}")) as f:  # skylos: ignore[SKY-D215,SKY-D325] fixed udev root, major_minor checked as digits:digits above
                 if "E:ID_INPUT_TABLET=1" not in f.read().splitlines():
                     continue
             with open(os.path.join(node, "device", "name")) as f:

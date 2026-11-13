@@ -33,7 +33,7 @@ def _tablet_os(root, participants):
     path = os.path.join(root, "manifest.csv")
     if not os.path.exists(path):
         return {}
-    with open(path, newline="") as f:
+    with open(path, newline="") as f:  # skylos: ignore[SKY-D215,SKY-D325] manifest.csv inside the operator-supplied campaign folder
         return {row["file"]: row["os"] or None for row in csv.DictReader(f)
                 if row["modality"] == "tablet"
                 and (participants is None or row["participant"] in participants)}
@@ -114,7 +114,7 @@ def _strokes(rows):
 
 def load_inhouse_tablet_file(path):
     """One saved tablet signature as the [L, 4] trajectory the app made of it at signing."""
-    with open(path, newline="") as f:
+    with open(path, newline="") as f:  # skylos: ignore[SKY-D215,SKY-D325] tablet file enumerated by parse_inhouse from the campaign folder
         strokes = _strokes(csv.DictReader(f))
     if not strokes:
         raise ValueError(f"{path}: no pen-down samples inside the box.")
@@ -145,6 +145,6 @@ def write_inhouse_split(writers, path=INHOUSE_SPLIT_PATH, seed=SEED,
     record = {"seed": seed, "test_fraction": test_fraction,
               "rule": "every forger is test; others by sha256(seed:writer) < test_fraction",
               **inhouse_split(writers, seed, test_fraction)}
-    with open(path, "w") as f:
+    with open(path, "w") as f:  # skylos: ignore[SKY-D215,SKY-D324] INHOUSE_SPLIT_PATH from config/settings.py, or the operator's own path
         json.dump(record, f, indent=1)
     return record
