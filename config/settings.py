@@ -56,6 +56,11 @@ DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 # evaluation and calibration only; no weight trained on it ships.
 BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
 INHOUSE_DIR = os.path.join(DATA_DIR, "inhouse")      # XPPen campaign: <participant>/ + manifest.csv
+# In-house writer split (src/data/campaign.py): every forger is a test writer; each other volunteer
+# goes to test when a hash of SEED and their code falls under this fraction, so nobody changes
+# side as volunteers are added. The record lists participant codes only and is tracked in git.
+INHOUSE_TEST_FRACTION = 0.5
+INHOUSE_SPLIT_PATH = os.path.join(PROJECT_ROOT, "config", "inhouse_split.json")
 
 # The corpora each branch trains on, which are the ones the shipped weights
 # trained on. Scoring a shipped checkpoint takes its corpora and partition from
@@ -144,7 +149,7 @@ MAX_NORMALIZED_XY_MEAN = 0.5            # Unnormalized inputs exceed mean thresh
 NORMALIZED_XY_STD_RANGE = (0.2, 5.0)    # Standard deviation bounds
 TRAJECTORY_DT_MEDIAN_TOLERANCE = 0.10   # Median dt may sit at most 10% off one 10 ms grid step
 WINDOWS_PEN_API = "wintab"               # Windows pen input: "wintab" (tablet driver, full pressure range) or "ink" (Windows Ink, 1024 steps; G10)
-CAPTURE_DEVICE_MODEL = "XP-Pen Deco 640"  # Enrol and verify on this one tablet model (F23, ENG_REPORT G4)
+CAPTURE_NO_DRIVER = "no driver"         # device_model when no tablet name can be read (no tablet, or Windows without Wintab); enrol and verify on one tablet model (F23)
 CAMPAIGN_GENUINE_PER_MODALITY = 12      # Genuine signatures per volunteer on tablet and on paper
 CAMPAIGN_PRACTICE_SIGNINGS = 3          # Tablet practice signatures first; never saved
 CAMPAIGN_BREAK_AFTER = 6                # Short break after this many tablet genuines
@@ -161,6 +166,8 @@ INK_HUE_RANGE = (95, 165)               # Blue ballpoint, OpenCV hue 0-179
 INK_CLUSTER_GAP = 61                    # Ink pieces closer than this (px) belong to one signature
 INK_MIN_PIXELS = 200                    # Fewer ink pixels than this: no signature in the box
 INK_CROP_PAD = 0.08                     # Margin around the ink, as a fraction of its longer side
+INK_LINE_MIN_FRACTION = 0.5             # A straight run this long (share of the box side) may be print
+INK_LINE_MAX_BLUE = 0.25                # ...and is removed when less than this share of it is blue
 
 # ─── Temporal Branch (Online — Siamese LSTM) ──────────────────────────
 # The shipped temporal input contract. `dt` is the inter-sample time gap: 10 ms while writing, longer across pen lifts, exposing pause rhythm to the model. Adding `dt` improved pooled EER from 10.45% to 8.97%.
