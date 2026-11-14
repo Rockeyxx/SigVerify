@@ -97,13 +97,13 @@ This document covers installation, quickstart, project structure, evaluation ben
 - **Ultra-Low Latency Inference** Fast CPU execution (0.5 s from pressing Enter to the fused result with 5 scan and 5 pen references, 0.08 s per check against stored references, after a 1.35 s app start that loads the models) and light memory footprint (~0.39 GB RAM), well within embedded budgets (< 3.0 s, ≤ 4 GB).
 - **Cross-Platform Compatibility** Runs natively on Windows and Linux (x86_64 and ARM64) without native build toolchains.
 
-**Application Layer — Planned, Not Yet Implemented:**
+**Application Layer:**
 
-`src/gui/`, `src/capture/`, and `src/database/` are interface stubs — docstrings and `# TODO` markers, no executable logic. They are not evidence of delivered functionality or standards compliance; see [Standards & Compliance](#standards--compliance).
+`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database_security.py`) and the GUI's storage adapter (`tests/test_storage_gui_api.py`). The GUI screens have no tests, and `src/database/encryption.py` is still a stub (the AES code is in `db_manager.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
 
-- **PyQt5 Desktop Interface** (`src/gui/`) Planned interactive enrollment and verification workflows.
+- **PyQt5 Desktop Interface** (`src/gui/`) Employee login, enrolment, verification, dashboard, clients and profile screens. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). Tablet capture is not wired into the GUI yet: its capture button is disabled, so enrolment uses scanned images only.
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) Planned SQLite template store enforcing AES 256 GCM application-layer encryption and ISO/IEC 24745 compliance (only derived embeddings persisted).
+- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key, and that key is itself encrypted with a key derived (scrypt) from a passphrase kept outside the database: `SIGVER_DB_PASSPHRASE` if set, otherwise a random key file the app creates beside the database on first run. Only embeddings are stored, plus the encrypted file paths of the reference images. Employee passwords are salted scrypt hashes, and an audit log records every verification.
 
 ---
 
@@ -126,12 +126,12 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   │   ├── dataset.py           # Preprocessing, quality gate, pair generation, splits
 │   │   ├── parsers.py           # Loaders for CEDAR, BHSig260, UTSig, SVC2004, SigComp2011
 │   │   └── features.py          # Kinematic feature extraction (deltas, accelerations)
-│   ├── database/                # STUB — interface docstrings + TODOs only
+│   ├── database/                # Encrypted SQLite store (encryption.py is still a stub)
 │   │   ├── db_manager.py
 │   │   └── encryption.py
-│   ├── capture/                 # STUB — interface docstrings + TODOs only
+│   ├── capture/                 # XPPen tablet capture through Qt tablet events
 │   │   └── tablet.py
-│   └── gui/                     # STUB — interface docstrings + TODOs only
+│   └── gui/                     # PyQt5 employee app: login, enrolment, verification
 │       ├── app.py
 │       ├── enrollment.py
 │       └── verification.py
@@ -199,8 +199,7 @@ python tools/verify_my_signature.py --crop \
 ### GUI
 
 A standalone PyQt5 desktop application (`src/gui/`) provides the
-employee-facing interface for enrollment and verification. It is
-implemented and tested on the `mo-gui` branch, pending merge into `main`.
+employee-facing interface for enrollment and verification.
 
 **Employee workflow:**
 
@@ -211,8 +210,8 @@ implemented and tested on the `mo-gui` branch, pending merge into `main`.
    reference signature images. References can be previewed, replaced, or
    removed before saving, and re-opened for editing at any time afterward.
 3. **Verification** — Enter a claimed client ID, select modality (image
-   input currently; dynamic tablet input is scaffolded but disabled until
-   `src/capture/` is implemented), submit a probe signature, and receive
+   input only for now: tablet capture exists in `src/capture/` but is not
+   wired into the GUI yet, so its option is disabled), submit a probe signature, and receive
    the result rendered exactly as `[Genuine/Forged, Confidence %]`.
 4. **Dashboard** — Landing screen after login showing per-employee stats:
    clients enrolled this month, total enrolled clients, total
@@ -222,12 +221,10 @@ implemented and tested on the `mo-gui` branch, pending merge into `main`.
    existing client for editing.
 6. **Profile** — Employee account settings (name, User ID, password).
 
-**Current integration status:** the GUI calls a single interface module
-(`src/gui/interfaces.py`) for every ML and storage operation
-(`get_spatial_embedding`, `get_references`, `store_embedding`, etc.). Those
-functions are currently mocked; wiring them to the real `src/models/` and
-`src/database/` implementations requires no change to the GUI layer itself
-— only `interfaces.py`.
+**Integration:** the GUI reaches the model only through `src/gui/interfaces.py`,
+which wraps one `SignatureService` (`src/verification.py`) running on CPU, and
+reaches storage only through `src/gui/storage.py`, which wraps the encrypted
+database (`src/database/db_manager.py`).
 
 **Screenshots:**
 
@@ -245,18 +242,17 @@ functions are currently mocked; wiring them to the real `src/models/` and
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
 | ![Enrolled clients table](assets/screenshots/clients.png)            | ![Employee profile editing](assets/screenshots/profile.png)            |
 
-**Running the GUI:**
+**Running the GUI** (from the repository root):
 
 ```bash
-cd src/gui
-python app.py
+python -m src.gui.app
 ```
 
 #### The `dt` Channel
 
-`dt` represents the time interval between consecutive sampled points, providing a 4-channel input tensor `[X, Y, Pressure, dt]`.
+`dt` is the time interval between consecutive sampled points, the fourth channel of the input tensor `[X, Y, Pressure, dt]`. It stays near 10 ms while the pen is down and jumps at pen lifts.
 
-Without timing deltas, uniform-rate models lose visibility into pen pauses and air-travel hesitations. Genuine signers execute signatures with continuous motor memory rhythm, whereas forgers hesitate and trace strokes slowly. `dt` remains ~10 ms during continuous pen-down contact and jumps significantly at pen lifts. Across six paired random seeds, adding `dt` improved pooled temporal EER from **10.45% to 8.97%** ($t = 3.25$).
+The shipped weights were trained with `dt`, so it stays in the capture contract, but its measured advantage did not come from pen timing. Over six paired seeds the 4-channel model reads 8.97% pooled EER against 10.45% for `[X, Y, Pressure]`. That gain came from training noise: SVC2004 timestamps are read as float32 in training, which rounds most of its 10 ms steps to 8, 12 or 16 ms. **Retrained on exact timestamps, the 4-channel model reads 11.76%, no better than 3 channels.** Training keeps the float32 read (`TEMPORAL_TRAIN_FLOAT32_PARSE` in `config/settings.py`) so the shipped weights reproduce exactly; evaluation and the tablet use exact timestamps.
 
 ---
 ---
@@ -538,7 +534,7 @@ so enrol and verify on one operating system.
 | **ISO/IEC 9075-1:2023**  | Structured relational SQLite database schema                             | **Architected** |
 | **ISO/IEC 18033-1:2021** | Application-layer AES-256-GCM encryption of stored templates             | **Architected** |
 
-Configuration control and the deviation log are in place; IEEE 730-2014's verification audit log depends on `src/database/`, which is a stub, so that standard is Partial rather than Met. The three "Architected" rows are design targets for the application layer (`src/database/`, currently a stub) — not properties the current codebase has, since nothing is persisted yet. Only ISO/IEC 23053:2022 is demonstrable from the code as it stands.
+Configuration control and the deviation log are in place. `src/database/db_manager.py` now stores encrypted templates and a verification audit log in SQLite, and `tests/test_database_security.py` checks its encryption, but no test yet runs the whole system from enrolment to a logged decision, so IEEE 730-2014 stays Partial. The code behind the three "Architected" rows now exists in `src/database/`; they stay Architected until each one is checked against its standard. Only ISO/IEC 23053:2022 has been demonstrated so far.
 
 ---
 

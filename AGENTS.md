@@ -639,7 +639,16 @@ Modality State, Similarity Score, Decision` — plaintext and queryable
 
 ```
 torch, torchvision, opencv-python, numpy, PyQt5,
-cryptography, matplotlib, scikit-learn, Pillow, sqlite3 (stdlib)
+cryptography, matplotlib, scikit-learn, Pillow, scipy, sqlite3 (stdlib)
+```
+
+`scipy` is used by `src/data/features.py` (signal filtering) and `src/data/parsers.py`
+(`.mat` corpus loading).
+
+**Allowed for training and tests only** (never imported by `src/`):
+
+```
+tqdm, pytest
 ```
 
 **Not allowed:**
