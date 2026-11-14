@@ -43,6 +43,10 @@ models/weights/
 # Planning docs (local only, not repo content)
 docs/*
 
+# Understand-Anything knowledge graph: the data lives in the local docs folder and
+# .ua is a symlink to it. No trailing slash: git sees a symlink as a file.
+.ua
+
 # EGM design briefs, drafts and review reports (local only)
 .egm/
 .vibe-wise/
