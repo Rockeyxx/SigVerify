@@ -57,7 +57,9 @@ FINAL_DECISIONS = ("Genuine", "Forged")
 # Cap on spatial references per client, enrolled + added (AGENTS.md: the measured
 # arms held 6 to 8).
 MAX_SPATIAL_REFERENCES = 8
- 
+# Same cap for the pen set (the AGENTS.md cap is per modality).
+MAX_TEMPORAL_REFERENCES = 8
+
 _db = None
 _db_lock = threading.Lock()
  
@@ -358,23 +360,36 @@ def get_reference_embeddings(client_id: str, employee_username: str = None) -> t
     return list(record["spatial_embeddings"]), record["spatial_origin"] or "scan"
  
  
-def add_confirmed_reference(client_id: str, embedding_b64: str, employee_username: str) -> bool:
-    """Append one confirmed signing's spatial embedding to the client's references.
- 
+def add_confirmed_reference(client_id: str, embedding_b64: str, employee_username: str,
+                            modality: str = "spatial") -> bool:
+    """Append one confirmed signing's embedding to the client's references.
+
+    modality "spatial" (paper, 512 values) or "temporal" (pen, 128 values).
     Call it only when decision == "Genuine", degraded is False, and the employee
     confirmed the person's identity (AGENTS.md). Stores the embedding only,
-    encrypted, in the client's spatial_origin set. When the cap is reached the
-    OLDEST ADDED signing is dropped; the enrolled references are never dropped.
+    encrypted; a spatial one goes in the client's spatial_origin set. When the cap
+    is reached the OLDEST ADDED signing is dropped; the enrolled references are
+    never dropped.
     """
+    if modality not in ("spatial", "temporal"):
+        raise ValueError(f"modality must be 'spatial' or 'temporal', got {modality!r}")
     key = _norm(client_id or "")
     emp_id = _employee_id(employee_username or "")
     if not key or emp_id is None:
         return False
     db = _get_db()
     record = db.get_client_record(key, emp_id)
-    if record is None or record["spatial_origin"] is None:
+    if record is None:
         return False
     raw = _decode_embeddings([embedding_b64], "Confirmed signing")[0]
+    if modality == "temporal":
+        if not record["temporal"]:
+            return False   # no pen set to add to: enrol the client on the tablet first
+        db.add_confirmed_reference(key, "temporal", raw, MODEL_VERSION,
+                                   max_per_set=MAX_TEMPORAL_REFERENCES)
+        return True
+    if record["spatial_origin"] is None or not record["spatial"]:
+        return False
     db.add_confirmed_reference(key, "spatial", raw, MODEL_VERSION,
                                spatial_origin=record["spatial_origin"],
                                max_per_set=MAX_SPATIAL_REFERENCES)

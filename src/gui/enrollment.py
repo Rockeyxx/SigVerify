@@ -85,7 +85,12 @@ class EnrollmentPanel(QWidget):
         super().__init__()
         self.current_employee_username = None
         self.image_references = []
+        # Stored pen embeddings (base64) of a loaded client. Kept on re-enrolment when no
+        # new pen signatures are captured.
         self.dynamic_references = []
+        # Raw [L, 4] trajectories captured in this session. Held in memory only until the
+        # enrolment is saved, never written anywhere (ISO/IEC 24745).
+        self.pen_signatures = []
         self._selected_new_image_path = None
 
         layout = QVBoxLayout()
@@ -114,7 +119,8 @@ class EnrollmentPanel(QWidget):
         self.clientStatusLabel.setProperty("role", "muted")
         layout.addWidget(self.clientStatusLabel)
 
-        section2 = QLabel(f"IMAGE REFERENCES (exactly {REQUIRED_IMAGE_REFERENCES} required)")
+        section2 = QLabel(f"IMAGE REFERENCES ({REQUIRED_IMAGE_REFERENCES} photos, "
+                          "or none for a tablet-only client)")
         section2.setProperty("role", "section")
         layout.addWidget(section2)
 
@@ -147,16 +153,16 @@ class EnrollmentPanel(QWidget):
         self.imageCountLabel.setProperty("role", "muted")
         layout.addWidget(self.imageCountLabel)
 
-        section3 = QLabel(f"DYNAMIC REFERENCES (exactly {REQUIRED_DYNAMIC_REFERENCES} required)")
+        section3 = QLabel(f"PEN REFERENCES ({REQUIRED_DYNAMIC_REFERENCES} signings on the tablet)")
         section3.setProperty("role", "section")
         layout.addWidget(section3)
 
-        self.captureDynamicButton = QPushButton("Capture Dynamic Signature (device not connected)")
-        self.captureDynamicButton.setEnabled(False)
+        self.captureDynamicButton = QPushButton("Capture Pen Signatures")
+        self.captureDynamicButton.clicked.connect(self.capture_pen_signatures)
         layout.addWidget(self.captureDynamicButton)
 
-        self.dynamicCountLabel = QLabel(f"0/{REQUIRED_DYNAMIC_REFERENCES} dynamic references — pending tablet integration")
-        self.dynamicCountLabel.setProperty("role", "warning")
+        self.dynamicCountLabel = QLabel("")
+        self.dynamicCountLabel.setProperty("role", "muted")
         layout.addWidget(self.dynamicCountLabel)
 
         section4 = QLabel("ACTIONS")
@@ -194,6 +200,7 @@ class EnrollmentPanel(QWidget):
             self.clientStatusLabel.setText("Please enter a client ID first")
             return
 
+        self.pen_signatures = []   # never carry one client's signatures over to another
         any_owner_record = storage.get_client(client_id, employee_username=None)
         own_record = storage.get_client(client_id, employee_username=self.current_employee_username)
 
@@ -217,7 +224,8 @@ class EnrollmentPanel(QWidget):
             self.image_references = []
             self.dynamic_references = []
             self.clientStatusLabel.setText(
-                f"New client '{client_id}' — add {REQUIRED_IMAGE_REFERENCES} image references to enroll"
+                f"New client '{client_id}' — add {REQUIRED_IMAGE_REFERENCES} image references, "
+                f"capture {REQUIRED_DYNAMIC_REFERENCES} pen signatures, or both"
             )
 
         self._refresh_image_list()
@@ -305,6 +313,24 @@ class EnrollmentPanel(QWidget):
 
     def _update_counts(self):
         self.imageCountLabel.setText(f"{len(self.image_references)}/{REQUIRED_IMAGE_REFERENCES} image references")
+        if self.pen_signatures:
+            text = f"{len(self.pen_signatures)}/{REQUIRED_DYNAMIC_REFERENCES} pen signatures"
+        elif self.dynamic_references:
+            text = (f"{len(self.dynamic_references)} stored pen references "
+                    "(kept unless you capture new ones)")
+        else:
+            text = f"0/{REQUIRED_DYNAMIC_REFERENCES} pen signatures"
+        self.dynamicCountLabel.setText(text)
+
+    def capture_pen_signatures(self):
+        """Open the tablet window for the K enrolment signings (issue #23, item 2)."""
+        from src.capture.collect import collect_signatures
+        captured = collect_signatures(count=REQUIRED_DYNAMIC_REFERENCES, parent=self)
+        if captured is None:      # window closed: keep whatever was there
+            return
+        self.pen_signatures = list(captured["signatures"])
+        self.statusLabel.setText("")
+        self._update_counts()
 
     def run_enrollment(self):
         client_id = self.clientIdInput.text().strip()
@@ -313,10 +339,17 @@ class EnrollmentPanel(QWidget):
             self._set_status_error("Please enter a client ID")
             return
 
-        if len(self.image_references) != REQUIRED_IMAGE_REFERENCES:
+        n_images, n_pen = len(self.image_references), len(self.pen_signatures)
+        if n_images not in (0, REQUIRED_IMAGE_REFERENCES):
             self._set_status_error(
                 f"Exactly {REQUIRED_IMAGE_REFERENCES} image references required "
-                f"(currently {len(self.image_references)})"
+                f"(currently {n_images}), or none for a tablet-only client"
+            )
+            return
+        if n_images == 0 and n_pen == 0:
+            self._set_status_error(
+                f"Add {REQUIRED_IMAGE_REFERENCES} image references, capture "
+                f"{REQUIRED_DYNAMIC_REFERENCES} pen signatures, or both"
             )
             return
 
@@ -326,23 +359,24 @@ class EnrollmentPanel(QWidget):
         self.statusLabel.setText("")
 
         self._pending_client_id = client_id
-        self._enroll_worker = EnrollWorker(self.image_references)
+        self._enroll_worker = EnrollWorker(self.image_references, self.pen_signatures)
         self._enroll_worker.finished.connect(self._on_enroll_success)
         self._enroll_worker.failed.connect(self._on_enroll_failure)
         self._enroll_worker.start()
 
     def _on_enroll_success(self, result: dict):
         """
-        result = {"embeddings": [base64 str, ...], "spatial_origin": "scan"}
-        — the shape interfaces.enroll_client() returns since main added
-        the spatial_origin requirement.
+        result = interfaces.enroll_client():
+        {"embeddings": [...], "dynamic_embeddings": [...], "spatial_origin": "scan"}
         """
         client_id = self._pending_client_id
         embeddings_b64 = result["embeddings"]
         spatial_origin = result["spatial_origin"]
+        # New pen signatures replace the stored pen set; with none captured, keep it.
+        pen_b64 = result.get("dynamic_embeddings") or list(self.dynamic_references)
 
         success, message = storage.save_client_enrollment(
-            client_id, self.image_references, self.dynamic_references,
+            client_id, self.image_references, pen_b64,
             self.current_employee_username or "unknown",
             spatial_embeddings=embeddings_b64,
             spatial_origin=spatial_origin,
@@ -355,10 +389,14 @@ class EnrollmentPanel(QWidget):
             self._set_status_error(message)
             return
 
-        self._set_status_success(f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} embeddings)")
+        self._set_status_success(
+            f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} image, "
+            f"{len(pen_b64)} pen embeddings)")
         self.client_list_changed.emit()
 
         self.image_references = []
+        self.dynamic_references = []
+        self.pen_signatures = []    # the raw signatures are dropped once embedded
         self._refresh_image_list()
         self._update_counts()
 
@@ -382,6 +420,7 @@ class EnrollmentPanel(QWidget):
             storage.delete_client(client_id)
             self.image_references = []
             self.dynamic_references = []
+            self.pen_signatures = []
             self._refresh_image_list()
             self._update_counts()
             self._set_status_success(f"Deleted client '{client_id}'")
