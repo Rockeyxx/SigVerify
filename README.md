@@ -79,7 +79,7 @@ This document covers installation, quickstart, project structure, evaluation ben
          │  S < τ → Forged      │
          └──────────┬───────────┘
                     ▼
-         [Genuine/Forged, Confidence %]
+         [Genuine/Forged, match score vs τ]
 ```
 
 **Single-Modality Fallback:** When only one input modality is provided, the system automatically routes to that branch ($\alpha = 1.0$ for spatial image verification, $\alpha = 0.0$ for temporal trajectory verification).
@@ -97,13 +97,11 @@ This document covers installation, quickstart, project structure, evaluation ben
 - **Ultra-Low Latency Inference** Fast CPU execution (0.5 s from pressing Enter to the fused result with 5 scan and 5 pen references, 0.08 s per check against stored references, after a 1.35 s app start that loads the models) and light memory footprint (~0.39 GB RAM), well within embedded budgets (< 3.0 s, ≤ 4 GB).
 - **Cross-Platform Compatibility** Runs natively on Windows and Linux (x86_64 and ARM64) without native build toolchains.
 
-**Application Layer — Planned, Not Yet Implemented:**
+**Application Layer:**
 
-`src/gui/`, `src/capture/`, and `src/database/` are interface stubs — docstrings and `# TODO` markers, no executable logic. They are not evidence of delivered functionality or standards compliance; see [Standards & Compliance](#standards--compliance).
-
-- **PyQt5 Desktop Interface** (`src/gui/`) Planned interactive enrollment and verification workflows.
+- **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts, client enrolment and verification from paper photos, tablet signatures, or both fused. See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) Planned SQLite template store enforcing AES 256 GCM application-layer encryption and ISO/IEC 24745 compliance (only derived embeddings persisted).
+- **Encrypted Biometric Store** (`src/database/`) SQLite template store with AES-256-GCM application-layer encryption. Only derived embeddings are persisted (ISO/IEC 24745).
 
 ---
 
@@ -126,15 +124,20 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   │   ├── dataset.py           # Preprocessing, quality gate, pair generation, splits
 │   │   ├── parsers.py           # Loaders for CEDAR, BHSig260, UTSig, SVC2004, SigComp2011
 │   │   └── features.py          # Kinematic feature extraction (deltas, accelerations)
-│   ├── database/                # STUB — interface docstrings + TODOs only
+│   ├── database/                # Encrypted SQLite template store and audit log
 │   │   ├── db_manager.py
 │   │   └── encryption.py
-│   ├── capture/                 # STUB — interface docstrings + TODOs only
+│   ├── capture/                 # Tablet capture, signing window, ink crop for photos
+│   │   ├── collect.py
+│   │   ├── ink.py
+│   │   ├── pen_input.py
 │   │   └── tablet.py
-│   └── gui/                     # STUB — interface docstrings + TODOs only
-│       ├── app.py
+│   └── gui/                     # PyQt5 desktop application
+│       ├── app.py               # Entry point: python -m src.gui.app
 │       ├── enrollment.py
-│       └── verification.py
+│       ├── verification.py
+│       ├── interfaces.py        # The GUI's only route to the model
+│       └── storage.py           # The GUI's only route to the database
 ├── scripts/
 │   ├── train.py                 # Training entry point (spatial, temporal, or joint)
 │   ├── evaluate.py              # Evaluation, threshold calibration, figure generation
@@ -199,21 +202,23 @@ python tools/verify_my_signature.py --crop \
 ### GUI
 
 A standalone PyQt5 desktop application (`src/gui/`) provides the
-employee-facing interface for enrollment and verification. It is
-implemented and tested on the `mo-gui` branch, pending merge into `main`.
+employee-facing interface for enrollment and verification.
 
 **Employee workflow:**
 
 1. **Register / Login** — Each employee has their own account (full name,
    User ID, password). Enrolled clients are scoped per employee: an
    employee only sees the clients they personally registered.
-2. **Enrollment** — Register a new client by ID and attach exactly 5
-   reference signature images. References can be previewed, replaced, or
-   removed before saving, and re-opened for editing at any time afterward.
-3. **Verification** — Enter a claimed client ID, select modality (image
-   input currently; dynamic tablet input is scaffolded but disabled until
-   `src/capture/` is implemented), submit a probe signature, and receive
-   the result rendered exactly as `[Genuine/Forged, Confidence %]`.
+2. **Enrollment** — Register a new client by ID with 5 reference photos of
+   their signature (blue pen on white paper), 5 signings on the tablet, or
+   both. Photos can be previewed, replaced, or removed before saving, and
+   the client can be reopened for editing at any time afterward.
+3. **Verification** — Enter a claimed client ID, choose paper + pen, paper
+   only, or pen only, give the photo and/or sign on the tablet, and receive
+   the decision with its match score drawn against the decision threshold.
+   The match score is a similarity, not a probability. When the result is
+   Genuine from paper and pen together, the employee can confirm the
+   person's identity to add that visit to the client's references.
 4. **Dashboard** — Landing screen after login showing per-employee stats:
    clients enrolled this month, total enrolled clients, total
    verifications run, and a live genuine-rate indicator.
@@ -221,13 +226,6 @@ implemented and tested on the `mo-gui` branch, pending merge into `main`.
    date, reference count, most recent verification), used to reopen an
    existing client for editing.
 6. **Profile** — Employee account settings (name, User ID, password).
-
-**Current integration status:** the GUI calls a single interface module
-(`src/gui/interfaces.py`) for every ML and storage operation
-(`get_spatial_embedding`, `get_references`, `store_embedding`, etc.). Those
-functions are currently mocked; wiring them to the real `src/models/` and
-`src/database/` implementations requires no change to the GUI layer itself
-— only `interfaces.py`.
 
 **Screenshots:**
 
@@ -247,9 +245,10 @@ functions are currently mocked; wiring them to the real `src/models/` and
 
 **Running the GUI:**
 
+From the repository root:
+
 ```bash
-cd src/gui
-python app.py
+python -m src.gui.app
 ```
 
 #### The `dt` Channel
