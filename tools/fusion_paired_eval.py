@@ -19,6 +19,7 @@ from scripts.evaluate import (alpha_grid_search, compute_eer, compute_far_frr,
 from config.settings import (MODEL_WEIGHTS_DIR, SIGCOMP2011_DIR, SIGCOMP2011_OFFLINE_DIR,
                              TEMPORAL_CHANNELS)
 from src.data.parsers import load_sigcomp2011_file
+from src.verification import nearest_reference_distances
 
 _OFF = os.path.join(SIGCOMP2011_OFFLINE_DIR, "trainingSet", "OfflineSignatures")
 _ON = os.path.join(SIGCOMP2011_DIR, "trainingSet", "OnlineSignatures")
@@ -122,9 +123,8 @@ def paired_scores_per_writer(embedded, num_references=5, seed=42):
         refs, probes = enrollment_draw(rng, len(gen_sp), num_references)
 
         def nearest(probe_bank, ref_bank, idx):
-            d = np.linalg.norm(probe_bank[idx][:, None, :] - ref_bank[refs][None, :, :],
-                               axis=2)
-            return similarity_from_distance(d.min(axis=1))
+            return similarity_from_distance(
+                nearest_reference_distances(probe_bank[idx], ref_bank[refs]))
 
         out[wid] = (nearest(gen_sp, gen_sp, probes),
                     nearest(forg_sp, gen_sp, np.arange(len(forg_sp))),
@@ -193,9 +193,8 @@ def paired_scores(embedded, num_references=5, seed=42):
         refs, probes = enrollment_draw(rng, len(gen_sp), num_references)
 
         def nearest(probe_bank, ref_bank, idx):
-            d = np.linalg.norm(probe_bank[idx][:, None, :] - ref_bank[refs][None, :, :],
-                               axis=2)
-            return similarity_from_distance(d.min(axis=1))
+            return similarity_from_distance(
+                nearest_reference_distances(probe_bank[idx], ref_bank[refs]))
 
         sg.append(nearest(gen_sp, gen_sp, probes))
         tg.append(nearest(gen_tp, gen_tp, probes))

@@ -40,7 +40,7 @@ from src.data.dataset import (
     writer_independent_split,
     check_split_against_record)
 from src.models.siamese import SpatialSiamese, TemporalSiamese
-from src.verification import similarity_from_distance
+from src.verification import nearest_reference_distances, similarity_from_distance
 
 
 def compute_eer(genuine_scores, impostor_scores):
@@ -445,8 +445,7 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
             if not len(probes):
                 continue
             if distance is None:
-                distances = np.linalg.norm(
-                    probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
+                distances = nearest_reference_distances(probes, references)
             else:
                 distances = np.array(
                     [min(distance(probe, reference) for reference in references)
@@ -518,8 +517,7 @@ def znorm_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES, seed=
         for probes, label in ((genuine_probes, 1), (forged, 0)):
             if not len(probes):
                 continue
-            distances = np.linalg.norm(
-                probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
+            distances = nearest_reference_distances(probes, references)
             # Negated: the convention everywhere else is that a larger score
             # means more genuine, and a z-score runs the other way.
             all_scores.append(-(distances - centre) / spread)

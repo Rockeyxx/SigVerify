@@ -31,7 +31,7 @@ from scripts.evaluate import (compute_eer, compute_far_frr, enrollment_draw,
 from src.data.dataset import quality_gate, trajectory_gate
 from src.data.parsers import parse_deepsigndb, parse_sigcomp2011_offline
 from src.verification import (bytes_to_embedding, embed, embedding_to_bytes,
-                              load_model, verify)
+                              load_model, nearest_reference_distances, verify)
 
 # Mapping of unseen evaluation corpora by modality branch.
 UNSEEN_CORPUS = {
@@ -209,8 +209,7 @@ def scores_per_writer(embedded, num_references, seed):
         refs, probes = enrollment_draw(rng, len(genuine_banks[0]), num_references)
 
         def nearest(candidates, bank):
-            distances = np.linalg.norm(candidates[:, None, :] - bank[None, :, :], axis=2)
-            return similarity_from_distance(distances.min(axis=1))
+            return similarity_from_distance(nearest_reference_distances(candidates, bank))
 
         # Every model sees the SAME reference draw, so the averaged score is an
         # ensemble over one enrolment rather than an average over enrolment luck
