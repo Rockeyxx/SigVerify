@@ -21,7 +21,7 @@ import pytest
 import torch
 
 from scripts.evaluate import enrolled_trial_scores
-from tools.dtw_baseline import (dtw_distance, dtw_distance_batch,
+from tools.research.dtw_baseline import (dtw_distance, dtw_distance_batch,
                                 precomputed_distances, trajectory_writers)
 
 

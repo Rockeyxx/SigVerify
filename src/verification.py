@@ -559,7 +559,7 @@ class SignatureService:
                 + cls._ORIGIN_MISMATCH_NOTE)
         return origin
 
-    def _temporal_only_after_origin_mismatch(self, ref_t, probe_trajectory, probe_origin, reference_origin):
+    def _temporal_fallback(self, ref_t, probe_trajectory, probe_origin, reference_origin):
         """Fall back to temporal verification when spatial reference origin does not match probe origin."""
         result = verify(
             temporal=(self.temporal_model, ref_t, probe_trajectory),
@@ -607,7 +607,7 @@ class SignatureService:
                 raise ValueError("Mode 'temporal-multi' requires both reference_temporal and reference_spatial.")
 
             if origin != "render":
-                return self._temporal_only_after_origin_mismatch(
+                return self._temporal_fallback(
                     ref_t, probe_trajectory, probe_origin="render", reference_origin=origin)
             return verify(
                 spatial=(self.spatial_model, ref_s, None),
@@ -623,7 +623,7 @@ class SignatureService:
                 raise ValueError("Mode 'multimodal' requires both reference_spatial and reference_temporal.")
 
             if origin != "scan":
-                return self._temporal_only_after_origin_mismatch(
+                return self._temporal_fallback(
                     ref_t, probe_trajectory, probe_origin="scan", reference_origin=origin)
             return verify(
                 spatial=(self.spatial_model, ref_s, probe_image),

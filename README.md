@@ -115,6 +115,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 ├── LICENSE                      # MIT License
 ├── README.md                    # Project documentation, quickstart & benchmark summary
 ├── requirements.txt             # Python dependencies
+├── pyproject.toml               # Makes the repo installable (pip install -e . --no-deps)
 ├── Signature_Verification_Pipeline.ipynb   # Interactive pipeline demo notebook (outputs stripped)
 ├── config/
 │   └── settings.py              # Central hyperparameters, paths, and decision thresholds
@@ -139,7 +140,8 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   ├── train.py                 # Training entry point (spatial, temporal, or joint)
 │   ├── evaluate.py              # Evaluation, threshold calibration, figure generation
 │   └── benchmark.py             # Held-out writer benchmark & Cohen's d regression harness
-├── tools/                       # Latency profiling and interactive test harnesses
+├── tools/                       # Capture campaign, tablet probe, latency, release reproduction
+│   └── research/                # Tools of closed experiments, kept so their results can be rerun
 ├── models/weights/              # PyTorch .pth weight checkpoints (distributed via GitHub Releases)
 ├── results/                     # Generated ROC, DET, and confusion matrix figures
 └── tests/                       # Automated test suite (unit, regression, and integration tests)
@@ -165,6 +167,7 @@ source venv/bin/activate        # On Linux / macOS
 # venv\Scripts\activate         # On Windows
 
 pip install -r requirements.txt
+pip install -e . --no-deps      # once: lets every script and tool import the project
 ```
 
 ### Running the Application

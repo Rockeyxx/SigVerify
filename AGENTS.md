@@ -768,7 +768,7 @@ Measured on one model, same writers, same draws:
 
 **Rules:**
 
-- **Report both.** `tools/train_synsig2vec.py` prints them side by side per
+- **Report both.** `tools/research/train_synsig2vec.py` prints them side by side per
   corpus; `per_writer_eer()` is the implementation.
 - **Pooled is the honest headline** for this project, because the deployed system
   ships a single `τ`. Per-writer exists for comparison against published work.

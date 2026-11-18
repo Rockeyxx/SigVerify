@@ -23,7 +23,7 @@ import os
 import numpy as np
 import pytest
 
-from tools import cold_start_eval
+from tools.research import cold_start_eval
 
 NFI_SCREEN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "data", "sigcomp2009_clean", "clean_writers.txt")

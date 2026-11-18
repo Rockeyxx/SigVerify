@@ -240,6 +240,10 @@ TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
 # Operational protocol: subjects register K=5 genuine signatures, and probe signatures match against nearest enrolled reference embedding.
 # K = 5 aligns with standard benchmark protocols (SVC2004). See AGENTS.md.
 NUM_ENROLLMENT_REFERENCES = 5
+# Most references one client keeps per modality: the enrolled ones plus confirmed signings
+# added after a Genuine verification, oldest added dropped first. The measured arms held 6 to 8
+# (AGENTS.md); nothing beyond 8 was measured. The GUI storage and the database both read this.
+MAX_REFERENCES = 8
 
 # Number of independent reference draws averaged during evaluation to minimize sample variation.
 ENROLLMENT_TRIALS = 10

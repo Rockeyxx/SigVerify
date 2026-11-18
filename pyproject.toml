@@ -1,0 +1,17 @@
+# Makes the repository installable, so every script and tool can import `config`, `src`,
+# `scripts` and `tools` without editing sys.path. Install once per environment, from the
+# repository root:
+#     pip install -e . --no-deps
+# Dependencies stay in requirements.txt: torch has to come from the CPU index first (README).
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigverify"
+version = "0.10.0"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["config*", "src*", "scripts*", "tools*"]
+namespaces = true

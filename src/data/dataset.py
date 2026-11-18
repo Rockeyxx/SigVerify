@@ -61,7 +61,7 @@ _CHANNEL_NAMES = {
 }.get(TEMPORAL_INPUT_FEATURES, f"{TEMPORAL_INPUT_FEATURES} channels")
 
 
-def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
+def preprocess_image(image, target_size=SPATIAL_INPUT_SIZE):
     """Preprocess a signature image for the Spatial Siamese CNN.
 
     Steps:
@@ -74,32 +74,32 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     Returns:
         float32 numpy array with shape (1, H, W).
     """
-    if isinstance(image_path, np.ndarray):
+    if isinstance(image, np.ndarray):
         # Handle array input (paper bright, ink dark).
         # It is resized and inverted below to match file loading.
-        img = image_path[0] if image_path.ndim == 3 else image_path
+        img = image[0] if image.ndim == 3 else image
         if img.dtype != np.uint8:
             img = np.clip(img, 0, 255).astype(np.uint8)
     else:
-        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise FileNotFoundError(f"Cannot load image: {image_path}")
+        raise FileNotFoundError(f"Cannot load image: {image}")
 
     if SPATIAL_SQUARE_PAD:
         # Pad image onto a square canvas to keep original aspect ratio.
         h, w = img.shape
         max_dim = max(h, w)
-        padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
+        framed = np.full((max_dim, max_dim), 255, dtype=np.uint8)
         y_off = (max_dim - h) // 2
         x_off = (max_dim - w) // 2
-        padded[y_off:y_off + h, x_off:x_off + w] = img
+        framed[y_off:y_off + h, x_off:x_off + w] = img
     else:
         # Scale directly to target input dimensions (155x220).
-        padded = img
+        framed = img
 
     # Resize to spatial dimensions and invert polarity (background 0, ink high).
     # Inversion ensures convolutions focus on signature strokes instead of blank paper.
-    resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
+    resized = cv2.resize(framed, target_size, interpolation=cv2.INTER_AREA)
     normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
 
@@ -184,7 +184,7 @@ def as_spatial_input(sample, allow_trajectory=False):
         f"in [0, 1], or an [L, C] trajectory.")
 
 
-def quality_gate(image_path):
+def quality_gate(image):
     """Assess signature image quality using bounding-box size and sharpness metrics.
 
     Calculates:
@@ -194,8 +194,8 @@ def quality_gate(image_path):
     Returns:
         (passed: bool, details: dict)
     """
-    if isinstance(image_path, np.ndarray):
-        arr = image_path[0] if image_path.ndim == 3 else image_path
+    if isinstance(image, np.ndarray):
+        arr = image[0] if image.ndim == 3 else image
         if arr.dtype != np.uint8:
             if arr.max() <= 1.0:
                 # Inverted float array (background 0, ink 1):
@@ -206,7 +206,7 @@ def quality_gate(image_path):
         else:
             img = arr
     else:
-        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return False, {"error": "Cannot load image"}
 

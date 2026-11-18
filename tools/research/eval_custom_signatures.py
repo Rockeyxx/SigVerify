@@ -2,12 +2,10 @@
 
 import os
 import tempfile
-import sys
 import cv2
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.verification import load_model, embed, _nearest_reference_score
 from config.settings import SPATIAL_DECISION_THRESHOLD, MODEL_WEIGHTS_DIR
 

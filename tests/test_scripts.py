@@ -565,3 +565,54 @@ class TestResumeIsExact:
             assert torch.equal(tensor, b["model_state_dict"][key]), key
         if schedule == "plateau":
             assert a["scheduler_state_dict"] == b["scheduler_state_dict"]
+
+
+class TestPerDatasetReuseEmbeddings:
+    """The per-dataset breakdown must reuse the embeddings of the overall score, not run the
+    model over the same signatures a second time (benchmark.py and evaluate.py)."""
+
+    IDS = ["svc_1", "svc_2", "svc_3", "sigcomp_Dutch_1", "sigcomp_Dutch_2", "sigcomp_Dutch_3"]
+
+    @staticmethod
+    def _fake_embed(calls):
+        def embed(model, writer_samples, writer_ids, branch, device, batch_size=None,
+                  desc=""):
+            calls.append(sorted(writer_ids))
+            out = {}
+            for w in writer_ids:
+                rng = np.random.default_rng(abs(hash(w)) % 2**32)
+                out[w] = {"genuine": rng.normal(size=(8, 4)).astype(np.float32),
+                          "forged": rng.normal(size=(3, 4)).astype(np.float32)}
+            return out
+        return embed
+
+    def _args(self):
+        import argparse
+        return argparse.Namespace(branch="temporal", enroll=5, enroll_trials=3, seed=42,
+                                  batch_size=4, wd_classifier=False, znorm=False, margin=1.0)
+
+    def test_benchmark_breakdown_runs_the_model_once(self, monkeypatch):
+        import scripts.benchmark as benchmark
+
+        calls = []
+        monkeypatch.setattr(benchmark, "embed_writers", self._fake_embed(calls))
+        embedded = benchmark.embed_writers(None, {}, self.IDS, "temporal", "cpu")
+        reused = benchmark.per_dataset_report(self._args(), {}, self.IDS, None, "cpu",
+                                              embedded=embedded)
+        assert len(calls) == 1
+        again = benchmark.per_dataset_report(self._args(), {}, self.IDS, None, "cpu")
+        assert reused.keys() == again.keys() == {"sigcomp_Dutch", "svc"}
+        assert all(reused[k]["eer"] == again[k]["eer"] for k in reused)
+
+    def test_evaluate_breakdown_runs_the_model_once(self, monkeypatch):
+        import scripts.evaluate as evaluate
+
+        calls = []
+        monkeypatch.setattr(evaluate, "embed_writers", self._fake_embed(calls))
+        embedded = evaluate.embed_writers(None, {}, self.IDS, "temporal", "cpu")
+        reused = evaluate.per_dataset_report("temporal", None, {}, self.IDS, 0.5, self._args(),
+                                             "cpu", embedded=embedded)
+        assert len(calls) == 1
+        again = evaluate.per_dataset_report("temporal", None, {}, self.IDS, 0.5, self._args(),
+                                            "cpu")
+        assert reused == again and set(reused) == {"sigcomp_Dutch", "svc"}

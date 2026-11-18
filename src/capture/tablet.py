@@ -4,7 +4,6 @@ import glob
 import os
 import platform
 import re
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
 import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton
@@ -124,22 +123,22 @@ class SignatureCaptureWidget(QWidget):
 
     def confirm_signature(self):
         try:
-            tensor = self.capture_signature()
+            trajectory = self.capture_signature()
         except ValueError as e:  # includes TrajectoryGateError and errors from pen_stream
             print(f"[Rejected] {e}")
             self.label.setText(f"Rejected: {e}")
             return
 
-        passed, details = trajectory_gate(tensor)
+        passed, details = trajectory_gate(trajectory)
         if not passed:
             reason = details.get("error", "failed the input gate")
             print(f"[Rejected] {reason}")
             self.label.setText(f"Rejected: {reason}")
             return
 
-        print(f"\n[Success] Trajectory Shape: {tensor.shape}")
-        self.label.setText(f"Accepted! Points count: {tensor.shape[0]}")
-        self.signature_confirmed.emit(tensor)
+        print(f"\n[Success] Trajectory Shape: {trajectory.shape}")
+        self.label.setText(f"Accepted! Points count: {trajectory.shape[0]}")
+        self.signature_confirmed.emit(trajectory)
         self.canvas.clear_canvas()
 
     def reset_capture(self):
@@ -151,7 +150,7 @@ class SignatureCaptureWidget(QWidget):
         Public API method to retrieve the finalized and normalized signature trajectory.
         Shape: [L, 4] -> (x, y, pressure, dt)
         """
-        return self.canvas.get_final_trajectory_tensor()
+        return self.canvas.trajectory()
 
     def capture_info(self) -> dict:
         """What enrolment stores beside the template, so verification can insist on the same
@@ -242,7 +241,7 @@ class DrawingCanvas(QWidget):
         self.raw_events.clear()
         self.update()
 
-    def get_final_trajectory_tensor(self) -> np.ndarray:
+    def trajectory(self) -> np.ndarray:
         strokes = [s for s in self.completed_strokes_data + [self.current_stroke_data] if s]
         if not strokes:
             raise TrajectoryGateError("No strokes recorded.")

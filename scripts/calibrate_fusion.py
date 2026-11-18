@@ -20,11 +20,9 @@ import argparse
 import glob
 import os
 import re
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (
     ALPHA_DEFAULT,

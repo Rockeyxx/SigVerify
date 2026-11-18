@@ -5,13 +5,10 @@ dynamics against neural network embeddings.
 """
 
 import argparse
-import os
-import sys
 
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
                              TEMPORAL_SPLIT_RATIOS)

@@ -7,11 +7,9 @@ import argparse
 import collections
 import os
 import re
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.evaluate import (alpha_grid_search, compute_eer, compute_far_frr,
                               embed_samples,

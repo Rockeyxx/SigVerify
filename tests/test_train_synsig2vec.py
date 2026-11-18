@@ -16,7 +16,7 @@ import os
 import torch
 from torch import nn
 
-from tools.train_synsig2vec import save_weights
+from tools.research.train_synsig2vec import save_weights
 
 
 def _args():

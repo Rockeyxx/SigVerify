@@ -11,7 +11,6 @@ CLI Examples:
 
 import argparse
 import os
-import sys
 
 import numpy as np
 import torch
@@ -22,7 +21,6 @@ from sklearn.metrics import roc_curve, det_curve, confusion_matrix
 from sklearn.svm import LinearSVC
 from tqdm.auto import tqdm
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
     SEED,
@@ -419,7 +417,7 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
     None, meaning the vectorized L2 over stacked embeddings that every model
     path uses; passing a callable `(probe, reference) -> float` routes scoring
     through it instead. This exists so the DTW baseline
-    (`tools/dtw_baseline.py`) can be measured on the same writers, the same K
+    (`tools/research/dtw_baseline.py`) can be measured on the same writers, the same K
     references and the same RNG sequence as the model it is compared against —
     a second copy of this loop is how two measurements drift apart. The
     callable path costs O(probes x references) Python calls, so it is for
@@ -696,7 +694,8 @@ def dataset_key(writer_id):
     return parts[0]
 
 
-def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args, device):
+def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args, device,
+                       embedded=None):
     """
     Report EER per source writer_samples at the validation-tuned threshold.
 
@@ -723,7 +722,8 @@ def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args,
         # comparable to the pooled figure and to the deployed operating point.
         try:
             genuine, impostor = enrolled_split_scores(
-                model, branch, writer_samples, writers, args, device, desc=name)
+                model, branch, writer_samples, writers, args, device, desc=name,
+                embedded=embedded)
         except ValueError:
             continue
         if len(genuine) == 0 or len(impostor) == 0:
@@ -742,7 +742,7 @@ def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args,
 def enrolled_split_scores(model, branch, writer_samples, writer_ids, args, device,
                           desc="split",
                           num_references=NUM_ENROLLMENT_REFERENCES,
-                          trials=ENROLLMENT_TRIALS):
+                          trials=ENROLLMENT_TRIALS, embedded=None):
     """
     Scores for one writer set under the enrolment protocol.
 
@@ -751,10 +751,16 @@ def enrolled_split_scores(model, branch, writer_samples, writer_ids, args, devic
     **median-EER** draw of `trials`, the same representative-draw rule
     `scripts/benchmark.enrolled_scores` uses.
 
+    `embedded` (from embed_writers) is reused when given, so writers already run
+    through the model are not run again.
+
     Returns (genuine_scores, impostor_scores).
     """
-    embedded = embed_writers(model, writer_samples, writer_ids, branch, device,
-                             args.batch_size, desc=f"{branch} · {desc}")
+    if embedded is None:
+        embedded = embed_writers(model, writer_samples, writer_ids, branch, device,
+                                 args.batch_size, desc=f"{branch} · {desc}")
+    else:
+        embedded = {w: embedded[w] for w in writer_ids}
 
     # A writer needs K+1 genuines and a forgery to contribute both arms, so a
     # small validation split may not support the deployed K. Step K down rather
@@ -802,8 +808,10 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
     # Test is scored under the same protocol τ was tuned on. Mixing them — an
     # enrolment τ applied to pair-scored test scores — would report a FAR/FRR
     # pair that describes no real operating point at all.
+    test_embedded = embed_writers(model, writer_samples, test_ids, branch, device,
+                                  args.batch_size, desc=f"{branch} · test")
     test_genuine, test_impostor = enrolled_split_scores(
-        model, branch, writer_samples, test_ids, args, device, desc="test")
+        model, branch, writer_samples, test_ids, args, device, embedded=test_embedded)
     eer, _ = compute_eer(test_genuine, test_impostor)
     far, frr = compute_far_frr(test_genuine, test_impostor, threshold)
 
@@ -842,7 +850,7 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
               f"{(1.0 - eer)*100:.2f}% at the EER point.")
 
     report["per_dataset"] = per_dataset_report(branch, model, writer_samples, test_ids,
-                                               threshold, args, device)
+                                               threshold, args, device, embedded=test_embedded)
 
     return report, test_genuine, test_impostor
 

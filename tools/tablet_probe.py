@@ -436,7 +436,6 @@ def main():
     folder = Path(args.out or Path.cwd() / time.strftime("probe-run-%Y%m%d-%H%M%S"))
     folder.mkdir(parents=True, exist_ok=True)
     if not LINUX:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from src.capture.pen_input import choose_pen_input
         choose_pen_input(args.pen_api)
     meta = dict(device=node or "none (Qt stream only)", platform=sys.platform,

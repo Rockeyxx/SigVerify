@@ -1,19 +1,17 @@
 """SynSig2Vec training pipeline: synthesis, ranking loss, and verification.
 
-Integrates kinematic synthesis (tools/sigma_lognormal.py) with ranking
-representation learning (tools/sig2vec.py) for writer-independent verification.
+Integrates kinematic synthesis (tools/research/sigma_lognormal.py) with ranking
+representation learning (tools/research/sig2vec.py) for writer-independent verification.
 """
 
 import argparse
 import os
-import sys
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (ENROLLMENT_TRIALS, NUM_ENROLLMENT_REFERENCES,
                              TEMPORAL_SPLIT_RATIOS)
@@ -21,9 +19,9 @@ from scripts.benchmark import dataset_of, separation_report
 from scripts.evaluate import compute_eer, enrolled_trial_scores
 from src.data.dataset import writer_independent_split
 from src.data.parsers import merge_datasets, parse_dataset
-from tools.sig2vec import (FEATURES, Sig2Vec, average_precision_loss,
+from tools.research.sig2vec import (FEATURES, Sig2Vec, average_precision_loss,
                            template_similarity)
-from tools.sigma_lognormal import decompose, distort, reconstruct
+from tools.research.sigma_lognormal import decompose, distort, reconstruct
 
 
 def _decompose_one(sample):

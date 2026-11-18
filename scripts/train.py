@@ -10,7 +10,6 @@ import os
 # cuBLAS picks a non-deterministic reduction unless told this before CUDA starts.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import random
-import sys
 
 import numpy as np
 import torch
@@ -18,7 +17,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
     SEED,
