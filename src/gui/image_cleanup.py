@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from config.settings import INK_MIN_CONTRAST, MIN_BBOX_PIXELS
+from config.settings import INK_MIN_CONTRAST, MIN_BBOX_PIXELS, SPATIAL_INPUT_SIZE
 from src.capture.ink import ink_crop
 
 
@@ -102,17 +102,17 @@ def crop_to_ink(path: str) -> str:
             )
 
         smaller_ink_edge = max(1, min(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1))
-        scale = max(1.0, TARGET_INK_EDGE_PX / smaller_ink_edge)
-
-        if scale > MAX_UPSCALE_FACTOR:
+        if TARGET_INK_EDGE_PX / smaller_ink_edge > MAX_UPSCALE_FACTOR:
             raise SignatureNotFoundError(
                 "The signature is too small in this photo to process reliably. "
                 "Move closer and retake it so the signature fills more of the frame."
             )
 
-        if scale > 1.0:
-            new_size = (int(round(crop.shape[1] * scale)), int(round(crop.shape[0] * scale)))
-            crop = cv2.resize(crop, new_size, interpolation=cv2.INTER_CUBIC)
+        # Resize to the model's input size here, with the same INTER_AREA the model uses
+        # (preprocess_image in src/data/dataset.py, SPATIAL_SQUARE_PAD = False). The model's own
+        # resize then changes nothing, and quality_gate judges the image the model actually sees,
+        # not the soft wide strokes of a full-size phone photo.
+        crop = cv2.resize(crop, SPATIAL_INPUT_SIZE, interpolation=cv2.INTER_AREA)
 
         destination = os.path.join(tempfile.gettempdir(), f"cropped_{uuid.uuid4().hex}.png")
         cv2.imwrite(destination, crop)

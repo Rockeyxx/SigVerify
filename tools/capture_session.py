@@ -28,7 +28,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_FORGERY_ATTEMPTS,  # noqa: E402
                              CAMPAIGN_GENUINE_PER_MODALITY, CAMPAIGN_PRACTICE_SIGNINGS,
                              INHOUSE_DIR, SHEET_DPI, SHEET_GRID, SHEET_MARGIN)
@@ -546,7 +545,7 @@ class CaptureSession(QWidget):
         self._say("genuine_first", i=self.index, n=CAMPAIGN_GENUINE_PER_MODALITY)
         self._show_buttons()
 
-    def _on_signature(self, _tensor):
+    def _on_signature(self, _trajectory):
         events = list(self.capture.canvas.raw_events)   # read before the widget clears its canvas
         if self.stage == "practice":
             self.practised += 1

@@ -22,7 +22,7 @@ import pytest
 pytestmark = pytest.mark.archived
 import torch
 
-from tools.sig2vec import (FEATURES, Sig2Vec, average_precision_loss,
+from tools.research.sig2vec import (FEATURES, Sig2Vec, average_precision_loss,
                            time_functions, velocity_features)
 
 

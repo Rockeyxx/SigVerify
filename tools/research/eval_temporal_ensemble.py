@@ -3,11 +3,9 @@ Evaluate the 6-seed Temporal Ensemble on held-out test writers.
 """
 
 import os
-import sys
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (
     MODEL_WEIGHTS_DIR,

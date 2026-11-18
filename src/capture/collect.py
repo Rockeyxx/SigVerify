@@ -89,10 +89,10 @@ class CollectDialog(QDialog):
         return len(self.signatures) >= self.count
 
     # --- flow ---------------------------------------------------------------
-    def _on_signature(self, tensor):
+    def _on_signature(self, trajectory):
         if self.finished:
             return
-        self.signatures.append(tensor)
+        self.signatures.append(trajectory)
         self.capture.label.setText(self._t("hint"))   # the widget wrote "Accepted!" there
         self._show_stage()
 

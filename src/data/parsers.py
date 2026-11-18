@@ -18,8 +18,6 @@ import re
 
 import numpy as np
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     BHSIG260_DIR,
     BIOSECURID_SONOF_DIR,

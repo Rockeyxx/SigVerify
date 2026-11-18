@@ -22,7 +22,7 @@ import pytest
 # Closed experiment: skipped by default, run in CI (see pytest.ini).
 pytestmark = pytest.mark.archived
 
-from tools.sigma_lognormal import (LognormalStroke, decompose, distort,
+from tools.research.sigma_lognormal import (LognormalStroke, decompose, distort,
                                    reconstruct, stroke_velocity, synthesize)
 
 
@@ -190,7 +190,7 @@ def test_draw_applies_scale_inside_the_annulus():
     """
     import numpy as np
 
-    from tools.sigma_lognormal import _draw
+    from tools.research.sigma_lognormal import _draw
 
     low, high, annulus = -1.0, 1.0, (0.40, 0.65)
     full = [abs(_draw(np.random.default_rng(i), low, high, 1.0, annulus))
@@ -214,7 +214,7 @@ def test_distortion_levels_keep_a_learnable_ranking_margin():
     Level 2's scale is 1.0 by design: `_draw` once ignored `scale` under an
     annulus, so 1.0 is what reproduces the measured baseline.
     """
-    from tools.sigma_lognormal import _ADMISSIBLE, _LEVELS
+    from tools.research.sigma_lognormal import _ADMISSIBLE, _LEVELS
 
     assert set(_LEVELS) == {1, 2}
     assert _LEVELS[1]["annulus"] is None, "G1 draws from an inner band"

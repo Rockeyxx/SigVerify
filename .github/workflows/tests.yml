@@ -49,17 +49,28 @@ jobs:
           # pin below, so the second command leaves it alone.
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+          # The project itself, so scripts and tools import config/src without sys.path edits.
+          pip install -e . --no-deps
+
+      - name: Read the shipped weights tag
+        id: weights
+        run: |
+          # The tag comes from MODEL_VERSION in config/settings.py, the one place
+          # that names the shipped release. A tag written here by hand stayed on
+          # v0.9.0 for two months after v0.10.0 shipped a different spatial weight.
+          tag=$(python -c "from config.settings import MODEL_VERSION; print(MODEL_VERSION)")
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Download release weights (mandatory)
         env:
           GH_TOKEN: ${{ github.token }}
-          WEIGHTS_TAG: v0.9.0
+          WEIGHTS_TAG: ${{ steps.weights.outputs.tag }}
         run: |
           mkdir -p models/weights
           # Pinned to an explicit tag. Untagged, `gh release download` takes
           # whatever release is newest, so cutting a release silently changed
-          # what CI was testing with no commit to point at. Bumping weights is
-          # now a deliberate edit to this line.
+          # what CI was testing with no commit to point at.
           # Each weight travels with its writer-split record (<name>.split.json);
           # benchmark.py and evaluate.py use it to refuse scoring a checkpoint on
           # writers it trained on. Without the record they only warn.
@@ -70,7 +81,7 @@ jobs:
       - name: Download ensemble weights (optional)
         env:
           GH_TOKEN: ${{ github.token }}
-          WEIGHTS_TAG: v0.9.0
+          WEIGHTS_TAG: ${{ steps.weights.outputs.tag }}
         continue-on-error: true
         run: |
           # The six seeds ARE published in the release — an earlier comment here

@@ -43,25 +43,29 @@ models/weights/
 # Planning docs (local only, not repo content)
 docs/*
 
+# Understand-Anything knowledge graph: the data lives in the local docs folder and
+# .ua is a symlink to it. No trailing slash: git sees a symlink as a file.
+.ua
+
 # EGM design briefs, drafts and review reports (local only)
 .egm/
 .vibe-wise/
 
 # Local diagnostics — instruments for answering "why is this number bad",
 # not project code. Nothing imports them and nothing ships with them, so they
-# stay out of the repo; their findings live in docs/SOLUTIONS.md.
-tools/diagnose_error_sources.py
+# stay out of the repo; their findings live in docs/ENG_REPORT.md.
+tools/research/diagnose_error_sources.py
 
 # One-off evaluation arms from 2026-08-18/19. Each answered a single question,
 # the answer is recorded, and nothing imports them. Kept on
 # disk for reference, out of the repo for the same reason as the line above.
 # (fusion_paired_eval.py is deliberately NOT here: its +5.07-point result is the
 # open lever, and it gets re-run the moment paired capture exists.)
-tools/enroll_augment_eval.py
-tools/per_user_norm_eval.py
-tools/scoring_variants_eval.py
-tools/user_threshold_eval.py
-tools/diagnose_synthesis_gap.py
+tools/research/enroll_augment_eval.py
+tools/research/per_user_norm_eval.py
+tools/research/scoring_variants_eval.py
+tools/research/user_threshold_eval.py
+tools/research/diagnose_synthesis_gap.py
 tests/test_enroll_augment.py
 tests/test_user_threshold.py
 tests/test_diagnose_synthesis_gap.py

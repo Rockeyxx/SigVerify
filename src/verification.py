@@ -113,6 +113,15 @@ def similarity_from_distance(distance):
     return 1.0 / (1.0 + distance)
 
 
+def nearest_reference_distances(probes, references):
+    """Distance from each probe embedding [N, D] to its nearest reference [K, D], shape [N].
+
+    The one place the nearest-reference rule is written; verify(), the scripts and the
+    tools all score through it, so the production rule and the measured one cannot drift.
+    """
+    return np.linalg.norm(probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
+
+
 def _nearest_reference_score(references, probe_embedding):
     """
     Compute similarity between a probe embedding and a set of enrolled references.
@@ -126,8 +135,8 @@ def _nearest_reference_score(references, probe_embedding):
             "argument rather than the caller's empty enrolment.")
 
     stacked = np.vstack([np.asarray(r, dtype=EMBEDDING_DTYPE) for r in references])
-    distances = np.linalg.norm(stacked - probe_embedding[None, :], axis=1)
-    return float(similarity_from_distance(distances.min()))
+    distance = nearest_reference_distances(probe_embedding[None, :], stacked)[0]
+    return float(similarity_from_distance(distance))
 
 
 def _pressure_is_imputed(trajectory):
@@ -323,11 +332,22 @@ class TemporalEnsemble:
     def __len__(self) -> int:
         return len(self.models)
 
-    def __iter__(self):
-        return iter(self.models)
 
-    def __getitem__(self, index):
-        return self.models[index]
+def _ensemble_paths(temporal_lstm_path=None, seeds=None):
+    """Member checkpoint paths: one per seed, in the folder of temporal_lstm_path (a file or a
+    folder), or in MODEL_WEIGHTS_DIR when no path is given."""
+    from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
+                                 TEMPORAL_ENSEMBLE_TEMPLATE)
+
+    if not temporal_lstm_path:
+        weights_dir = MODEL_WEIGHTS_DIR
+    elif os.path.isdir(temporal_lstm_path):
+        weights_dir = temporal_lstm_path
+    else:
+        weights_dir = os.path.dirname(temporal_lstm_path)
+    seeds = TEMPORAL_ENSEMBLE_SEEDS if seeds is None else seeds
+    return [os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
+            for seed in seeds]
 
 
 def load_temporal_ensemble(
@@ -339,23 +359,7 @@ def load_temporal_ensemble(
     Load an ensemble of temporal checkpoints from multiple random seeds.
     Returns None if any checkpoint file in the ensemble is missing.
     """
-    from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
-                                 TEMPORAL_ENSEMBLE_TEMPLATE)
-
-    seeds = ensemble_seeds if ensemble_seeds is not None else TEMPORAL_ENSEMBLE_SEEDS
-    if temporal_lstm_path:
-        weights_dir = (
-            os.path.dirname(temporal_lstm_path)
-            if not os.path.isdir(temporal_lstm_path)
-            else temporal_lstm_path
-        )
-    else:
-        weights_dir = MODEL_WEIGHTS_DIR
-
-    paths = [
-        os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
-        for seed in seeds
-    ]
+    paths = _ensemble_paths(temporal_lstm_path, ensemble_seeds)
     if not all(os.path.exists(p) for p in paths):
         return None
 
@@ -426,35 +430,18 @@ class SignatureService:
 
     def _load_temporal_ensemble(self):
         """Load all temporal ensemble checkpoints or raise an error if any are missing."""
-        from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
-                                     TEMPORAL_ENSEMBLE_TEMPLATE)
-
-        ensemble = load_temporal_ensemble(
-            self.temporal_weights,
-            ensemble_seeds=TEMPORAL_ENSEMBLE_SEEDS,
-            device=self.device,
-        )
-        if ensemble is None:
-            weights_dir = (
-                os.path.dirname(self.temporal_weights)
-                if not os.path.isdir(self.temporal_weights)
-                else self.temporal_weights
-            ) or MODEL_WEIGHTS_DIR
-            paths = [
-                os.path.join(weights_dir, TEMPORAL_ENSEMBLE_TEMPLATE.format(seed=seed))
-                for seed in TEMPORAL_ENSEMBLE_SEEDS
-            ]
-            missing = [p for p in paths if not os.path.exists(p)]
+        paths = _ensemble_paths(self.temporal_weights)
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
             raise FileNotFoundError(
-                f"use_temporal_ensemble=True needs all "
-                f"{len(TEMPORAL_ENSEMBLE_SEEDS)} member checkpoints; "
+                f"use_temporal_ensemble=True needs all {len(paths)} member checkpoints; "
                 f"{len(missing)} are missing:\n  "
                 + "\n  ".join(missing)
-                + "\nThese are not in the public release. Either fetch them or "
+                + "\nThey are release assets (temporal_dt_s4*.pth). Either fetch them or "
                   "construct the service with use_temporal_ensemble=False, which "
                   "runs the single shipped model deliberately rather than by "
                   "accident.")
-        return ensemble
+        return TemporalEnsemble([load_model("temporal", p, device=self.device) for p in paths])
 
     def _ensure_embeddings(self, refs: list[bytes | np.ndarray] | None) -> list[np.ndarray]:
         if not refs:
@@ -572,7 +559,7 @@ class SignatureService:
                 + cls._ORIGIN_MISMATCH_NOTE)
         return origin
 
-    def _temporal_only_after_origin_mismatch(self, ref_t, probe_trajectory, probe_origin, reference_origin):
+    def _temporal_fallback(self, ref_t, probe_trajectory, probe_origin, reference_origin):
         """Fall back to temporal verification when spatial reference origin does not match probe origin."""
         result = verify(
             temporal=(self.temporal_model, ref_t, probe_trajectory),
@@ -620,7 +607,7 @@ class SignatureService:
                 raise ValueError("Mode 'temporal-multi' requires both reference_temporal and reference_spatial.")
 
             if origin != "render":
-                return self._temporal_only_after_origin_mismatch(
+                return self._temporal_fallback(
                     ref_t, probe_trajectory, probe_origin="render", reference_origin=origin)
             return verify(
                 spatial=(self.spatial_model, ref_s, None),
@@ -636,7 +623,7 @@ class SignatureService:
                 raise ValueError("Mode 'multimodal' requires both reference_spatial and reference_temporal.")
 
             if origin != "scan":
-                return self._temporal_only_after_origin_mismatch(
+                return self._temporal_fallback(
                     ref_t, probe_trajectory, probe_origin="scan", reference_origin=origin)
             return verify(
                 spatial=(self.spatial_model, ref_s, probe_image),

@@ -253,7 +253,9 @@ stored references takes 0.08 s (0.28 s on one core); never quote it as the budge
   `src/data/features.py` already emits `dx`, `dy`, `ddx`, `ddy`. Appending deltas
   on top differentiates them again — `ddx` becomes a *third* derivative of raw
   tablet coordinates, which is amplified noise — and doubles the input width for
-  nothing. `--temporal-features derived` sets this automatically.
+  nothing. `train.py` no longer trains derived features (the option is in commit
+  3c80324); `benchmark.py --temporal-features derived` still scores such a
+  checkpoint, and the flag comes from the checkpoint.
 
   **The bug was real; it was not the explanation.** Re-run at three seeds with
   deltas correctly off, the derived features measured **14.99% pooled** against a
@@ -639,7 +641,16 @@ Modality State, Similarity Score, Decision` — plaintext and queryable
 
 ```
 torch, torchvision, opencv-python, numpy, PyQt5,
-cryptography, matplotlib, scikit-learn, Pillow, sqlite3 (stdlib)
+cryptography, matplotlib, scikit-learn, Pillow, scipy, sqlite3 (stdlib)
+```
+
+`scipy` is used by `src/data/features.py` (signal filtering) and `src/data/parsers.py`
+(`.mat` corpus loading).
+
+**Allowed for training and tests only** (never imported by `src/`):
+
+```
+tqdm, pytest
 ```
 
 **Not allowed:**
@@ -757,7 +768,7 @@ Measured on one model, same writers, same draws:
 
 **Rules:**
 
-- **Report both.** `tools/train_synsig2vec.py` prints them side by side per
+- **Report both.** `tools/research/train_synsig2vec.py` prints them side by side per
   corpus; `per_writer_eer()` is the implementation.
 - **Pooled is the honest headline** for this project, because the deployed system
   ships a single `τ`. Per-writer exists for comparison against published work.

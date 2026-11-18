@@ -15,7 +15,8 @@ TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
 # Release tag of the two shipped weights above; both are byte-identical to that
 # release's assets. Storage saves it beside every template, and a template whose
 # tag differs was embedded by other weights and needs re-enrolment. Bump it
-# whenever either shipped weight changes (ship-model-release step 5).
+# whenever either shipped weight changes (ship-model-release step 5). CI downloads
+# the weights of this release, so it always tests what ships.
 MODEL_VERSION = "v0.10.0"
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 
@@ -205,22 +206,9 @@ PAIRS_IMPOSTOR_PER_WRITER = 276
 # Benchmark evaluation always scores strictly against skilled forgeries per AGENTS.md.
 RANDOM_IMPOSTOR_RATIO = 0.5
 
-# UTSig forgery types added to the TRAINING writers' negatives. Validation and test
-# always keep skilled forgeries only. On disk each writer also has 36 Simple and
-# 3 Opposite Hand forgeries that the shipped recipe never used.
-UTSIG_TRAIN_FORGERY_TYPES = ("Skilled",)
-# Hold each UTSig training writer at the pair count its skilled forgeries alone
-# give (27 x 6 = 162 per side), so adding forgery types does not also add pairs.
-UTSIG_TRAIN_HOLD_PAIRS = False
-
 # ─── Loss & Training ─────────────────────────────────────────────────
 CONTRASTIVE_MARGIN = 1.0
 HARD_NEGATIVE_RATIO = 0.5               # Fraction of impostor terms kept by hard-negative mining
-# Research arms for the time gap, off in the shipped recipe: a triplet term
-# (anchor genuine, positive genuine, negative skilled forgery) added to the
-# contrastive loss, and temporal positives drawn only across recording sessions.
-TEMPORAL_TRIPLET_WEIGHT = 0.0
-TEMPORAL_CROSS_SESSION_POSITIVES = False
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
 NUM_EPOCHS = 50
@@ -252,6 +240,10 @@ TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER = 180
 # Operational protocol: subjects register K=5 genuine signatures, and probe signatures match against nearest enrolled reference embedding.
 # K = 5 aligns with standard benchmark protocols (SVC2004). See AGENTS.md.
 NUM_ENROLLMENT_REFERENCES = 5
+# Most references one client keeps per modality: the enrolled ones plus confirmed signings
+# added after a Genuine verification, oldest added dropped first. The measured arms held 6 to 8
+# (AGENTS.md); nothing beyond 8 was measured. The GUI storage and the database both read this.
+MAX_REFERENCES = 8
 
 # Number of independent reference draws averaged during evaluation to minimize sample variation.
 ENROLLMENT_TRIALS = 10
@@ -322,6 +314,12 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 # then confirmed on the 14 NFI writers, who took no part in choosing it.
 ALPHA_DEFAULT = 0.4                     # Measured: SONOF optimum; equal weighting (0.5) scored worse on both
 ALPHA_GRID_STEP = 0.05
+# The 14 screened SigComp2009 (NFI) writers that check the fused alpha and tau after they
+# are chosen on SONOF (ENG_REPORT K1, F14, F16). Neither branch trained on NFI, and each
+# signing has a scan and a pen file with the same name, so the pairing is exact.
+NFI_FUSION_WRITERS = ("nfi_002", "nfi_008", "nfi_016", "nfi_018", "nfi_024", "nfi_035",
+                      "nfi_044", "nfi_063", "nfi_070", "nfi_071", "nfi_077", "nfi_085",
+                      "nfi_086", "nfi_089")
 
 # Signings asked for at verification, of each kind (paper and tablet). The GUI reads this as its
 # default and may offer it as a toggle (1 or 2); verify() averages however many it is given, and
