@@ -31,7 +31,7 @@ def dump_model_input(path, destination):
 def crop_to_ink(path, destination):
     """Crop a phone photo exactly as the app does (src/gui/image_cleanup.crop_to_ink, which
     uses ink_crop) and move the result to destination, so the tool scores what the app scores."""
-    shutil.move(app_crop_to_ink(path), destination)
+    shutil.move(app_crop_to_ink(path), destination)  # skylos: ignore[SKY-D215] operator-supplied --crop-dir
     print(f"  cropped {os.path.basename(path)} -> {destination}")
     return destination
 
