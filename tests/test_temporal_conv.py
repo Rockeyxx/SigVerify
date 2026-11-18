@@ -3,7 +3,6 @@ import pytest
 import torch
 
 from config.settings import TEMPORAL_INPUT_FEATURES
-from scripts.train import parse_args
 from src.models.siamese import TemporalSiamese
 
 
@@ -49,8 +48,3 @@ class TestConvBeforeLstm:
         with pytest.raises(ValueError):
             TemporalSiamese(conv_filters=8, conv_kernel=4)
 
-    def test_training_flags_default_to_the_shipped_model(self):
-        base = ["--branch", "temporal", "--data-dir", "x"]
-        assert parse_args(base).conv_filters == 0
-        args = parse_args(base + ["--conv-filters", "32", "--conv-kernel", "5"])
-        assert (args.conv_filters, args.conv_kernel) == (32, 5)

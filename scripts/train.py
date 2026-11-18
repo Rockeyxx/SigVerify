@@ -27,7 +27,7 @@ from config.settings import (
     SPATIAL_EMBEDDING_DIM, TEMPORAL_EMBEDDING_DIM,
     CONTRASTIVE_MARGIN, LEARNING_RATE, BATCH_SIZE,
     NUM_EPOCHS, WEIGHT_DECAY, MODEL_WEIGHTS_DIR,
-    TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS, TEMPORAL_CONV_FILTERS, TEMPORAL_CONV_KERNEL,
+    TEMPORAL_HIDDEN_SIZE, TEMPORAL_NUM_LAYERS,
     PRESSURE_DROPOUT_RATE, HARD_NEGATIVE_RATIO, SPATIAL_HEAD_DROPOUT,
     SPATIAL_TRUNK, SPATIAL_CONV_DROPOUT, SPATIAL_FC_HIDDEN,
     SPATIAL_GRAD_CHECKPOINT, SPATIAL_INPUT_SIZE,
@@ -37,18 +37,15 @@ from config.settings import (
     SPATIAL_SPLIT_RATIOS, TEMPORAL_SPLIT_RATIOS,
     TEMPORAL_PAIRS_GENUINE_PER_WRITER, TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER,
     TEMPORAL_AUGMENT, SPATIAL_AUGMENT, RANDOM_IMPOSTOR_RATIO, TEMPORAL_TRAIN_FLOAT32_PARSE,
-    UTSIG_TRAIN_FORGERY_TYPES, UTSIG_TRAIN_HOLD_PAIRS,
-    TEMPORAL_TRIPLET_WEIGHT, TEMPORAL_CROSS_SESSION_POSITIVES,
 )
 from src.data.dataset import (
     SpatialSignatureDataset, TemporalSignatureDataset,
     collate_temporal_pairs, generate_skilled_pairs, pin_holdout,
     writer_independent_split,
     save_split_record, split_record_path)
-from src.data.features import NUM_DERIVED_CHANNELS
 from src.data.parsers import (
     EXTRA_CHANNEL_SUPPORT, MAX_GAP_MS, is_known_dataset, is_temporal_dataset, merge_datasets,
-    parse_dataset, parse_utsig, supports_extra_channel,
+    parse_dataset, supports_extra_channel,
     svc2004_has_pressure,
 )
 from src.models.siamese import (
@@ -99,6 +96,17 @@ class EarlyStopping:
 
 
 
+# Options for closed experiments were removed on 18 November 2026. Each one was measured
+# worse and closed in docs/ENG_REPORT.md:
+#   --triplet-weight, --triplet-margin, --cross-session-positives   time-gap arms (F32 to F37)
+#   --conv-filters, --conv-kernel                                    conv before the LSTM (C15)
+#   --utsig-forgery-types, --utsig-hold-pairs                        UTSig forgery types (D11)
+#   --temporal-features derived                                      derived time functions
+# They are all in commit 3c80324. To rerun one of those arms:
+#   git show 3c80324:scripts/train.py > /tmp/train_3c80324.py   (and the matching
+#   src/data/dataset.py and src/models/siamese.py from the same commit)
+# TemporalSiamese still loads a checkpoint that has a conv stage, and benchmark.py
+# still scores a derived-features checkpoint, so the archived weights stay usable.
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train Siamese signature verification models")
     parser.add_argument("--branch", choices=["spatial", "temporal"], required=True,
@@ -117,12 +125,6 @@ def parse_args(argv=None):
                         help="Temporal LSTM width. 256x2 layers is ~2.2M parameters on "
                              "62 training writers; TA-RNN uses 46+46->23 memory blocks "
                              "and DsDTW a GRU-128, so smaller is worth measuring")
-    parser.add_argument("--conv-filters", type=int, default=TEMPORAL_CONV_FILTERS,
-                        help="Research arm (temporal): filters of a Conv1d stage whose output is "
-                             "joined to each sample before the LSTM. 0 (default) is the shipped "
-                             "model. Recoverable from the checkpoint.")
-    parser.add_argument("--conv-kernel", type=int, default=TEMPORAL_CONV_KERNEL,
-                        help="Samples that conv stage spans (odd). Recoverable from the checkpoint.")
     parser.add_argument("--num-layers", type=int, default=TEMPORAL_NUM_LAYERS,
                         help="Temporal LSTM depth. Inter-layer dropout only exists when "
                              "this is above 1, so dropping to 1 removes that too")
@@ -238,18 +240,6 @@ def parse_args(argv=None):
     parser.add_argument("--hard-negative-ratio", type=float, default=HARD_NEGATIVE_RATIO,
                         help="Fraction of impostor terms kept by mining. Also never "
                              "swept. 1.0 disables mining")
-    parser.add_argument("--triplet-weight", type=float, default=TEMPORAL_TRIPLET_WEIGHT,
-                        help="Temporal only, research. Adds this weight times a "
-                             "triplet hinge (anchor genuine, positive genuine, "
-                             "negative skilled forgery of the same writer) to the "
-                             "contrastive loss. 0 is the shipped recipe")
-    parser.add_argument("--triplet-margin", type=float, default=None,
-                        help="Triplet hinge margin; defaults to --margin")
-    parser.add_argument("--cross-session-positives", action="store_true",
-                        default=TEMPORAL_CROSS_SESSION_POSITIVES,
-                        help="Temporal only, research. Training positives of a writer "
-                             "recorded over two or more sessions are drawn only across "
-                             "sessions, at the same pair count. Validation is unchanged")
     parser.add_argument("--holdout-writers", nargs="+", metavar="ID", default=None,
                         help="Writer IDs forced into the test partition. Adding a "
                              "corpus otherwise reshuffles every writer, moving the "
@@ -264,26 +254,11 @@ def parse_args(argv=None):
                              "keeps pure skilled-forgery pairs. At 0 the encoder "
                              "never learns that two different people should be far "
                              "apart, which measurement showed it does not infer")
-    parser.add_argument("--utsig-forgery-types", nargs="+", metavar="TYPE",
-                        default=list(UTSIG_TRAIN_FORGERY_TYPES),
-                        help="UTSig forgery folders (Skilled, Simple, 'Opposite Hand') "
-                             "used as negatives for the TRAINING writers. Validation "
-                             "and test keep skilled forgeries only")
-    parser.add_argument("--utsig-hold-pairs", action="store_true",
-                        default=UTSIG_TRAIN_HOLD_PAIRS,
-                        help="Hold each UTSig training writer at its skilled-only pair "
-                             "count, so extra forgery types do not also add pairs")
     parser.add_argument("--lr-schedule", choices=["none", "plateau"], default="none",
                         help="'plateau' halves the learning rate after 2 epochs "
                              "without validation improvement. The spatial validation "
                              "curve is non-monotone, so decaying on a plateau fits it "
                              "better than a fixed step schedule")
-    parser.add_argument("--temporal-features", choices=["raw", "derived"], default="raw",
-                        help="raw: the capture contract at --temporal-channels width, "
-                             "deltas appended inside the model. derived: 16 z-scored "
-                             "kinematic time functions from src/data/features.py, always "
-                             "computed from the base (X, Y, P) triplet regardless of "
-                             "--temporal-channels")
     parser.add_argument("--temporal-channels", choices=sorted(TEMPORAL_CHANNEL_WIDTHS),
                         default=TEMPORAL_CHANNELS,
                         help=f"Extra channels to feed the temporal branch. "
@@ -308,27 +283,9 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.train_only_data_dir and (args.branch != "spatial" or not args.train_only_writers):
         parser.error("--train-only-data-dir is spatial only and needs --train-only-writers")
-    if args.branch != "temporal" and (args.triplet_weight > 0 or args.cross_session_positives):
-        parser.error("--triplet-weight and --cross-session-positives are temporal only")
     if args.split_seed is None:
         args.split_seed = args.seed
     return args
-
-
-def apply_derived_features(writer_samples):
-    """Replace every trajectory with its 16 z-scored time functions in place.
-
-    Applied once before training to avoid recomputing filtering per epoch.
-    Note: Derived time functions improve discrimination on practiced signature
-    corpora, but can degrade performance when signatures lack consistent dynamic patterns.
-    """
-    from tools.dtw_baseline import standardized_time_functions
-
-    for record in writer_samples.values():
-        for label in ("genuine", "forged"):
-            if label in record:
-                record[label] = [standardized_time_functions(s) for s in record[label]]
-    return writer_samples
 
 
 def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
@@ -362,38 +319,6 @@ def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
     if not writer_samples:
         raise ValueError(f"No writers found in {data_dirs}")
     return writer_samples
-
-
-def add_training_forgeries(writer_samples, train_ids, data_dirs, forgery_types,
-                           hold_pairs):
-    """
-    Add UTSig's other forgery types to the training writers only.
-
-    Returns (samples, pair_caps). The input mapping is never modified, so the
-    validation and test writers keep skilled forgeries only. With hold_pairs, each
-    UTSig training writer is capped at the pair count its skilled forgeries alone
-    give, so the arm changes the kind of negative and not the number of pairs.
-    """
-    extra = [t for t in forgery_types if t != "Skilled"]
-    roots = [d for d in data_dirs
-             if os.path.basename(os.path.normpath(d)).lower() == "utsig"]
-    if not extra or not roots:
-        return writer_samples, None
-
-    samples = dict(writer_samples)
-    caps = {} if hold_pairs else None
-    for root in roots:
-        added = parse_utsig(root, forgery_types=extra)
-        for writer in train_ids:
-            if writer not in added or writer not in writer_samples:
-                continue
-            record = writer_samples[writer]
-            if caps is not None:
-                g = len(record["genuine"])
-                caps[writer] = min(g * (g - 1) // 2, g * len(record["forged"]))
-            samples[writer] = {**record,
-                               "forged": record["forged"] + added[writer]["forged"]}
-    return samples, caps
 
 
 def add_train_only_writers(writer_samples, train_ids, data_dirs, writers):
@@ -440,8 +365,7 @@ def _seed_worker(worker_id):
 def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, shuffle, seed,
                  augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
                  augment_scale=1.0, pairs_per_writer=None, augment_params=None,
-                 device_augment=False, pair_caps=None, cross_session=False, triplet=False,
-                 tilt_hide_prob=0.0):
+                 device_augment=False, tilt_hide_prob=0.0):
     """
     Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
 
@@ -450,11 +374,6 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
 
     The temporal branch draws more pairs per writer than the spatial one, since
     SVC2004 offers a fraction of the writers the image datasets do.
-
-    cross_session and triplet are the temporal research arms (both off in the
-    shipped recipe): positives only across sessions, and one skilled forgery of
-    each pair's writer drawn for the triplet term from its own RNG, so the pairs
-    are the same draw as without it.
     """
     subset = {w: writer_samples[w] for w in writer_ids}
 
@@ -467,8 +386,7 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         genuine_n = pairs_per_writer or PAIRS_GENUINE_PER_WRITER
         forged_n = pairs_per_writer or PAIRS_IMPOSTOR_PER_WRITER
         pairs, labels = generate_skilled_pairs(subset, genuine_n, forged_n, seed=seed,
-                                               random_impostor_ratio=ratio,
-                                               pair_caps=pair_caps)
+                                               random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, so validation and test
         # are never augmented — an augmented val set would move the target the
         # early-stopping rule is measuring against.
@@ -478,15 +396,10 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
                                           augment_params=augment_params)
         collate = None
     else:
-        pairs, labels, owners = generate_skilled_pairs(
+        pairs, labels = generate_skilled_pairs(
             subset, pairs_per_writer or TEMPORAL_PAIRS_GENUINE_PER_WRITER,
             pairs_per_writer or TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed,
-            random_impostor_ratio=ratio, cross_session=cross_session,
-            return_writers=True)
-        negatives = None
-        if triplet:
-            negative_rng = random.Random(seed + 1)
-            negatives = [negative_rng.choice(subset[w]["forged"]) for w in owners]
+            random_impostor_ratio=ratio)
         # `shuffle` is true only for the training loader, which is also the only
         # split that may be augmented.
         #
@@ -501,7 +414,6 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
                                            augment_scale=augment_scale,
                                            seed=seed,
                                            device_augment=shuffle and device_augment,
-                                           negatives=negatives,
                                            tilt_hide_prob=tilt_hide_prob if shuffle else 0.0)
         collate = collate_temporal_pairs
 
@@ -518,9 +430,8 @@ def unpack_batch(batch, device):
     Spatial batches are (x1, x2, labels). Temporal batches carry the true
     sequence lengths the packing needs: (x1, len1, x2, len2, labels).
     """
-    if len(batch) in (5, 7):
-        # 7 in the triplet arms: train_one_epoch reads the trailing negative.
-        x1, lengths1, x2, lengths2, labels = batch[:5]
+    if len(batch) == 5:
+        x1, lengths1, x2, lengths2, labels = batch
         return x1.to(device), x2.to(device), labels.to(device), (lengths1, lengths2)
     x1, x2, labels = batch
     return x1.to(device), x2.to(device), labels.to(device), None
@@ -553,13 +464,7 @@ def train_one_epoch(model, dataloader, loss_fn, optimizer, device, epoch, total_
 
         optimizer.zero_grad()
         emb1, emb2 = model(x1, x2, *lengths) if lengths else model(x1, x2)
-        negative = None
-        if len(batch) == 7:
-            # Triplet arms: embed the forgery of each genuine row only.
-            keep = batch[4] > 0.5
-            if keep.any():
-                negative = model.encode(batch[5][keep].to(device), batch[6][keep])
-        loss = loss_fn(emb1, emb2, labels, negative)
+        loss = loss_fn(emb1, emb2, labels)
         loss.backward()
         optimizer.step()
 
@@ -591,8 +496,27 @@ def validate_one_epoch(model, dataloader, loss_fn, device, epoch=None, total_epo
     return total_loss / max(num_batches, 1)
 
 
+def rng_state(dataset=None):
+    """Every random stream an epoch draws from: torch on CPU and CUDA (shuffle order, dropout,
+    worker seeds) and the training set's own augmentation generator. Reading it draws nothing,
+    so saving it leaves an uninterrupted run exactly as it was."""
+    generator = getattr(dataset, "_rng", None)
+    return {"torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+            "dataset": generator.bit_generator.state if generator is not None else None}
+
+
+def set_rng_state(state, dataset=None):
+    """Put back what rng_state() saved, so the next epoch draws what it would have drawn."""
+    torch.set_rng_state(state["torch"])
+    if state["cuda"] and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    if state["dataset"] is not None and getattr(dataset, "_rng", None) is not None:
+        dataset._rng.bit_generator.state = state["dataset"]
+
+
 def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
-                    early_stopping=None):
+                    early_stopping=None, scheduler=None, rng=None):
     """
     Save full training checkpoint for resuming later.
 
@@ -602,6 +526,9 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
     re-baselines the run against whatever the final epoch happened to score, so
     an epoch worse than the true best still reads as an improvement and
     overwrites the good weights.
+
+    `scheduler` and `rng` make a resumed run end with the same weights as one
+    that never stopped (tests/test_scripts.py::TestResumeIsExact).
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     torch.save({
@@ -612,6 +539,8 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
         "best_val_loss": best_val_loss,
         # Save early stopping state so resuming training preserves the patience counter.
         "early_stopping": early_stopping.state_dict() if early_stopping else None,
+        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+        "rng_state": rng,
     }, path)
     tqdm.write(f"  Checkpoint saved: {path}")
 
@@ -625,7 +554,8 @@ def save_weights(model, path):
 
 def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         weights_path, checkpoint_path, start_epoch=0, early_stopping=None,
-        scheduler=None, resume_best=None, resume_early_stopping=None):
+        scheduler=None, resume_best=None, resume_early_stopping=None,
+        resume_scheduler=None, resume_rng=None):
     """
     Run the full training loop: per-epoch checkpoint, best-validation weight
     save, and early stopping.
@@ -641,6 +571,11 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE,
                                        min_delta=EARLY_STOPPING_MIN_DELTA)
     early_stopping.load_state(resume_early_stopping)
+    train_dataset = getattr(train_loader, "dataset", None)
+    if scheduler is not None and resume_scheduler is not None:
+        scheduler.load_state_dict(resume_scheduler)
+    if resume_rng is not None:
+        set_rng_state(resume_rng, train_dataset)
 
     history = {"train_loss": [], "val_loss": []}
     # Resuming must inherit the best validation loss reached so far. Starting
@@ -672,7 +607,8 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         stop = early_stopping(val_loss)
         save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path,
                         best_val_loss=min(best_val_loss, val_loss),
-                        early_stopping=early_stopping)
+                        early_stopping=early_stopping, scheduler=scheduler,
+                        rng=rng_state(train_dataset))
 
         # Only the best-validation weights ship — the final epoch is not
         # necessarily the best one once early stopping has been counting.
@@ -687,69 +623,8 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
     return history
 
 
-def main(argv=None):
-    args = parse_args(argv)
-
-    # Seed Python, NumPy, and PyTorch RNGs and enforce deterministic algorithms
-    # to guarantee exact run reproducibility.
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
-
-    # Dynamic hardware selection: utilize CUDA GPU acceleration when available, else fallback to CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print(f"Training {args.branch} branch")
-    print(f"Hardware Device: {device}")
-    print("Discovering writers:")
-    writer_samples = build_writer_samples(
-        args.data_dir,
-        # The flag is temporal-only. A spatial run reaches image corpora that
-        # have no trajectory at all, so forwarding it there would ask CEDAR for
-        # a timing channel and abort a perfectly valid run.
-        extra_channels=(None if args.branch != "temporal"
-                        or args.temporal_channels == "xyp"
-                        else args.temporal_channels),
-        # The recipe's only training noise; see TEMPORAL_TRAIN_FLOAT32_PARSE.
-        float32_parse=TEMPORAL_TRAIN_FLOAT32_PARSE)
-
-    # Each branch keeps its own documented default; --augment/--no-augment override.
-    if args.augment is None:
-        args.augment = SPATIAL_AUGMENT if args.branch == "spatial" else TEMPORAL_AUGMENT
-
-    if args.branch == "temporal" and args.temporal_features == "derived":
-        print("  Deriving kinematic time functions (once, before pairing)")
-        apply_derived_features(writer_samples)
-
-    # Writer-independent partitioning (ISO/IEC 23053) happens on writer IDs
-    # before any pair is formed, so no signer can straddle two partitions.
-    ratios = tuple(args.split_ratios) if args.split_ratios else (
-        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
-    # The split seed is separate from the training seed so a config can be
-    # re-run on the *same* held-out writers. Without that, changing --seed
-    # reshuffles the partition and the two runs score different people, which
-    # measures split variance and training variance together — useless for
-    # deciding whether one arm actually beat another.
-    if args.holdout_writers:
-        train_ids, val_ids, test_ids = pin_holdout(
-            sorted(writer_samples), args.holdout_writers, *ratios,
-            seed=args.split_seed)
-        print(f"  Holding out {len(test_ids)} pinned test writers so this run stays "
-              f"comparable to results scored on them")
-    else:
-        train_ids, val_ids, test_ids = writer_independent_split(
-            sorted(writer_samples), *ratios, seed=args.split_seed)
-    print(f"  Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
-    if args.train_only_data_dir:
-        train_ids = add_train_only_writers(writer_samples, train_ids,
-                                           args.train_only_data_dir, args.train_only_writers)
-        print(f"  Train-only: +{len(args.train_only_writers)} writers from "
-              f"{', '.join(args.train_only_data_dir)} ({len(train_ids)} train)")
-
+def build_model(args, device):
+    """The model the flags describe, and the file name its weights are saved under."""
     if args.branch == "spatial":
         model = SpatialSiamese(embedding_dim=args.embedding_dim or SPATIAL_EMBEDDING_DIM,
                                head_dropout=args.head_dropout,
@@ -788,12 +663,8 @@ def main(argv=None):
                     pressure_dropout = 0.0
                     has_pressure = False
 
-        channel_count = (NUM_DERIVED_CHANNELS if args.temporal_features == "derived"
-                         else TEMPORAL_CHANNEL_WIDTHS[args.temporal_channels])
-        if args.temporal_features == "derived":
-            print(f"  Temporal features: derived ({channel_count}ch) — kinematic time "
-                  f"functions computed from the [L, 3] capture contract, not captured")
-        elif args.temporal_channels != TEMPORAL_CHANNELS:
+        channel_count = TEMPORAL_CHANNEL_WIDTHS[args.temporal_channels]
+        if args.temporal_channels != TEMPORAL_CHANNELS:
             print(f"  Temporal channels: {args.temporal_channels} "
                   f"({channel_count}ch) — NOT the shipped '{TEMPORAL_CHANNELS}' "
                   f"contract ([L, {TEMPORAL_INPUT_FEATURES}])")
@@ -804,21 +675,75 @@ def main(argv=None):
             embedding_dim=args.embedding_dim or TEMPORAL_EMBEDDING_DIM,
             bidirectional=not args.unidirectional,
             pressure_dropout=pressure_dropout,
-            # Pre-derived features already include velocity and acceleration.
-            # Do not append extra deltas when features are pre-derived.
-            derive_deltas=args.temporal_features != "derived",
-            conv_filters=args.conv_filters,
-            conv_kernel=args.conv_kernel,
         ).to(device)
 
         # Distinct filenames so pressure-blind runs do not overwrite
         # the shipped pressure-aware weights.
         weights_filename = ("temporal_lstm.pth" if has_pressure
                             else "temporal_lstm_task1.pth")
+    return model, weights_filename
 
-        # Distinct filename for derived feature models to preserve standard weights.
-        if args.temporal_features == "derived":
-            weights_filename = weights_filename.replace(".pth", "_derived.pth")
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    # Seed Python, NumPy, and PyTorch RNGs and enforce deterministic algorithms
+    # to guarantee exact run reproducibility.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+    # Dynamic hardware selection: utilize CUDA GPU acceleration when available, else fallback to CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Training {args.branch} branch")
+    print(f"Hardware Device: {device}")
+    print("Discovering writers:")
+    writer_samples = build_writer_samples(
+        args.data_dir,
+        # The flag is temporal-only. A spatial run reaches image corpora that
+        # have no trajectory at all, so forwarding it there would ask CEDAR for
+        # a timing channel and abort a perfectly valid run.
+        extra_channels=(None if args.branch != "temporal"
+                        or args.temporal_channels == "xyp"
+                        else args.temporal_channels),
+        # The recipe's only training noise; see TEMPORAL_TRAIN_FLOAT32_PARSE.
+        float32_parse=TEMPORAL_TRAIN_FLOAT32_PARSE)
+
+    # Each branch keeps its own documented default; --augment/--no-augment override.
+    if args.augment is None:
+        args.augment = SPATIAL_AUGMENT if args.branch == "spatial" else TEMPORAL_AUGMENT
+
+    # Writer-independent partitioning (ISO/IEC 23053) happens on writer IDs
+    # before any pair is formed, so no signer can straddle two partitions.
+    ratios = tuple(args.split_ratios) if args.split_ratios else (
+        TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
+    # The split seed is separate from the training seed so a config can be
+    # re-run on the *same* held-out writers. Without that, changing --seed
+    # reshuffles the partition and the two runs score different people, which
+    # measures split variance and training variance together — useless for
+    # deciding whether one arm actually beat another.
+    if args.holdout_writers:
+        train_ids, val_ids, test_ids = pin_holdout(
+            sorted(writer_samples), args.holdout_writers, *ratios,
+            seed=args.split_seed)
+        print(f"  Holding out {len(test_ids)} pinned test writers so this run stays "
+              f"comparable to results scored on them")
+    else:
+        train_ids, val_ids, test_ids = writer_independent_split(
+            sorted(writer_samples), *ratios, seed=args.split_seed)
+    print(f"  Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
+    if args.train_only_data_dir:
+        train_ids = add_train_only_writers(writer_samples, train_ids,
+                                           args.train_only_data_dir, args.train_only_writers)
+        print(f"  Train-only: +{len(args.train_only_writers)} writers from "
+              f"{', '.join(args.train_only_data_dir)} ({len(train_ids)} train)")
+
+    model, weights_filename = build_model(args, device)
 
     if args.weights_name:
         weights_filename = args.weights_name
@@ -838,15 +763,7 @@ def main(argv=None):
               f"embedding {model.embedding_dim}, dt clip {MAX_GAP_MS:g} ms"
               + (" from SIGVER_MAX_GAP_MS" if os.environ.get("SIGVER_MAX_GAP_MS") else ""))
 
-    # Training-only: the val loader below still reads the unmodified mapping.
-    train_samples, pair_caps = add_training_forgeries(
-        writer_samples, train_ids, args.data_dir, args.utsig_forgery_types,
-        args.utsig_hold_pairs)
-    if train_samples is not writer_samples:
-        print(f"  UTSig training forgeries: {', '.join(args.utsig_forgery_types)}"
-              + (" (pairs held at the skilled-only count)" if pair_caps is not None else ""))
-
-    train_loader, num_train = build_loader(train_samples, train_ids, args.branch, args.batch_size,
+    train_loader, num_train = build_loader(writer_samples, train_ids, args.branch, args.batch_size,
                                            args.num_workers, True, args.seed,
                                            augment=args.augment,
                                            augment_scale=args.augment_scale,
@@ -854,9 +771,6 @@ def main(argv=None):
                                            pairs_per_writer=args.pairs_per_writer,
                                            augment_params=augment_params,
                                            device_augment=args.device_augment,
-                                           pair_caps=pair_caps,
-                                           cross_session=args.cross_session_positives,
-                                           triplet=args.triplet_weight > 0,
                                            tilt_hide_prob=(TEMPORAL_TILT_HIDE_PROB
                                                            if args.temporal_channels == "dt_tilt_flag"
                                                            else 0.0))
@@ -874,14 +788,8 @@ def main(argv=None):
 
     if args.margin != CONTRASTIVE_MARGIN or args.hard_negative_ratio != HARD_NEGATIVE_RATIO:
         print(f"  Loss: margin {args.margin}, hard-negative ratio {args.hard_negative_ratio}")
-    if args.triplet_weight > 0 or args.cross_session_positives:
-        print(f"  Research arm: triplet weight {args.triplet_weight:g}"
-              f" (margin {args.triplet_margin if args.triplet_margin is not None else args.margin:g}),"
-              f" cross-session positives {'on' if args.cross_session_positives else 'off'}")
     loss_fn = ContrastiveLoss(margin=args.margin,
-                              hard_negative_ratio=args.hard_negative_ratio,
-                              triplet_weight=args.triplet_weight,
-                              triplet_margin=args.triplet_margin)
+                              hard_negative_ratio=args.hard_negative_ratio)
     optimizers = {"adam": optim.Adam, "adamw": optim.AdamW, "rmsprop": optim.RMSprop}
     optimizer = optimizers[args.optimizer](model.parameters(), lr=args.lr,
                                            weight_decay=args.weight_decay)
@@ -891,6 +799,8 @@ def main(argv=None):
     start_epoch = 0
     resume_best = None
     resume_early_stopping = None
+    resume_scheduler = None
+    resume_rng = None
 
     if args.resume:
         # Every line that reports a resume used to live inside an `os.path.exists`
@@ -915,6 +825,11 @@ def main(argv=None):
         if resume_best is None:
             resume_best = checkpoint.get("loss")
         resume_early_stopping = checkpoint.get("early_stopping")
+        resume_scheduler = checkpoint.get("scheduler_state_dict")
+        resume_rng = checkpoint.get("rng_state")
+        if resume_rng is None:
+            print("  Note: this checkpoint predates the saved random-number state, so the "
+                  "resumed run will not match an uninterrupted one.")
         print(f"Resumed training from epoch {start_epoch}"
               + (f", best val loss {resume_best:.4f}" if resume_best is not None else ""))
 
@@ -944,7 +859,8 @@ def main(argv=None):
                   args.epochs, weights_path, checkpoint_path,
                   start_epoch=start_epoch, early_stopping=early_stopping,
                   scheduler=scheduler, resume_best=resume_best,
-                  resume_early_stopping=resume_early_stopping)
+                  resume_early_stopping=resume_early_stopping,
+                  resume_scheduler=resume_scheduler, resume_rng=resume_rng)
 
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")

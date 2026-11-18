@@ -270,6 +270,22 @@ def select_test_writers(requested, train_ids, val_ids, test_ids):
     return [w for w in requested if w in set(test_ids) or w in set(val_ids)]
 
 
+def apply_derived_features(writer_samples):
+    """Replace every trajectory with its 16 z-scored time functions in place.
+
+    Applied once before training to avoid recomputing filtering per epoch.
+    Note: Derived time functions improve discrimination on practiced signature
+    corpora, but can degrade performance when signatures lack consistent dynamic patterns.
+    """
+    from tools.dtw_baseline import standardized_time_functions
+
+    for record in writer_samples.values():
+        for label in ("genuine", "forged"):
+            if label in record:
+                record[label] = [standardized_time_functions(s) for s in record[label]]
+    return writer_samples
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -289,7 +305,6 @@ def main(argv=None):
     if args.branch == "temporal" and args.temporal_features == "derived":
         # Same transform, applied the same way as training. Importing it from
         # train.py rather than duplicating it means the two can never drift.
-        from scripts.train import apply_derived_features
         print("Deriving kinematic time functions to match the checkpoint's channel count")
         apply_derived_features(writer_samples)
 

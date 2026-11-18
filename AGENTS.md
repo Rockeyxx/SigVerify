@@ -253,7 +253,9 @@ stored references takes 0.08 s (0.28 s on one core); never quote it as the budge
   `src/data/features.py` already emits `dx`, `dy`, `ddx`, `ddy`. Appending deltas
   on top differentiates them again — `ddx` becomes a *third* derivative of raw
   tablet coordinates, which is amplified noise — and doubles the input width for
-  nothing. `--temporal-features derived` sets this automatically.
+  nothing. `train.py` no longer trains derived features (the option is in commit
+  3c80324); `benchmark.py --temporal-features derived` still scores such a
+  checkpoint, and the flag comes from the checkpoint.
 
   **The bug was real; it was not the explanation.** Re-run at three seeds with
   deltas correctly off, the derived features measured **14.99% pooled** against a

@@ -262,65 +262,6 @@ def _make_utsig_fixture(root, num_writers=8, num_genuine=6):
     return root
 
 
-class TestUTSigTrainingForgeries:
-    """
-    UTSig's Simple and Opposite Hand forgeries are a training-only lever.
-
-    Validation and test must keep skilled forgeries only, or every reported
-    UTSig number would silently change protocol along with the training data.
-    """
-
-    def test_default_is_skilled_only(self):
-        from config.settings import UTSIG_TRAIN_FORGERY_TYPES
-
-        assert tuple(UTSIG_TRAIN_FORGERY_TYPES) == ("Skilled",)
-
-    def test_extra_types_reach_training_writers_only(self, tmp_path):
-        from scripts.train import add_training_forgeries, build_writer_samples
-
-        data = _make_utsig_fixture(str(tmp_path / "utsig"))
-        samples = build_writer_samples([data])
-        train_ids = ["utsig_1", "utsig_2"]
-        before = {w: list(r["forged"]) for w, r in samples.items()}
-
-        train_samples, caps = add_training_forgeries(
-            samples, train_ids, [data], ("Skilled", "Simple", "Opposite Hand"),
-            hold_pairs=False)
-
-        assert caps is None
-        for w in train_ids:
-            assert len(train_samples[w]["forged"]) == 2 + 3 + 1
-        # Every other writer, and the shared mapping itself, is untouched.
-        for w, forged in before.items():
-            assert samples[w]["forged"] == forged
-            assert all(os.sep + "Skilled" + os.sep in p for p in forged)
-
-    def test_hold_pairs_caps_at_the_skilled_only_supply(self, tmp_path):
-        from scripts.train import add_training_forgeries, build_writer_samples
-
-        data = _make_utsig_fixture(str(tmp_path / "utsig"))
-        samples = build_writer_samples([data])
-
-        _, caps = add_training_forgeries(
-            samples, ["utsig_1"], [data], ("Skilled", "Simple", "Opposite Hand"),
-            hold_pairs=True)
-
-        # Skilled-only supply: min(C(6,2)=15, 6 x 2 = 12) = 12.
-        assert caps == {"utsig_1": 12}
-
-    def test_default_types_change_nothing(self, tmp_path):
-        from scripts.train import add_training_forgeries, build_writer_samples
-
-        data = _make_utsig_fixture(str(tmp_path / "utsig"))
-        samples = build_writer_samples([data])
-
-        train_samples, caps = add_training_forgeries(
-            samples, ["utsig_1"], [data], ("Skilled",), hold_pairs=True)
-
-        assert train_samples is samples
-        assert caps is None
-
-
 class TestEarlyStoppingSurvivesResume:
     """Verifies that early stopping patience state is preserved when resuming training."""
 
@@ -592,3 +533,35 @@ class TestFloat32Parse:
                 benchmark.main(["--branch", "temporal", "--weights", str(tmp_path / "w.pth"),
                                 "--data-dir", str(tmp_path), *extra])
         assert seen == [False, True]
+
+
+class TestResumeIsExact:
+    """A run stopped after epoch 1 and resumed must end with the same weights as a run
+    that never stopped. Before 2026-11-18 the checkpoint held the model, the optimizer and
+    the early-stopping counter but not the random-number state (shuffle order, dropout,
+    augmentation) or the learning-rate scheduler, so a resumed run replayed epoch 0's
+    draws and restarted the plateau count."""
+
+    @pytest.mark.parametrize("schedule", ["none", "plateau"])
+    def test_a_resumed_run_ends_where_an_uninterrupted_one_does(self, tmp_path, schedule):
+        """Temporal with augmentation on uses every random source a run has: the shuffle
+        order, dropout and the dataset's own augmentation stream. Seconds, not minutes."""
+        import torch
+
+        data = _make_svc_fixture(str(tmp_path / "svc2004_task2"), with_pressure=True)
+        common = ["--branch", "temporal", "--data-dir", data, "--batch-size", "4",
+                  "--temporal-channels", "xyp", "--augment", "--num-workers", "0",
+                  "--lr-schedule", schedule]
+        full, part = tmp_path / "full", tmp_path / "part"
+        train_main(common + ["--epochs", "3", "--weights-dir", str(full)])
+        train_main(common + ["--epochs", "1", "--weights-dir", str(part)])
+        ckpt = part / "checkpoint_temporal_lstm.pth"
+        train_main(common + ["--epochs", "3", "--weights-dir", str(part), "--resume", str(ckpt)])
+
+        a = torch.load(full / "checkpoint_temporal_lstm.pth", map_location="cpu", weights_only=True)
+        b = torch.load(ckpt, map_location="cpu", weights_only=True)
+        assert a["epoch"] == b["epoch"] == 2
+        for key, tensor in a["model_state_dict"].items():
+            assert torch.equal(tensor, b["model_state_dict"][key]), key
+        if schedule == "plateau":
+            assert a["scheduler_state_dict"] == b["scheduler_state_dict"]
