@@ -27,8 +27,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     TILT_CHANNEL_MODES,
     SPATIAL_INPUT_SIZE,
@@ -63,7 +61,7 @@ _CHANNEL_NAMES = {
 }.get(TEMPORAL_INPUT_FEATURES, f"{TEMPORAL_INPUT_FEATURES} channels")
 
 
-def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
+def preprocess_image(image, target_size=SPATIAL_INPUT_SIZE):
     """Preprocess a signature image for the Spatial Siamese CNN.
 
     Steps:
@@ -76,32 +74,32 @@ def preprocess_image(image_path, target_size=SPATIAL_INPUT_SIZE):
     Returns:
         float32 numpy array with shape (1, H, W).
     """
-    if isinstance(image_path, np.ndarray):
+    if isinstance(image, np.ndarray):
         # Handle array input (paper bright, ink dark).
         # It is resized and inverted below to match file loading.
-        img = image_path[0] if image_path.ndim == 3 else image_path
+        img = image[0] if image.ndim == 3 else image
         if img.dtype != np.uint8:
             img = np.clip(img, 0, 255).astype(np.uint8)
     else:
-        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise FileNotFoundError(f"Cannot load image: {image_path}")
+        raise FileNotFoundError(f"Cannot load image: {image}")
 
     if SPATIAL_SQUARE_PAD:
         # Pad image onto a square canvas to keep original aspect ratio.
         h, w = img.shape
         max_dim = max(h, w)
-        padded = np.full((max_dim, max_dim), 255, dtype=np.uint8)
+        framed = np.full((max_dim, max_dim), 255, dtype=np.uint8)
         y_off = (max_dim - h) // 2
         x_off = (max_dim - w) // 2
-        padded[y_off:y_off + h, x_off:x_off + w] = img
+        framed[y_off:y_off + h, x_off:x_off + w] = img
     else:
         # Scale directly to target input dimensions (155x220).
-        padded = img
+        framed = img
 
     # Resize to spatial dimensions and invert polarity (background 0, ink high).
     # Inversion ensures convolutions focus on signature strokes instead of blank paper.
-    resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
+    resized = cv2.resize(framed, target_size, interpolation=cv2.INTER_AREA)
     normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
 
@@ -186,7 +184,7 @@ def as_spatial_input(sample, allow_trajectory=False):
         f"in [0, 1], or an [L, C] trajectory.")
 
 
-def quality_gate(image_path):
+def quality_gate(image):
     """Assess signature image quality using bounding-box size and sharpness metrics.
 
     Calculates:
@@ -196,8 +194,8 @@ def quality_gate(image_path):
     Returns:
         (passed: bool, details: dict)
     """
-    if isinstance(image_path, np.ndarray):
-        arr = image_path[0] if image_path.ndim == 3 else image_path
+    if isinstance(image, np.ndarray):
+        arr = image[0] if image.ndim == 3 else image
         if arr.dtype != np.uint8:
             if arr.max() <= 1.0:
                 # Inverted float array (background 0, ink 1):
@@ -208,7 +206,7 @@ def quality_gate(image_path):
         else:
             img = arr
     else:
-        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return False, {"error": "Cannot load image"}
 
@@ -453,8 +451,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
                            num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
-                           random_impostor_ratio=0.0, pair_caps=None, cross_session=False,
-                           return_writers=False):
+                           random_impostor_ratio=0.0, pair_caps=None):
     """Generate training or evaluation pairs under the skilled forgery setting.
 
     Positive pairs consist of two genuine signatures from the same writer.
@@ -468,22 +465,16 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         seed: random seed for reproducibility.
         random_impostor_ratio: fraction of negative pairs drawn from other writers.
         pair_caps: optional {writer: max pairs per side} binding those writers only.
-        cross_session: draw positives only across sessions for writers whose
-            "genuine_session" names two or more. The count stays the same, so
-            when the cross-session pairs run short they are reused in order.
-            Negatives are the same draw as without it.
-        return_writers: also return the writer each pair was drawn for.
 
     Returns:
-        (pairs: list of (sample1, sample2), labels: list of int), plus
-        writers: list of str when return_writers is set.
+        (pairs: list of (sample1, sample2), labels: list of int).
     """
     if not 0.0 <= random_impostor_ratio <= 1.0:
         raise ValueError(
             f"random_impostor_ratio must be in [0, 1], got {random_impostor_ratio}")
 
     rng = random.Random(seed)
-    pairs, labels, owners = [], [], []
+    pairs, labels = [], []
 
     for writer in samples_by_writer:
         genuine = samples_by_writer[writer].get("genuine", [])
@@ -506,13 +497,6 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         # Draw genuine pairs without replacement from all unique combinations.
         genuine_space = list(itertools.combinations(range(len(genuine)), 2))
         rng.shuffle(genuine_space)
-        sessions = samples_by_writer[writer].get("genuine_session")
-        if cross_session and sessions and len(set(sessions) - {None}) > 1:
-            # Filtering the shuffled list leaves the RNG where the default leaves
-            # it, so the negatives below are the same draw.
-            across = [(i, j) for i, j in genuine_space
-                      if None not in (sessions[i], sessions[j]) and sessions[i] != sessions[j]]
-            genuine_space = list(itertools.islice(itertools.cycle(across), num_pairs))
         for i, j in genuine_space[:num_pairs]:
             pairs.append((genuine[i], genuine[j]))
             labels.append(1)
@@ -527,7 +511,6 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         for s1, s2 in impostor_space[:num_skilled]:
             pairs.append((s1, s2))
             labels.append(0)
-        owners.extend([writer] * (len(pairs) - len(owners)))
 
         # Random impostor pairs (authentic signature vs different writer's genuine signature).
         others = [w for w in samples_by_writer if w != writer
@@ -539,10 +522,7 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
             pairs.append((rng.choice(genuine),
                           rng.choice(samples_by_writer[other]["genuine"])))
             labels.append(0)
-            owners.append(writer)
 
-    if return_writers:
-        return pairs, labels, owners
     return pairs, labels
 
 
@@ -550,14 +530,12 @@ def collate_temporal_pairs(batch):
     """Collate variable-length trajectory pairs into a padded batch for the LSTM.
 
     Args:
-        batch: list of (seq1 [L1, C], seq2 [L2, C], label) tuples, or with a
-            fourth negative [L3, C] in the triplet arms.
+        batch: list of (seq1 [L1, C], seq2 [L2, C], label) tuples.
 
     Returns:
-        (padded1, lengths1, padded2, lengths2, labels), plus
-        (padded3, lengths3) when the items carry a negative.
+        (padded1, lengths1, padded2, lengths2, labels).
     """
-    seqs1, seqs2, labels, *negatives = zip(*batch)
+    seqs1, seqs2, labels = zip(*batch)
 
     lengths1 = torch.tensor([len(s) for s in seqs1], dtype=torch.long)
     lengths2 = torch.tensor([len(s) for s in seqs2], dtype=torch.long)
@@ -565,13 +543,7 @@ def collate_temporal_pairs(batch):
     padded1 = torch.nn.utils.rnn.pad_sequence(list(seqs1), batch_first=True)
     padded2 = torch.nn.utils.rnn.pad_sequence(list(seqs2), batch_first=True)
 
-    out = (padded1, lengths1, padded2, lengths2, torch.stack(list(labels)))
-    if negatives:
-        # Triplet arms: a skilled forgery of each pair's writer rides along.
-        negs = negatives[0]
-        out += (torch.nn.utils.rnn.pad_sequence(list(negs), batch_first=True),
-                torch.tensor([len(s) for s in negs], dtype=torch.long))
-    return out
+    return padded1, lengths1, padded2, lengths2, torch.stack(list(labels))
 
 
 def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
@@ -751,11 +723,9 @@ class TemporalSignatureDataset(Dataset):
     """PyTorch Dataset loading temporal signature trajectory pairs for Siamese training."""
 
     def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42,
-                 device_augment=False, negatives=None, tilt_hide_prob=0.0):
+                 device_augment=False, tilt_hide_prob=0.0):
         self.pairs = pairs
         self.labels = labels
-        # Triplet arms only: one skilled forgery of each pair's writer.
-        self.negatives = negatives
         self.augment = augment
         self.augment_scale = augment_scale
         self.device_augment = device_augment
@@ -800,17 +770,8 @@ class TemporalSignatureDataset(Dataset):
             seq2 = augment_device(seq2, self._rng)
         seq1 = self._maybe_hide_tilt(seq1)
         seq2 = self._maybe_hide_tilt(seq2)
-        item = (
+        return (
             torch.tensor(seq1, dtype=torch.float32),
             torch.tensor(seq2, dtype=torch.float32),
             torch.tensor(self.labels[index], dtype=torch.float32),
         )
-        if self.negatives is None:
-            return item
-        negative = self.negatives[index]
-        if self.augment:
-            negative = self._augment(negative)
-        if self.device_augment:
-            negative = augment_device(negative, self._rng)
-        negative = self._maybe_hide_tilt(negative)
-        return item + (torch.tensor(negative, dtype=torch.float32),)

@@ -118,7 +118,7 @@ def load_inhouse_tablet_file(path):
         strokes = _strokes(csv.DictReader(f))
     if not strokes:
         raise ValueError(f"{path}: no pen-down samples inside the box.")
-    # Qt pressure is already 0..1, as in DrawingCanvas.get_final_trajectory_tensor.
+    # Qt pressure is already 0..1, as in DrawingCanvas.trajectory.
     return strokes_to_trajectory([np.asarray(s, dtype=np.float64) for s in strokes],
                                  pressure_max=1.0)
 

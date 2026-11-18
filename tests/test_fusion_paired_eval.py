@@ -8,7 +8,7 @@ and had silently reported the older 3-channel model's fusion number since the
 import numpy as np
 
 from config.settings import TEMPORAL_INPUT_FEATURES
-from tools.fusion_paired_eval import load_paired_trajectory
+from tools.research.fusion_paired_eval import load_paired_trajectory
 
 
 def test_paired_loader_yields_the_configured_channel_width(tmp_path):
