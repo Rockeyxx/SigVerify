@@ -15,17 +15,19 @@ import uuid
 import torch  # noqa: E402 — must load before PyQt5 elsewhere; harmless here too
 import cv2    # noqa: E402
 
+from config.settings import MIN_LAPLACIAN_VARIANCE
 from src.verification import SignatureService as RealSignatureService
-from src.gui.image_cleanup import crop_to_ink
+from src.gui.image_cleanup import SignatureNotFoundError, crop_to_ink
 
 _service = None
 _service_lock = threading.Lock()
 
 
 def _get_service() -> RealSignatureService:
-    # One SignatureService for the whole session (AGENTS.md): a second instance
-    # loads the models again. The lock matters now that warm-up runs on its own
-    # thread while the user may already be enrolling or verifying.
+    # One SignatureService for the whole session (AGENTS.md). The lock only makes sure
+    # two threads (warm-up and a worker) do not both create the service object; that is
+    # instant. The models load lazily inside the service (spatial_model / temporal_model),
+    # outside this lock.
     global _service
     with _service_lock:
         if _service is None:
@@ -71,6 +73,51 @@ def _prepare_image(path: str, temp_files: list) -> str:
         return safe_path
 
 
+class ImageRejectedError(ValueError):
+    """Reference images were rejected. The message names each image and says why."""
+
+
+def _is_gate_error(error) -> bool:
+    text = str(error).lower()
+    return "gate" in text
+
+
+def _rejection_reason(prepared_path: str) -> str:
+    """Why the model's quality gate rejects an image that was already cropped.
+
+    The gate itself only says "failed the quality gate", so the reason is measured here
+    with the documented rule (Laplacian variance >= MIN_LAPLACIAN_VARIANCE). It is used only to
+    explain a rejection the model has already made, never to reject anything itself.
+    """
+    gray = cv2.imread(prepared_path, cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return "the image could not be read"
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    if sharpness < MIN_LAPLACIAN_VARIANCE:
+        return (f"it is too blurry or the ink is too faint "
+                f"(sharpness {sharpness:.0f}, at least {MIN_LAPLACIAN_VARIANCE:.0f} needed)")
+    return "the signature is too small or not clear enough"
+
+
+def _explain_rejections(service, names: list, safe_paths: list, original: ValueError):
+    """The batch was rejected: embed each image alone to find which ones, and why.
+
+    Returns an ImageRejectedError naming every rejected image, or `original` if no single
+    image reproduces the rejection."""
+    problems = []
+    for number, (name, path) in enumerate(zip(names, safe_paths), start=1):
+        try:
+            service.enroll_unimodal([path], modality="spatial")
+        except ValueError as one:
+            reason = _rejection_reason(path) if _is_gate_error(one) else str(one).splitlines()[0]
+            problems.append(f"Image {number} ({name}) was rejected: {reason}.")
+    if not problems:
+        return original
+    return ImageRejectedError(
+        " ".join(problems) + " Remove it from the list, retake the photo on white paper with a "
+        "blue pen (close, steady, even light) and add it again.")
+
+
 def enroll_client(image_paths: list) -> dict:
     """Enroll client reference images using the spatial model.
 
@@ -81,9 +128,23 @@ def enroll_client(image_paths: list) -> dict:
     """
     temp_files = []
     try:
-        safe_paths = [_prepare_image(p, temp_files) for p in image_paths]
+        names = [os.path.basename(str(p)) for p in image_paths]
+        safe_paths = []
+        for number, (path, name) in enumerate(zip(image_paths, names), start=1):
+            try:
+                safe_paths.append(_prepare_image(path, temp_files))
+            except SignatureNotFoundError as e:
+                raise ImageRejectedError(f"Image {number} ({name}) was rejected: {e}") from e
         service = _get_service()
-        result = service.enroll_unimodal(safe_paths, modality="spatial")
+        try:
+            result = service.enroll_unimodal(safe_paths, modality="spatial")
+        except ValueError as e:
+            if not _is_gate_error(e):
+                raise
+            explained = _explain_rejections(service, names, safe_paths, e)
+            if explained is e:
+                raise
+            raise explained from e
         return {
             "embeddings": [base64.b64encode(b).decode("ascii") for b in result["embeddings"]],
             "spatial_origin": result["spatial_origin"],
