@@ -1,18 +1,24 @@
 """
 image_cleanup.py — Signature Verification System
 
-Automatic ink-cropping and binarization for phone-photo signature
-images, applied transparently before every enrollment/verification
-call. Ported from tools/verify_my_signature.py's crop_to_ink(), with
-safeguards added after a blank page was found to pass through as a
-false-positive "signature" (PR review point 3), plus an upscaling
-guarantee added after discovering the model's own quality_gate
-(src/data/dataset.py) measures the INK'S OWN bounding box — not the
-overall image size — against MIN_BBOX_PIXELS. Padding the crop with
-extra blank paper does nothing for that check, since quality_gate
-re-detects the ink itself and ignores surrounding margin; the only
-way to satisfy it for a naturally small/flat signature is to upscale
-the ink along with the rest of the image.
+Cleans up a phone photo or scan of a paper signature before it reaches the model, on every
+enrollment/verification call (ENG_REPORT A6, issue #23 item 5).
+
+The signature is found by ink_crop (src/capture/ink.py): ink is a pixel darker than its local
+paper and blue, and the signature is the cluster of ink pieces holding the most ink. The crop
+comes back grey (not black and white), so faint strokes keep their strength. This module adds
+what the model's input needs around that:
+
+  * the photo's EXIF rotation is fixed first;
+  * a blank-page guard: the ink must cover a plausible share of the crop (a photo of a ruled
+    page or a printed blue form is refused instead of being enrolled as a signature);
+  * an upscale (enlarge only, no re-thresholding) when the ink is smaller than the model's
+    quality_gate (src/data/dataset.py) accepts. That gate measures the INK'S OWN bounding box,
+    not the image size, so padding does nothing; the whole crop has to be enlarged;
+  * the result is written to a temp file, which the caller deletes after use.
+
+Blue pen on white paper only, by design: ink_crop finds ink by colour, so a black-ink or
+grayscale image is reported as no signature (no fallback without asking @Rockeyxx).
 """
 
 import os
@@ -23,11 +29,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from config.settings import MIN_BBOX_PIXELS
+from config.settings import INK_MIN_CONTRAST, MIN_BBOX_PIXELS, SPATIAL_INPUT_SIZE
+from src.capture.ink import ink_crop
 
 
-MIN_BLOB_AREA_PX = 800
-MIN_ABSOLUTE_CONTRAST = 40
+# Blank-page guard: share of the crop that is ink (a clearly darker pixel than white paper).
+# The values come from the guard of the previous algorithm (PR #17 review point 3).
 MIN_INK_RATIO = 0.003
 MAX_INK_RATIO = 0.35
 
@@ -46,27 +53,19 @@ class SignatureNotFoundError(ValueError):
     pass
 
 
-def _illumination_normalized_contrast(grey: np.ndarray) -> np.ndarray:
-    sigma = max(grey.shape) / 20
-    background = cv2.GaussianBlur(grey, (0, 0), sigmaX=sigma)
-    contrast = background.astype(np.int16) - grey.astype(np.int16)
-    return np.clip(contrast, 0, 255).astype(np.uint8)
-
-
 def crop_to_ink(path: str) -> str:
     """
-    Turn a phone photo into something resembling the scans the model
-    trained on: fix EXIF rotation, crop to the ink, binarize, and
-    upscale if the ink itself is smaller than the model's quality gate
-    requires.
+    Turn a phone photo into what the model expects: fix the EXIF rotation, cut out the
+    signature with ink_crop (a grey crop, ink dark on white), check that the crop looks like a
+    signature (ink share), and enlarge it if the ink itself is smaller than the model's quality
+    gate requires.
 
-    Returns the path to a new temp file. The original file is never
-    modified.
+    Returns the path to a new temp file. The original file is never modified.
 
-    Raises SignatureNotFoundError if no real signature can be located,
-    if the ink-to-paper ratio doesn't resemble a signature, or if the
-    ink is so small in the source photo that no reasonable upscale can
-    reach the model's minimum accepted size.
+    Raises SignatureNotFoundError if ink_crop finds no signature (including black-ink or
+    grayscale images), if the ink share of the crop is implausible (blank or ruled page,
+    printed form), or if the ink is so small that no reasonable upscale reaches the model's
+    minimum size.
 
     Raises FileNotFoundError if the file itself is gone, so callers can say so
     instead of reporting it as a bad photo.
@@ -77,76 +76,46 @@ def crop_to_ink(path: str) -> str:
     try:
         pil = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
         image = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        grey_full = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        img_h, img_w = grey_full.shape
 
-        ink = ((hsv[:, :, 1] > 60) & (hsv[:, :, 0] > 100) & (hsv[:, :, 0] < 160)).astype(np.uint8)
-
-        if ink.sum() < MIN_BLOB_AREA_PX:
-            contrast = _illumination_normalized_contrast(grey_full)
-            ink = (contrast >= MIN_ABSOLUTE_CONTRAST).astype(np.uint8)
-
-        ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
-
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
-        blobs = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] > MIN_BLOB_AREA_PX]
-        if not blobs:
+        # ink_crop (src/capture/ink.py, ENG_REPORT A6) finds the signature and returns it as a
+        # grey crop (ink dark on white paper), or None when the photo holds no signature.
+        crop = ink_crop(image)
+        if crop is None:
             raise SignatureNotFoundError(
-                "Could not find a signature in this photo. "
-                "Retake it on plain paper with even lighting."
+                "No signature found. Sign on white paper with a blue pen."
             )
-
-        keep = np.isin(labels, blobs).astype(np.uint8)
-
-        left = min(stats[i, cv2.CC_STAT_LEFT] for i in blobs)
-        top = min(stats[i, cv2.CC_STAT_TOP] for i in blobs)
-        right = max(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] for i in blobs)
-        bottom = max(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] for i in blobs)
-
-        raw_w = right - left
-        raw_h = bottom - top
-
-        pad = int(0.08 * max(raw_w, raw_h))
-        py0, py1 = max(0, top - pad), min(img_h, bottom + pad)
-        px0, px1 = max(0, left - pad), min(img_w, right + pad)
-
-        # Ink-ratio sanity check on the padded box, matching how the
-        # ratio was originally calibrated (a bare ink-only box is nearly
-        # 100% ink after MORPH_CLOSE fills stroke gaps, so it must be
-        # measured with its normal surrounding margin, not alone).
-        ink_ratio = float(keep[py0:py1, px0:px1].mean())
+        
+        # The model's quality_gate (src/data/dataset.py) re-detects the ink and measures ITS OWN
+        # bounding box, so padding does not help: if the ink is smaller than the gate's minimum,
+        # the whole crop is upscaled so the ink grows with it.
+        ink = crop < 255 - INK_MIN_CONTRAST     # the crop is grey: ink is clearly darker than paper
+        ys, xs = np.nonzero(ink)
+        if len(ys) == 0:
+            raise SignatureNotFoundError(
+                "No signature found. Sign on white paper with a blue pen."
+            )
+        ink_ratio = float(ink.mean())
         if not (MIN_INK_RATIO <= ink_ratio <= MAX_INK_RATIO):
             raise SignatureNotFoundError(
-                f"This photo doesn't look like a signature (ink covers "
-                f"{ink_ratio:.1%} of the detected region). Retake it on plain paper."
+                f"This photo doesn't look like a signature (ink covers {ink_ratio:.1%} of the "
+                "detected region). Retake it on plain white paper."
             )
 
-        grey_crop = grey_full[py0:py1, px0:px1]
-
-        # The model's quality_gate (src/data/dataset.py) re-detects ink
-        # in whatever we hand it and measures ITS OWN bounding box —
-        # padding with blank paper does not change that measurement.
-        # If the ink itself is smaller than the gate's minimum, the only
-        # fix is to upscale the whole crop so the ink grows with it.
-        smaller_ink_edge = min(raw_w, raw_h)
-        scale = max(1.0, TARGET_INK_EDGE_PX / smaller_ink_edge)
-
-        if scale > MAX_UPSCALE_FACTOR:
+        smaller_ink_edge = max(1, min(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1))
+        if TARGET_INK_EDGE_PX / smaller_ink_edge > MAX_UPSCALE_FACTOR:
             raise SignatureNotFoundError(
                 "The signature is too small in this photo to process reliably. "
                 "Move closer and retake it so the signature fills more of the frame."
             )
 
-        if scale > 1.0:
-            new_size = (int(round(grey_crop.shape[1] * scale)), int(round(grey_crop.shape[0] * scale)))
-            grey_crop = cv2.resize(grey_crop, new_size, interpolation=cv2.INTER_CUBIC)
-
-        binary = cv2.threshold(cv2.GaussianBlur(grey_crop, (5, 5), 0), 0, 255,
-                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        # Resize to the model's input size here, with the same INTER_AREA the model uses
+        # (preprocess_image in src/data/dataset.py, SPATIAL_SQUARE_PAD = False). The model's own
+        # resize then changes nothing, and quality_gate judges the image the model actually sees,
+        # not the soft wide strokes of a full-size phone photo.
+        crop = cv2.resize(crop, SPATIAL_INPUT_SIZE, interpolation=cv2.INTER_AREA)
 
         destination = os.path.join(tempfile.gettempdir(), f"cropped_{uuid.uuid4().hex}.png")
-        cv2.imwrite(destination, binary)
+        cv2.imwrite(destination, crop)
         return destination
 
     except SignatureNotFoundError:

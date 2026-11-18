@@ -22,7 +22,7 @@ from src.gui.dashboard import DashboardScreen
 from src.gui.clients_page import ClientsPage
 from src.gui.profile_page import ProfilePage
 from src.gui.styles import STYLE
-from src.gui.workers import WarmUpWorker
+from src.gui.workers import WarmUpWorker, wait_for_workers
 import src.gui.storage as storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -261,6 +261,12 @@ class MainWindow(QMainWindow):
         # Started here (not after login) and kept on self so the thread is not garbage-collected.
         self._warm_up_worker = WarmUpWorker()
         self._warm_up_worker.start()
+
+    def closeEvent(self, event):
+        # Closing while a worker (warm-up, enrol, verify, confirm) is still running would print
+        # "QThread: Destroyed while thread is still running" or crash, so wait for all of them.
+        wait_for_workers()
+        super().closeEvent(event)
 
     def _build_auth_stack(self):
         self.auth_stack = QStackedWidget()

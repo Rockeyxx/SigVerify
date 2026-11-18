@@ -125,7 +125,7 @@ class RecentEventsTile(QFrame):
             row.addStretch()
 
             role = "status-success" if decision == "Genuine" else "status-error"
-            result_label = QLabel(f"{decision} · {confidence}%")
+            result_label = QLabel(f"{decision} · score {confidence}")
             result_label.setProperty("role", role)
             result_label.setStyleSheet(result_label.styleSheet() + "font-size: 12px;")
             row.addWidget(result_label)
