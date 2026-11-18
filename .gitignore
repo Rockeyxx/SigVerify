@@ -53,7 +53,7 @@ docs/*
 
 # Local diagnostics — instruments for answering "why is this number bad",
 # not project code. Nothing imports them and nothing ships with them, so they
-# stay out of the repo; their findings live in docs/SOLUTIONS.md.
+# stay out of the repo; their findings live in docs/ENG_REPORT.md.
 tools/diagnose_error_sources.py
 
 # One-off evaluation arms from 2026-08-18/19. Each answered a single question,

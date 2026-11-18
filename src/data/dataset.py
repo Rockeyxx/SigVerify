@@ -27,8 +27,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.settings import (
     TILT_CHANNEL_MODES,
     SPATIAL_INPUT_SIZE,
