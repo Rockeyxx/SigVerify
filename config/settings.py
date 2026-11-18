@@ -310,6 +310,12 @@ EARLY_STOPPING_MIN_DELTA = 1e-4         # Minimum loss decrement threshold
 # then confirmed on the 14 NFI writers, who took no part in choosing it.
 ALPHA_DEFAULT = 0.4                     # Measured: SONOF optimum; equal weighting (0.5) scored worse on both
 ALPHA_GRID_STEP = 0.05
+# The 14 screened SigComp2009 (NFI) writers that check the fused alpha and tau after they
+# are chosen on SONOF (ENG_REPORT K1, F14, F16). Neither branch trained on NFI, and each
+# signing has a scan and a pen file with the same name, so the pairing is exact.
+NFI_FUSION_WRITERS = ("nfi_002", "nfi_008", "nfi_016", "nfi_018", "nfi_024", "nfi_035",
+                      "nfi_044", "nfi_063", "nfi_070", "nfi_071", "nfi_077", "nfi_085",
+                      "nfi_086", "nfi_089")
 
 # Signings asked for at verification, of each kind (paper and tablet). The GUI reads this as its
 # default and may offer it as a toggle (1 or 2); verify() averages however many it is given, and
