@@ -15,7 +15,8 @@ TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
 # Release tag of the two shipped weights above; both are byte-identical to that
 # release's assets. Storage saves it beside every template, and a template whose
 # tag differs was embedded by other weights and needs re-enrolment. Bump it
-# whenever either shipped weight changes (ship-model-release step 5).
+# whenever either shipped weight changes (ship-model-release step 5). CI downloads
+# the weights of this release, so it always tests what ships.
 MODEL_VERSION = "v0.10.0"
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 
