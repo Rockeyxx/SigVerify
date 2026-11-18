@@ -366,6 +366,8 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    from src.capture.pen_input import choose_pen_input
+    choose_pen_input()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     window = MainWindow()

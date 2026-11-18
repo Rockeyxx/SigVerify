@@ -293,6 +293,16 @@ def test_panel_fuses_paper_and_pen(app, db, fake_workers):
     assert worker.kwargs["probe_trajectory"] is panel.selected_trajectory
 
 
+def test_panel_forgets_the_probe_image_when_the_client_changes(app, db):
+    panel = _panel()
+    panel.clientIdInput.setText("a")
+    panel.selected_image_path = "probe.png"
+    panel.probeFileLabel.setText("probe.png")
+    panel.clientIdInput.setText("b")
+    assert panel.selected_image_path is None
+    assert panel.probeFileLabel.text() == "No file selected"
+
+
 def test_panel_pen_only_client_needs_pen_mode(app, db, fake_workers):
     storage.save_client_enrollment("c", [], [_b64(128)], "alice", spatial_embeddings=[])
     panel = _panel()
