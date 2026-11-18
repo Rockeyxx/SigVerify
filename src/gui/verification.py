@@ -227,6 +227,8 @@ class VerificationPanel(QWidget):
         self._last_accepted_client = None
         self.selected_trajectory = None
         self.penStatusLabel.setText("No pen signature yet")
+        self.selected_image_path = None
+        self.probeFileLabel.setText("No file selected")
         self.confirmButton.setVisible(False)
         self.scoreBar.setVisible(False)
         self.scoreCaption.setVisible(False)
