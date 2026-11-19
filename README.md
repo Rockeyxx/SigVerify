@@ -79,7 +79,7 @@ This document covers installation, quickstart, project structure, evaluation ben
          │  S < τ → Forged      │
          └──────────┬───────────┘
                     ▼
-         [Genuine/Forged, Confidence %]
+         [Genuine/Forged, match score vs τ]
 ```
 
 **Single-Modality Fallback:** When only one input modality is provided, the system automatically routes to that branch ($\alpha = 1.0$ for spatial image verification, $\alpha = 0.0$ for temporal trajectory verification).
@@ -99,9 +99,9 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 **Application Layer:**
 
-`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database_security.py`) and the GUI's storage adapter (`tests/test_storage_gui_api.py`). The GUI screens have no tests, and `src/database/encryption.py` is still a stub (the AES code is in `db_manager.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
+`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`). `src/database/encryption.py` is still a stub (the AES code is in `db_manager.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
 
-- **PyQt5 Desktop Interface** (`src/gui/`) Employee login, enrolment, verification, dashboard, clients and profile screens. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). Tablet capture is not wired into the GUI yet: its capture button is disabled, so enrolment uses scanned images only.
+- **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts, client enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
 - **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key, and that key is itself encrypted with a key derived (scrypt) from a passphrase kept outside the database: `SIGVER_DB_PASSPHRASE` if set, otherwise a random key file the app creates beside the database on first run. Only embeddings are stored, plus the encrypted file paths of the reference images. Employee passwords are salted scrypt hashes, and an audit log records every verification.
 
@@ -130,12 +130,17 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   ├── database/                # Encrypted SQLite store (encryption.py is still a stub)
 │   │   ├── db_manager.py
 │   │   └── encryption.py
-│   ├── capture/                 # XPPen tablet capture through Qt tablet events
+│   ├── capture/                 # Tablet capture, signing window, ink crop for photos
+│   │   ├── collect.py
+│   │   ├── ink.py
+│   │   ├── pen_input.py
 │   │   └── tablet.py
 │   └── gui/                     # PyQt5 employee app: login, enrolment, verification
-│       ├── app.py
+│       ├── app.py               # Entry point: python -m src.gui.app
 │       ├── enrollment.py
-│       └── verification.py
+│       ├── verification.py
+│       ├── interfaces.py        # The GUI's only route to the model
+│       └── storage.py           # The GUI's only route to the database
 ├── scripts/
 │   ├── train.py                 # Training entry point (spatial, temporal, or joint)
 │   ├── evaluate.py              # Evaluation, threshold calibration, figure generation
@@ -209,13 +214,16 @@ employee-facing interface for enrollment and verification.
 1. **Register / Login** — Each employee has their own account (full name,
    User ID, password). Enrolled clients are scoped per employee: an
    employee only sees the clients they personally registered.
-2. **Enrollment** — Register a new client by ID and attach exactly 5
-   reference signature images. References can be previewed, replaced, or
-   removed before saving, and re-opened for editing at any time afterward.
-3. **Verification** — Enter a claimed client ID, select modality (image
-   input only for now: tablet capture exists in `src/capture/` but is not
-   wired into the GUI yet, so its option is disabled), submit a probe signature, and receive
-   the result rendered exactly as `[Genuine/Forged, Confidence %]`.
+2. **Enrollment** — Register a new client by ID with 5 reference photos of
+   their signature (blue pen on white paper), 5 signings on the tablet, or
+   both. Photos can be previewed, replaced, or removed before saving, and
+   the client can be reopened for editing at any time afterward.
+3. **Verification** — Enter a claimed client ID, choose paper + pen, paper
+   only, or pen only, give the photo and/or sign on the tablet, and receive
+   the decision with its match score drawn against the decision threshold.
+   The match score is a similarity, not a probability. When the result is
+   Genuine from paper and pen together, the employee can confirm the
+   person's identity to add that visit to the client's references.
 4. **Dashboard** — Landing screen after login showing per-employee stats:
    clients enrolled this month, total enrolled clients, total
    verifications run, and a live genuine-rate indicator.
