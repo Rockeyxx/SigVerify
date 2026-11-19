@@ -15,7 +15,9 @@ import re
 
 import numpy as np
 
-from config.settings import INHOUSE_DIR, INHOUSE_SPLIT_PATH, INHOUSE_TEST_FRACTION, SEED
+from config.settings import (INHOUSE_DIR, INHOUSE_EXCLUDED, INHOUSE_NO_DRIVER,
+                             INHOUSE_NO_DRIVER_PRESSURE_SCALE, INHOUSE_SPLIT_PATH,
+                             INHOUSE_TEST_FRACTION, SEED)
 from src.data.parsers import _require_dir
 from src.data.pen_stream import strokes_to_trajectory
 
@@ -34,19 +36,24 @@ def _tablet_os(root, participants):
     if not os.path.exists(path):
         return {}
     with open(path, newline="") as f:  # skylos: ignore[SKY-D215,SKY-D325] manifest.csv inside the operator-supplied campaign folder
-        return {row["file"]: row["os"] or None for row in csv.DictReader(f)
+        # Windows sessions save backslash paths; match them to the forward-slash relpath below.
+        return {row["file"].replace("\\", "/"): row["os"] or None for row in csv.DictReader(f)
                 if row["modality"] == "tablet"
                 and (participants is None or row["participant"] in participants)}
 
 
-def parse_inhouse(root=INHOUSE_DIR, participants=None):
+def parse_inhouse(root=INHOUSE_DIR, participants=None, exclude=INHOUSE_EXCLUDED,
+                  no_driver=INHOUSE_NO_DRIVER, no_driver_scale=INHOUSE_NO_DRIVER_PRESSURE_SCALE):
     """Pair each pen signing with its paper box, by the number in the file name.
 
     Returns {"inhouse_P05": {"genuine": [{"index", "tablet", "paper", "os"}], "forged":
     [{"forger", "attempt", "tablet", "paper", "os"}]}}, sorted by index or (forger, attempt).
     A side that was not saved is None: never shifted, so a gap cannot misalign the pairs.
     "os" is the pen file's own manifest entry (None without a pen file): Windows pressure is on
-    another scale (ENG_REPORT G10), so never pool it unscaled. participants limits the read.
+    another scale (ENG_REPORT G10), so never pool it unscaled. participants limits the read;
+    exclude names sessions never read. "pressure_scale" is what load_inhouse_tablet_file must
+    multiply the pen pressure by: no_driver_scale for the forgeries of a no_driver writer
+    (Wintab forgeries of Windows Ink genuines), 1.0 everywhere else.
     """
     _require_dir(root, "In-house campaign")
     os_of = _tablet_os(root, participants)
@@ -55,7 +62,7 @@ def parse_inhouse(root=INHOUSE_DIR, participants=None):
         folder = os.path.join(root, code)
         if not (_PARTICIPANT.match(code) and os.path.isdir(folder)):
             continue
-        if participants is not None and code not in participants:
+        if (participants is not None and code not in participants) or code in exclude:
             continue
         genuine, forged = {}, {}
         for name in sorted(os.listdir(folder)):
@@ -75,6 +82,10 @@ def parse_inhouse(root=INHOUSE_DIR, participants=None):
             entry[modality] = os.path.join(folder, name)
         if not (genuine or forged):
             continue
+        for entry in genuine.values():
+            entry["pressure_scale"] = 1.0
+        for entry in forged.values():
+            entry["pressure_scale"] = no_driver_scale if code in no_driver else 1.0
         for entry in [*genuine.values(), *forged.values()]:
             entry.setdefault("tablet", None)
             entry.setdefault("paper", None)
@@ -112,15 +123,16 @@ def _strokes(rows):
     return strokes
 
 
-def load_inhouse_tablet_file(path):
-    """One saved tablet signature as the [L, 4] trajectory the app made of it at signing."""
+def load_inhouse_tablet_file(path, pressure_scale=1.0):
+    """One saved tablet signature as the [L, 4] trajectory the app made of it at signing,
+    pressure multiplied by pressure_scale (parse_inhouse's entry says which)."""
     with open(path, newline="") as f:  # skylos: ignore[SKY-D215,SKY-D325] tablet file enumerated by parse_inhouse from the campaign folder
         strokes = _strokes(csv.DictReader(f))
     if not strokes:
         raise ValueError(f"{path}: no pen-down samples inside the box.")
     # Qt pressure is already 0..1, as in DrawingCanvas.trajectory.
     return strokes_to_trajectory([np.asarray(s, dtype=np.float64) for s in strokes],
-                                 pressure_max=1.0)
+                                 pressure_max=1.0 / pressure_scale)
 
 
 def _goes_to_test(writer, seed, test_fraction):

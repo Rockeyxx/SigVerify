@@ -8,8 +8,9 @@ one draw shared by both branches, nearest-reference similarity. alpha is the gri
 mean EER-point threshold at that alpha. Both are then applied once to the screened NFI
 writers (NFI_FUSION_WRITERS), who took no part in the choice.
 
-Shipped from this method: ALPHA_DEFAULT = 0.4, DECISION_THRESHOLD = 0.7564
-(docs/ENG_REPORT.md F16). The script prints whether a run reproduces them.
+Chosen by this method: ALPHA_DEFAULT = 0.4 and SONOF_FUSED_THRESHOLD = 0.7564
+(docs/ENG_REPORT.md F16). The script prints whether a run reproduces them. alpha ships;
+the shipped tau (DECISION_THRESHOLD) now comes from the in-house campaign instead.
 
     python scripts/calibrate_fusion.py
 """
@@ -27,7 +28,7 @@ import numpy as np
 from config.settings import (
     ALPHA_DEFAULT,
     ALPHA_GRID_STEP,
-    DECISION_THRESHOLD,
+    SONOF_FUSED_THRESHOLD,
     NFI_FUSION_WRITERS,
     NUM_ENROLLMENT_REFERENCES,
     SIGCOMP2009_DIR,
@@ -123,9 +124,9 @@ def evaluate(draws, alpha, tau):
 def choose(draws, step=ALPHA_GRID_STEP):
     """alpha with the lowest mean EER over the draws, then tau at that alpha's mean EER point."""
     alphas = np.round(np.arange(0.0, 1.0 + 1e-9, step), 2)
-    eers = [evaluate(draws, a, DECISION_THRESHOLD)["eer"][0] for a in alphas]
+    eers = [evaluate(draws, a, SONOF_FUSED_THRESHOLD)["eer"][0] for a in alphas]
     alpha = float(alphas[int(np.argmin(eers))])
-    return alpha, evaluate(draws, alpha, DECISION_THRESHOLD)["eer_tau"][0]
+    return alpha, evaluate(draws, alpha, SONOF_FUSED_THRESHOLD)["eer_tau"][0]
 
 
 def main(argv=None):
@@ -151,8 +152,8 @@ def main(argv=None):
           f"EER {at_nfi['eer'][0]:.2f} +/- {at_nfi['eer'][1]:.2f}%, "
           f"FAR {at_nfi['far'][0]:.2f}%, FRR {at_nfi['frr'][0]:.2f}%")
 
-    same = alpha == ALPHA_DEFAULT and round(tau, 4) == DECISION_THRESHOLD
-    print(f"Shipped: alpha {ALPHA_DEFAULT}, tau {DECISION_THRESHOLD} -> "
+    same = alpha == ALPHA_DEFAULT and round(tau, 4) == SONOF_FUSED_THRESHOLD
+    print(f"SONOF choice: alpha {ALPHA_DEFAULT}, tau {SONOF_FUSED_THRESHOLD} -> "
           + ("reproduced." if same else "NOT reproduced; check the weights and the data."))
     return {"alpha": alpha, "tau": tau, "sonof": at_sonof, "nfi": at_nfi}
 

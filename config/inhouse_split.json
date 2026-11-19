@@ -1,0 +1,32 @@
+{
+ "seed": 42,
+ "test_fraction": 0.5,
+ "rule": "every forger is test; others by sha256(seed:writer) < test_fraction",
+ "train": [
+  "inhouse_P03",
+  "inhouse_P08",
+  "inhouse_P09",
+  "inhouse_P10",
+  "inhouse_P13",
+  "inhouse_P14",
+  "inhouse_P15",
+  "inhouse_P17",
+  "inhouse_P20",
+  "inhouse_P21",
+  "inhouse_P22",
+  "inhouse_P23"
+ ],
+ "test": [
+  "inhouse_P01",
+  "inhouse_P02",
+  "inhouse_P04",
+  "inhouse_P05",
+  "inhouse_P07",
+  "inhouse_P11",
+  "inhouse_P12"
+ ],
+ "forgers": [
+  "inhouse_P01",
+  "inhouse_P02"
+ ]
+}

@@ -91,18 +91,54 @@ def test_os_comes_from_each_tablet_files_own_manifest_row(tmp_path):
     assert writer["forged"][0]["os"] == "Linux"
 
 
+def test_a_manifest_written_on_windows_still_gives_the_os(tmp_path):
+    """The Windows sessions saved backslash paths; they must still match their files."""
+    _tablet(tmp_path, "P05", "genuine", "Windows", index=1)
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text(manifest.read_text().replace("P05/", "P05\\"))
+    assert parse_inhouse(str(tmp_path))["inhouse_P05"]["genuine"][0]["os"] == "Windows"
+
+
 def test_participants_limits_what_is_read(tmp_path):
     _tablet(tmp_path, "P05", "genuine", "Windows", index=1)
+    _tablet(tmp_path, "P07", "genuine", "Windows", index=1)
+    assert list(parse_inhouse(str(tmp_path), participants=["P07"])) == ["inhouse_P07"]
+
+
+def test_excluded_participants_are_never_read(tmp_path):
+    """The owner dropped some sessions as bad (INHOUSE_EXCLUDED); they enter no number."""
+    _tablet(tmp_path, "P05", "genuine", "Windows", index=1)
     _tablet(tmp_path, "P06", "genuine", "Windows", index=1)
-    assert list(parse_inhouse(str(tmp_path), participants=["P06"])) == ["inhouse_P06"]
+    assert list(parse_inhouse(str(tmp_path), exclude=("P06",))) == ["inhouse_P05"]
+
+
+def test_forgeries_of_no_driver_writers_are_scaled_to_their_genuines(tmp_path):
+    """Their genuines went through Windows Ink without the driver, their forgeries through
+    Wintab with it (G10: about 0.4 of the pressure); the forgery is brought to the genuines'
+    scale, never the other way, so nothing clips."""
+    _tablet(tmp_path, "P10", "genuine", "Windows", index=1)
+    _tablet(tmp_path, "P10", "forgery", "Windows", forger="P01", attempt=1)
+    _tablet(tmp_path, "P14", "forgery", "Windows", forger="P01", attempt=1)
+    writers = parse_inhouse(str(tmp_path), no_driver=("P10",), no_driver_scale=0.4)
+    assert writers["inhouse_P10"]["genuine"][0]["pressure_scale"] == 1.0
+    assert writers["inhouse_P10"]["forged"][0]["pressure_scale"] == 0.4
+    assert writers["inhouse_P14"]["forged"][0]["pressure_scale"] == 1.0
+
+
+def test_pressure_scale_multiplies_the_loaded_pressure(tmp_path):
+    path = _tablet(tmp_path, "P10", "genuine", "Windows", index=1)
+    full = load_inhouse_tablet_file(str(path))
+    scaled = load_inhouse_tablet_file(str(path), pressure_scale=0.4)
+    assert np.allclose(scaled[:, 2], 0.4 * full[:, 2])
+    assert np.array_equal(np.delete(scaled, 2, axis=1), np.delete(full, 2, axis=1))
 
 
 def test_a_file_in_another_participants_folder_raises(tmp_path):
     path = _tablet(tmp_path, "P05", "genuine", "Windows", index=1)
-    stray = tmp_path / "P06" / path.name
+    stray = tmp_path / "P07" / path.name
     stray.parent.mkdir()
     path.rename(stray)
-    with pytest.raises(ValueError, match="P06"):
+    with pytest.raises(ValueError, match="P07"):
         parse_inhouse(str(tmp_path))
 
 
