@@ -632,6 +632,34 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   embeddings (ISO/IEC 24745)
 - Audit log: record every verification event — `User ID, Timestamp,
 Modality State, Similarity Score, Decision` — plaintext and queryable
+- **The login password unlocks the data (one key slot per employee).** The random data
+  key is stored only wrapped, once per employee, by a key derived with scrypt
+  (`DatabaseManager.KDF_N = 2**17`) from that employee's password. Unwrapping is the
+  login check, so no password hash is stored. No password, no unwrapped key and no key
+  file is ever written to disk, the database, a log or a backup. A forgotten password
+  is reset by the admin, who wraps a new copy. If every password is lost, the
+  templates cannot be recovered. Passwords need `MIN_PASSWORD_LENGTH`
+  (`config/settings.py`) characters. `SIGVER_DB_PASSPHRASE` is for tests and CI only.
+- **Clients belong to the company, not to one employee.** Any employee enrols a new
+  client, adds a set the client lacks, and verifies any client. Only the admin (the
+  first account on a new database) adds employees, resets a password, removes an
+  employee, deletes a client, or replaces or removes a set a client already holds.
+  `enrolled_by` is recorded and never used to block. Every enrolment, re-enrolment and
+  deletion, and every refused attempt, goes to the audit log with the employee.
+- **Data after capture.** The database stores embeddings and the encrypted list of the
+  file paths the employee picked, never an image or a trajectory. Templates have no
+  expiry date: a client's templates are removed only when the admin deletes the client.
+- **Replay check.** Each verification row stores the SHA-256 of each probe embedding
+  (never the embedding). A probe whose hash was already accepted for the same client
+  within `REPLAY_WINDOW_DAYS`, or a visit that gives one signing twice, is a replay.
+- **Stale sets and the tablet.** A reference set holding any row whose `model_version`
+  differs from `MODEL_VERSION` is stale and must be re-enrolled, not scored against. The
+  pen set stores the tablet model and operating system it was signed on, and a signing
+  from another model or system is refused.
+- **Backup and restore.** A backup is a consistent copy of the encrypted database, and it
+  opens with the same passwords. A restore is checked on a scratch copy first: it must
+  be a sound database of a readable schema, opened by an admin of the backup. Nothing is
+  replaced until all of that passes.
 
 ---
 

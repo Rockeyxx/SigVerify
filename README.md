@@ -99,11 +99,11 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 **Application Layer:**
 
-`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`). `src/database/encryption.py` is still a stub (the AES code is in `db_manager.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
+`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database.py`, `tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
 
 - **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts, client enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key, and that key is itself encrypted with a key derived (scrypt) from a passphrase kept outside the database: `SIGVER_DB_PASSPHRASE` if set, otherwise a random key file the app creates beside the database on first run. Only embeddings are stored, plus the encrypted file paths of the reference images. Employee passwords are salted scrypt hashes, and an audit log records every verification.
+- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per employee, each wrapped with a key derived (scrypt) from that employee's login password, so logging in is what unlocks the data. No key file and no password is kept on disk, and a copied database cannot be opened without a password. The first account is the admin: only the admin adds employees, resets a forgotten password, deletes a client or replaces a client's references. Only embeddings are stored, plus the encrypted file paths of the reference images. The audit log records every verification, enrolment, re-enrolment and deletion, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the admin and every employee forget their passwords, the enrolled signatures cannot be recovered and every client must enrol again.**
 
 ---
 
@@ -127,9 +127,8 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   │   ├── dataset.py           # Preprocessing, quality gate, pair generation, splits
 │   │   ├── parsers.py           # Loaders for CEDAR, BHSig260, UTSig, SVC2004, SigComp2011
 │   │   └── features.py          # Kinematic feature extraction (deltas, accelerations)
-│   ├── database/                # Encrypted SQLite store (encryption.py is still a stub)
-│   │   ├── db_manager.py
-│   │   └── encryption.py
+│   ├── database/                # Encrypted SQLite store
+│   │   └── db_manager.py
 │   ├── capture/                 # Tablet capture, signing window, ink crop for photos
 │   │   ├── collect.py
 │   │   ├── ink.py
