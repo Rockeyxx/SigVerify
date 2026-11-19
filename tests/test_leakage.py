@@ -51,7 +51,7 @@ def cross_corpus_duplicates(training_roots, evaluation_roots):
     An evaluation corpus that shares a file with a training corpus measures
     memorisation for that file, not generalisation. Byte identity is the cheap,
     zero-false-positive half of the check; near-duplicates need the perceptual
-    hash screen in tools/cold_start_eval.py.
+    hash screen in tools/research/cold_start_eval.py.
     """
     train = {}
     for root in training_roots:

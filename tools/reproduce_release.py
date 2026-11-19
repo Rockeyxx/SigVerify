@@ -12,7 +12,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (ENROLLMENT_TRIALS, MODEL_WEIGHTS_DIR,  # noqa: E402
                              NUM_ENROLLMENT_REFERENCES, PROJECT_ROOT, SEED,

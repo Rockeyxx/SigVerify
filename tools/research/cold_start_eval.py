@@ -11,15 +11,14 @@ Reports FAR, FRR, and HTER metrics across multiple threshold configurations:
 import argparse
 import os
 import re
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (
     MODEL_WEIGHTS_DIR,
     NUM_ENROLLMENT_REFERENCES,
+    PROJECT_ROOT,
     SIGCOMP2009_DIR,
     SPATIAL_DECISION_THRESHOLD,
     TARGET_FAR,
@@ -31,7 +30,7 @@ from scripts.evaluate import (compute_eer, compute_far_frr, enrollment_draw,
 from src.data.dataset import quality_gate, trajectory_gate
 from src.data.parsers import parse_deepsigndb, parse_sigcomp2011_offline
 from src.verification import (bytes_to_embedding, embed, embedding_to_bytes,
-                              load_model, verify)
+                              load_model, nearest_reference_distances, verify)
 
 # Mapping of unseen evaluation corpora by modality branch.
 UNSEEN_CORPUS = {
@@ -131,15 +130,13 @@ def load_corpus(branch, corpus="default"):
             "    --weights models/weights/archive_spatial_cnn_m20_8.59eer.pth")
 
     if corpus == "nfi2009":
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(base, "data", "sigcomp2009_clean",
+        with open(os.path.join(PROJECT_ROOT, "data", "sigcomp2009_clean",
                                "clean_writers.txt")) as handle:
             allowed = {line.strip() for line in handle if line.strip()}
         writers = parse_nfi2009(
             SIGCOMP2009_DIR, allowed)
     elif corpus == "sign_data":
-        listing = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "data", "sign_data_clean", "clean_writers.txt")
+        listing = os.path.join(PROJECT_ROOT, "data", "sign_data_clean", "clean_writers.txt")
         with open(listing) as handle:
             allowed = {line.strip() for line in handle if line.strip()}
         writers = parse_sign_data(
@@ -209,8 +206,7 @@ def scores_per_writer(embedded, num_references, seed):
         refs, probes = enrollment_draw(rng, len(genuine_banks[0]), num_references)
 
         def nearest(candidates, bank):
-            distances = np.linalg.norm(candidates[:, None, :] - bank[None, :, :], axis=2)
-            return similarity_from_distance(distances.min(axis=1))
+            return similarity_from_distance(nearest_reference_distances(candidates, bank))
 
         # Every model sees the SAME reference draw, so the averaged score is an
         # ensemble over one enrolment rather than an average over enrolment luck

@@ -300,10 +300,10 @@ class TestSignatureService:
         Asking for the ensemble and silently getting one model is the failure
         mode that matters here.
 
-        The member checkpoints are gitignored and absent from the public release,
-        so on a machine holding only the release the fallback was the *normal*
-        path: the service would run at single-model accuracy while its own flag
-        said otherwise, and nothing would report it.
+        The member checkpoints are gitignored and optional release assets, so on
+        a machine without them the fallback would be the *normal* path: the
+        service would run at single-model accuracy while its own flag said
+        otherwise, and nothing would report it.
         """
         import src.verification as verification
 

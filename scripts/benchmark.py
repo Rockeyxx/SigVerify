@@ -6,14 +6,11 @@ Evaluates embedding representation quality and discrimination metrics
 
 
 import argparse
-import os
-import sys
 
 import numpy as np
 import torch
 from torch.utils.data import Subset, DataLoader
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from config.settings import (
     SEED,
@@ -25,6 +22,7 @@ from config.settings import (
 from tqdm.auto import tqdm
 
 from scripts.evaluate import (build_eval_loader, compute_eer, embed_writers,
+                              dataset_key as dataset_of,
                               enrolled_trial_scores, enrolled_writer_count,
                               load_branch_model, score_pairs,
                               writer_dependent_scores, znorm_trial_scores)
@@ -270,6 +268,22 @@ def select_test_writers(requested, train_ids, val_ids, test_ids):
     return [w for w in requested if w in set(test_ids) or w in set(val_ids)]
 
 
+def apply_derived_features(writer_samples):
+    """Replace every trajectory with its 16 z-scored time functions in place.
+
+    Applied once before training to avoid recomputing filtering per epoch.
+    Note: Derived time functions improve discrimination on practiced signature
+    corpora, but can degrade performance when signatures lack consistent dynamic patterns.
+    """
+    from tools.research.dtw_baseline import standardized_time_functions
+
+    for record in writer_samples.values():
+        for label in ("genuine", "forged"):
+            if label in record:
+                record[label] = [standardized_time_functions(s) for s in record[label]]
+    return writer_samples
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -289,7 +303,6 @@ def main(argv=None):
     if args.branch == "temporal" and args.temporal_features == "derived":
         # Same transform, applied the same way as training. Importing it from
         # train.py rather than duplicating it means the two can never drift.
-        from scripts.train import apply_derived_features
         print("Deriving kinematic time functions to match the checkpoint's channel count")
         apply_derived_features(writer_samples)
 
@@ -323,10 +336,15 @@ def main(argv=None):
 
     model = load_branch_model(args.branch, args.weights, device)
 
+    embedded = None
     if args.enroll:
+        # Embedded once here; the per-dataset breakdown below reuses it.
+        embedded = embed_writers(model, writer_samples, test_ids, args.branch, device,
+                                 args.batch_size, desc=f"{args.branch} · benchmark · embedding")
         # enrolled_scores prints the per-trial EER spread itself; main only
         # forwards the representative draw.
-        scores, labels, _ = enrolled_scores(args, writer_samples, test_ids, model, device)
+        scores, labels, _ = enrolled_scores(args, writer_samples, test_ids, model, device,
+                                            embedded=embedded)
     else:
         loader = build_eval_loader(writer_samples, test_ids, args.branch, args.batch_size,
                                    args.num_workers, args.seed)
@@ -336,11 +354,13 @@ def main(argv=None):
     report = separation_report(scores, labels, margin=args.margin)
     print_separation_report(args.branch, report)
 
-    per_dataset = per_dataset_report(args, writer_samples, test_ids, model, device)
+    per_dataset = per_dataset_report(args, writer_samples, test_ids, model, device,
+                                     embedded=embedded)
     return {**report, "per_dataset": per_dataset}
 
 
-def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="benchmark"):
+def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="benchmark",
+                    embedded=None):
     """
     Score `writer_ids` under the enrollment protocol, averaged over reference draws.
 
@@ -354,10 +374,16 @@ def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="bench
     lucky one. `spread` carries the EER of every trial, because the spread is
     the interesting part: it says how much of a result is enrollment luck.
 
+    `embedded` (from embed_writers) is reused when given, so a subset of writers that
+    were already embedded is not run through the model again.
+
     Returns: (scores, labels, spread) where spread is a numpy array of per-trial EERs.
     """
-    embedded = embed_writers(model, writer_samples, writer_ids, args.branch, device,
-                             args.batch_size, desc=f"{args.branch} · {desc} · embedding")
+    if embedded is None:
+        embedded = embed_writers(model, writer_samples, writer_ids, args.branch, device,
+                                 args.batch_size, desc=f"{args.branch} · {desc} · embedding")
+    else:
+        embedded = {w: embedded[w] for w in writer_ids}
 
     scoreable = enrolled_writer_count(embedded, args.enroll)
     decision = "per-user SVM" if args.wd_classifier else "nearest-reference distance"
@@ -393,23 +419,7 @@ def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="bench
     return scores, labels, spread
 
 
-def dataset_of(writer_id):
-    """
-    Map a namespaced writer ID back to the dataset it came from.
-
-    A writer_samples that splits its writers by script or language keeps that middle
-    token — `bhsig_Bengali`, `sigcomp_Dutch` — because the cross-script gap is
-    the interesting comparison and pooling it away is exactly the mistake the
-    per-dataset breakdown exists to prevent. Datasets with a bare numeric writer
-    ID (`svc_11`, `cedar_7`) collapse to the prefix.
-    """
-    parts = writer_id.split("_")
-    if len(parts) > 2 and not parts[1].isdigit():
-        return "_".join(parts[:2])
-    return parts[0]
-
-
-def per_dataset_report(args, writer_samples, test_ids, model, device):
+def per_dataset_report(args, writer_samples, test_ids, model, device, embedded=None):
     """
     Break the pooled EER down by source writer_samples.
 
@@ -433,7 +443,7 @@ def per_dataset_report(args, writer_samples, test_ids, model, device):
     for name, writers in sorted(groups.items()):
         if args.enroll:
             scores, labels, _ = enrolled_scores(args, writer_samples, writers, model, device,
-                                                desc=name)
+                                                desc=name, embedded=embedded)
         else:
             loader = build_eval_loader(writer_samples, writers, args.branch, args.batch_size,
                                        args.num_workers, args.seed)
