@@ -241,7 +241,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv(storage.HOME_ENV_VAR, str(tmp_path / "home"))
     monkeypatch.delenv(PASSPHRASE_ENV_VAR, raising=False)
     storage._reset()
-    assert storage.register_employee("Alice A", "alice", "pw-a")[0]
+    assert storage.register_employee("Alice A", "alice", "alice-password-1")[0]
     yield
     storage._reset()
 
