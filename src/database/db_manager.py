@@ -16,11 +16,12 @@ useless without an employee's password. If every password is lost, the templates
 cannot be recovered.
 
 Employees: the first account on an empty database is the admin. Only the admin adds
-employees, resets a password, removes an employee, deletes a client, or replaces a
-client's existing references. Any employee enrols new clients and verifies any client:
-clients belong to the company, not to the employee who enrolled them (`enrolled_by`
-is recorded, never used to block). Every enrolment, re-enrolment and deletion, and
-every refused attempt, is written to the plaintext audit log with the employee.
+employees, resets a password, removes an employee, deletes a client, replaces a
+client's existing references, or backs up or restores the database. Any employee
+enrols new clients and verifies any client: clients belong to the company, not to the
+employee who enrolled them (`enrolled_by` is recorded, never used to block). Every
+enrolment, re-enrolment, deletion and restore, and every refused attempt, is written to
+the plaintext audit log with the employee.
 """
 import hashlib
 import json
@@ -63,6 +64,7 @@ EVENT_REENROL = "re-enrol"
 EVENT_DELETE = "delete"
 EVENT_REENROL_REFUSED = "re-enrol refused"
 EVENT_DELETE_REFUSED = "delete refused"
+EVENT_RESTORE = "restore"
 
 
 class DatabaseLockedError(RuntimeError):
@@ -1003,23 +1005,48 @@ class DatabaseManager:
             raise
         return dest_path
 
-    def restore_from(self, backup_path: str, username: str, password: str) -> dict:
+    def restore_from(self, actor_id, backup_path: str, username: str, password: str) -> dict:
         """
-        Replace this database with a backup. Everything is checked on a scratch copy first,
-        and nothing is replaced unless all of it passes: the file is a sound SQLite database
-        of the schema this code reads (an older one is refused), and `username` /
-        `password` is an ADMIN of the backup whose key slot opens it. Afterwards the store is
-        unlocked with the backup's key. Returns that admin's employee dict.
-        Raises ValueError (not a usable backup), PermissionError (wrong password or not an admin).
+        Replace this database with a backup. If this database has employees, only its active
+        admin (`actor_id`) may do it (PermissionError). Everything is checked on a scratch
+        copy first: it holds no trigger, no view and no table this app does not create, it
+        is a sound SQLite database of the schema this code reads (an older one is refused),
+        and `username` / `password` is an ADMIN of the backup whose key slot opens it. Then
+        the live database is copied to `<name>.before-restore-<YYYYmmdd-HHMMSS>` beside it
+        (owner-only), a "restore" row is written into the scratch copy, and only then is the
+        live database replaced. A failure before the replacement leaves the live file as it
+        was. Afterwards the store is unlocked with the backup's key. Returns that admin's
+        employee dict.
+        Raises ValueError (not a usable backup), PermissionError (not an admin, wrong password).
         """
+        live_admin = None
+        if self.has_employees():
+            with closing(self.get_connection()) as conn:
+                try:
+                    is_admin = self._is_admin(conn, actor_id)
+                except LookupError:
+                    is_admin = False
+                if not is_admin:
+                    raise PermissionError("Only the admin can restore a backup")
+                live_admin = conn.execute("SELECT username FROM employees WHERE id = ?", (actor_id,)).fetchone()[0]
         if not os.path.isfile(backup_path):
             raise ValueError(f"No backup file at {backup_path}")
         scratch_dir = tempfile.mkdtemp(prefix="sigverify-restore-")
         scratch = os.path.join(scratch_dir, "check.db")
         try:
             shutil.copyfile(backup_path, scratch)
+            fresh = type(self)(os.path.join(scratch_dir, "fresh.db"))   # the tables a new database gets
+            with closing(fresh.get_connection()) as conn:
+                tables = {n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             try:
                 with closing(sqlite3.connect(scratch)) as conn:
+                    for kind, name in conn.execute("SELECT type, name FROM sqlite_master"):
+                        if kind in ("trigger", "view"):
+                            raise ValueError(f"The backup contains a {kind}, which this app never creates; "
+                                             "refusing it.")
+                        if kind == "table" and name not in tables:
+                            raise ValueError(f"The backup contains a table ({name}) this app never creates; "
+                                             "refusing it.")
                     ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
                 if ok != "ok":
                     raise ValueError("The backup file is damaged")
@@ -1033,6 +1060,19 @@ class DatabaseManager:
                 raise PermissionError("The user ID or password does not open this backup")
             if not employee["is_admin"]:
                 raise PermissionError("Only an admin of the backup can restore it")
+            if live_admin is not None:
+                base = f"{self.db_path}.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                dest, n = base, 1
+                while True:   # never over an existing copy: -2, -3, ...
+                    try:
+                        self.backup_to(actor_id, dest)
+                        break
+                    except FileExistsError:
+                        n += 1
+                        dest = f"{base}-{n}"
+            with candidate._transaction() as conn:
+                self._log_event(conn, EVENT_RESTORE, None, None, employee["id"], [
+                    f"restored by {live_admin or 'new install'} from {os.path.basename(backup_path)}"])
             with closing(sqlite3.connect(scratch)) as src, closing(sqlite3.connect(self.db_path)) as dst:
                 src.backup(dst)
             self._dek = candidate._dek

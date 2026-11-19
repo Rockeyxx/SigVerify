@@ -4,6 +4,7 @@ backup / restore, and the migration of v3 / v4 databases. Temporary databases on
 import os
 import shutil
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -362,7 +363,7 @@ def test_restore_brings_the_backup_back(db, staff, path, tmp_path):
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.delete_client("c1", admin)
-    emp = db.restore_from(backup, "admin", PW_ADMIN)
+    emp = db.restore_from(admin, backup, "admin", PW_ADMIN)
     assert emp["is_admin"] and np.array_equal(db.get_client_record("c1")["spatial"][0], scan(3)[0])
 
 
@@ -371,18 +372,114 @@ def test_restore_checks_everything_before_replacing_anything(db, staff, path, tm
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)   # only in the live database
+    live = file_bytes(path)
     with pytest.raises(PermissionError):
-        db.restore_from(backup, "admin", "wrong-password-1")
+        db.restore_from(admin, backup, "admin", "wrong-password-1")
     with pytest.raises(PermissionError, match="admin"):
-        db.restore_from(backup, "bob", PW_BOB)                         # not an admin of the backup
+        db.restore_from(admin, backup, "bob", PW_BOB)                  # not an admin of the backup
     junk = tmp_path / "junk.db"
     junk.write_bytes(b"this is not a database at all" * 100)
     with pytest.raises(ValueError):
-        db.restore_from(str(junk), "admin", PW_ADMIN)
+        db.restore_from(admin, str(junk), "admin", PW_ADMIN)
     with pytest.raises(ValueError):
-        db.restore_from(str(tmp_path / "missing.db"), "admin", PW_ADMIN)
-    assert db.has_client("c2")                                         # nothing was replaced
+        db.restore_from(admin, str(tmp_path / "missing.db"), "admin", PW_ADMIN)
+    assert db.has_client("c2") and file_bytes(path) == live           # nothing was replaced
+    assert not [f for f in os.listdir(tmp_path) if ".before-restore-" in f]
     assert DatabaseManager(path).authenticate_employee("admin", PW_ADMIN)[0] is not None
+
+
+def test_restore_by_a_non_admin_of_the_live_database_is_refused_at_the_database(db, staff, path, tmp_path):
+    admin, bob = staff
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    live = file_bytes(path)
+    for actor in (bob, None, 999):
+        with pytest.raises(PermissionError, match="admin"):
+            db.restore_from(actor, backup, "admin", PW_ADMIN)   # a valid backup admin does not help
+    assert file_bytes(path) == live
+
+
+def _tampered_backup(db, admin, tmp_path, sql):
+    backup = db.backup_to(admin, str(tmp_path / "tampered.db"))
+    with closing(sqlite3.connect(backup)) as conn:
+        conn.execute(sql)
+        conn.commit()
+    return backup
+
+
+@pytest.mark.parametrize("sql, reason", [
+    ("CREATE TRIGGER t AFTER INSERT ON audit_log BEGIN DELETE FROM audit_log; END", "trigger"),
+    ("CREATE VIEW v AS SELECT * FROM employees", "view"),
+    ("CREATE TABLE extra (x)", "table"),
+])
+def test_a_backup_with_objects_this_app_never_creates_is_refused(db, staff, path, tmp_path, sql, reason):
+    admin, _ = staff
+    backup = _tampered_backup(db, admin, tmp_path, sql)
+    live = file_bytes(path)
+    with pytest.raises(ValueError, match=reason):
+        db.restore_from(admin, backup, "admin", PW_ADMIN)
+    assert file_bytes(path) == live
+
+
+def test_a_backup_with_an_extra_index_is_accepted(db, staff, path, tmp_path):
+    admin, _ = staff
+    backup = _tampered_backup(db, admin, tmp_path, "CREATE INDEX extra_idx ON audit_log(event)")
+    assert db.restore_from(admin, backup, "admin", PW_ADMIN)["is_admin"]
+
+
+class _FixedClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 11, 20, 14, 30, 5)
+
+
+def test_restore_keeps_an_owner_only_copy_of_the_live_database_first(db, staff, path, tmp_path, monkeypatch):
+    import src.database.db_manager as dbm
+    admin, _ = staff
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    monkeypatch.setattr(dbm, "datetime", _FixedClock)
+    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    first = tmp_path / "signatures.db.before-restore-20261120-143005"
+    assert first.is_file() and (first.stat().st_mode & 0o777) == 0o600
+    assert DatabaseManager(str(first)).has_client("c2")          # the live data before the restore
+    db.restore_from(admin, backup, "admin", PW_ADMIN)              # same second: a new name, never overwrite
+    second = tmp_path / "signatures.db.before-restore-20261120-143005-2"
+    assert second.is_file() and (second.stat().st_mode & 0o777) == 0o600
+
+
+def test_restore_stops_if_the_live_copy_cannot_be_made(db, staff, path, tmp_path, monkeypatch):
+    admin, _ = staff
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    live = file_bytes(path)
+
+    def broken(actor_id, dest):
+        raise OSError("disk full")
+    monkeypatch.setattr(db, "backup_to", broken)
+    with pytest.raises(OSError):
+        db.restore_from(admin, backup, "admin", PW_ADMIN)
+    assert file_bytes(path) == live
+
+
+def test_the_restored_database_logs_the_restore(db, staff, path, tmp_path):
+    admin, _ = staff
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    rows = [e for e in db.get_log_events(event=None) if e["event"] == "restore"]
+    assert len(rows) == 1 and rows[0]["employee"] == "admin"
+    assert rows[0]["reasons"] == ["restored by admin from backup.db"]
+    assert not [e for e in DatabaseManager(backup).get_log_events(event=None) if e["event"] == "restore"]
+
+
+def test_a_restore_on_a_new_install_logs_new_install(db, staff, tmp_path):
+    backup = db.backup_to(staff[0], str(tmp_path / "backup.db"))
+    (tmp_path / "new").mkdir()
+    fresh = DatabaseManager(str(tmp_path / "new" / "signatures.db"))
+    fresh.restore_from(None, backup, "admin", PW_ADMIN)
+    rows = [e for e in fresh.get_log_events(event=None) if e["event"] == "restore"]
+    assert rows[0]["reasons"] == ["restored by new install from backup.db"]
+    assert not [f for f in os.listdir(tmp_path / "new") if ".before-restore-" in f]   # nothing to keep
 
 
 # ------------------------------------------------------ old databases (v3 / v4)

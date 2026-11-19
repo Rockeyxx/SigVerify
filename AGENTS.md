@@ -664,10 +664,23 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   differs from `MODEL_VERSION` is stale and must be re-enrolled, not scored against. The
   pen set stores the tablet model and operating system it was signed on, and a signing
   from another model or system is refused.
-- **Backup and restore.** A backup is a consistent copy of the encrypted database, and it
-  opens with the same passwords. A restore is checked on a scratch copy first: it must
-  be a sound database of a readable schema, opened by an admin of the backup. Nothing is
-  replaced until all of that passes.
+- **Backup and restore.** Only the admin backs up, and a backup is a consistent copy of
+  the encrypted database, created owner-only (mode 0600) and never over an existing file.
+  It opens with the same passwords. Only the admin restores (anyone on a new install with
+  no employees), and `DatabaseManager.restore_from` checks this itself. A restore is
+  checked on a scratch copy first: a backup holding a trigger, a view or a table this app
+  never creates is refused, and it must be a sound database of a readable schema, opened
+  by an admin of the backup. Then the live database is copied, owner-only, to
+  `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside it (`-2`, `-3` on a clash), and
+  a `restore` row naming who restored and from which file goes into the backup's audit
+  log. Nothing is replaced until all of that passes.
+- **Two known limits, documented instead of built.** Removing an employee does not change
+  the data key, so a copy of the database taken before the removal still opens with their
+  old password (key rotation would be a separate, manual step, as in Bitwarden
+  organisations). `is_admin` is a plain column: signing it with a key derived from the
+  data key would not help, because any employee with a password can unwrap the data key
+  and re-sign a hand-edited flag. Protecting against someone who holds both the file and
+  a valid password needs a server, which is a non-goal.
 
 ---
 

@@ -641,14 +641,15 @@ def restore_database(backup_path: str, username: str, password: str) -> tuple:
     Replace the database with a backup. Allowed on a new install (no accounts yet) or for
     the logged-in admin. The backup is checked before anything is replaced: it must be a
     sound backup of this app, and `username` / `password` must be an admin of the BACKUP.
-    That admin is logged in afterwards. Returns (success, message).
+    The database layer checks the admin again, keeps a copy of the live database beside it
+    and logs the restore. That admin is logged in afterwards. Returns (success, message).
     """
     global _session
     db = _get_db()
     if db.has_employees() and not (_session and _session["is_admin"]):
         return False, "Only the admin can restore a backup."
     try:
-        emp = db.restore_from(backup_path, username, password)
+        emp = db.restore_from(_session["id"] if _session else None, backup_path, username, password)
     except (ValueError, PermissionError) as e:
         return False, str(e)
     _session = emp
