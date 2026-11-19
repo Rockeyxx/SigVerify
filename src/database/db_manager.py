@@ -1040,7 +1040,11 @@ class DatabaseManager:
                 tables = {n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             try:
                 with closing(sqlite3.connect(scratch)) as conn:
-                    for kind, name in conn.execute("SELECT type, name FROM sqlite_master"):
+                    version = conn.execute("PRAGMA user_version").fetchone()[0]
+                    found = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
+                    if found and version < SCHEMA_VERSION:   # same message as init_db, not "foreign table"
+                        raise ValueError(f"schema v{version} is older than v{SCHEMA_VERSION} and is not supported")
+                    for kind, name in found:
                         if kind in ("trigger", "view"):
                             raise ValueError(f"The backup contains a {kind}, which this app never creates; "
                                              "refusing it.")

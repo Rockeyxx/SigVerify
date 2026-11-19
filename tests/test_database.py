@@ -421,6 +421,15 @@ def test_a_backup_with_objects_this_app_never_creates_is_refused(db, staff, path
     assert file_bytes(path) == live
 
 
+def test_an_old_schema_backup_is_refused_as_old_not_as_foreign(db, staff, path, tmp_path):
+    old = str(tmp_path / "old.db")
+    _make_v4(old)
+    live = file_bytes(path)
+    with pytest.raises(ValueError, match="schema v4 is older than v5 and is not supported"):
+        db.restore_from(staff[0], old, "admin", PW_ADMIN)
+    assert file_bytes(path) == live
+
+
 def test_a_backup_with_an_extra_index_is_accepted(db, staff, path, tmp_path):
     admin, _ = staff
     backup = _tampered_backup(db, admin, tmp_path, "CREATE INDEX extra_idx ON audit_log(event)")

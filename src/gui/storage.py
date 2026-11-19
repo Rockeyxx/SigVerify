@@ -32,6 +32,7 @@ View button works only for photos picked in the current session.
 import base64
 import binascii
 import os
+import sqlite3
 import threading
 from datetime import datetime
 
@@ -652,5 +653,7 @@ def restore_database(backup_path: str, username: str, password: str) -> tuple:
         emp = db.restore_from(_session["id"] if _session else None, backup_path, username, password)
     except (ValueError, PermissionError) as e:
         return False, str(e)
+    except (OSError, sqlite3.Error) as e:   # disk full, unreadable file, locked database
+        return False, f"The backup could not be restored: {e}"
     _session = emp
     return True, "Backup restored"

@@ -707,6 +707,60 @@ def test_a_backup_can_be_restored_on_a_new_install(people, tmp_path, monkeypatch
     assert storage.authenticate_employee("bob", PW_B)[0]           # same passwords as before
 
 
+def _backup_of_c(tmp_path):
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
+    folder = tmp_path / "usb"
+    folder.mkdir()
+    return storage.backup_database(str(folder), "alice")[1]
+
+
+def test_a_non_admin_session_cannot_restore_and_nothing_changes(people, tmp_path, isolated_storage):
+    path = _backup_of_c(tmp_path)
+    login("bob", PW_B)
+    live = db_bytes(isolated_storage)
+    ok, msg = storage.restore_database(path, "alice", PW_A)
+    assert not ok and "admin" in msg and db_bytes(isolated_storage) == live
+
+
+def test_a_failing_copy_of_the_live_database_is_reported_and_nothing_changes(people, tmp_path, isolated_storage,
+                                                                             monkeypatch):
+    path = _backup_of_c(tmp_path)
+    storage.save_client_enrollment("D", [], "alice", spatial_embeddings=spatial(5, 9), spatial_origin="scan")
+    live, session = db_bytes(isolated_storage), dict(storage._session)
+
+    def disk_full(self, actor_id, dest):
+        raise OSError("No space left on device")
+    monkeypatch.setattr(DatabaseManager, "backup_to", disk_full)
+    ok, msg = storage.restore_database(path, "alice", PW_A)
+    assert not ok and "No space left on device" in msg
+    assert db_bytes(isolated_storage) == live and storage._session == session
+    assert storage.client_exists("d") and storage.get_client("c")["spatial_embeddings"] == spatial(5)
+
+
+def test_a_database_error_during_restore_is_reported(people, tmp_path, monkeypatch):
+    path = _backup_of_c(tmp_path)
+
+    def locked(self, *args):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(DatabaseManager, "restore_from", locked)
+    ok, msg = storage.restore_database(path, "alice", PW_A)
+    assert not ok and "database is locked" in msg and storage._session["username"] == "alice"
+
+
+def test_restore_passes_the_session_employee_to_the_database(people, tmp_path, monkeypatch):
+    path = _backup_of_c(tmp_path)
+    seen = []
+    real = DatabaseManager.restore_from
+
+    def spy(self, actor_id, *args):
+        seen.append(actor_id)
+        return real(self, actor_id, *args)
+    monkeypatch.setattr(DatabaseManager, "restore_from", spy)
+    alice = storage._session["id"]
+    assert storage.restore_database(path, "alice", PW_A) == (True, "Backup restored")
+    assert seen == [alice]
+
+
 def test_backup_needs_a_login(people, tmp_path):
     storage.logout()
     ok, msg = storage.backup_database(str(tmp_path), "alice")
