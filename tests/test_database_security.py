@@ -165,8 +165,8 @@ def test_no_password_hash_is_stored_only_a_wrapped_key(db, db_path):
     """The key slot is the login check: there is no cheaper hash to attack instead."""
     a, b = two_employees(db)
     with sqlite3.connect(db_path) as conn:
-        hashes = conn.execute("SELECT legacy_salt, legacy_hash FROM employees").fetchall()
-    assert hashes == [(None, None), (None, None)]
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(employees)")]
+    assert not {"salt", "password_hash", "legacy_salt", "legacy_hash"} & set(columns)
     rows = [r for r in slots(db_path) if r[0] == "employee"]
     assert [r[1] for r in rows] == [a, b]
     (_, _, salt_a, wrapped_a), (_, _, salt_b, wrapped_b) = rows

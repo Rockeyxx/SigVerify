@@ -10,9 +10,7 @@ stored in the clear. The `key_slots` table holds wrapped copies of it:
   * one slot per employee, wrapped with a key derived (scrypt) from that employee's
     login password. Logging in IS unwrapping the slot: AES-GCM refuses a wrong
     password, so no password hash is stored at all;
-  * at most one "passphrase" slot, for tests and CI only (SIGVER_DB_PASSPHRASE);
-  * at most one "legacy" slot, the v4 key-file wrap, kept only until every employee
-    has logged in once after the upgrade.
+  * at most one "passphrase" slot, for tests and CI only (SIGVER_DB_PASSPHRASE).
 No password and no unwrapped key is ever written to disk. A copied database is
 useless without an employee's password. If every password is lost, the templates
 cannot be recovered.
@@ -25,7 +23,6 @@ is recorded, never used to block). Every enrolment, re-enrolment and deletion, a
 every refused attempt, is written to the plaintext audit log with the employee.
 """
 import hashlib
-import hmac
 import json
 import os
 import shutil
@@ -57,12 +54,7 @@ FINAL_DECISIONS = ("Genuine", "Forged")
 
 PASSPHRASE_ENV_VAR = "SIGVER_DB_PASSPHRASE"   # tests and CI only
 SCHEMA_VERSION = 5
-OLDEST_MIGRATABLE_SCHEMA = 3
 WRAP_AAD = b"sigverify-dek-v2"
-LEGACY_WRAP_AAD = b"sigverify-dek-v1"  # the v4 key-file wrap
-
-# The v4 employee password hash, checked once at the first login after the upgrade.
-LEGACY_PASSWORD_SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1, "dklen": 32}
 
 # Audit events. "verify" rows carry a decision; the others record who changed a client.
 EVENT_VERIFY = "verify"
@@ -92,7 +84,6 @@ def probe_fingerprint(embedding) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-# employees_v5 is the same table, built beside the v4 one during the migration.
 _EMPLOYEES_SQL = """
         CREATE TABLE IF NOT EXISTS employees (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,19 +91,6 @@ _EMPLOYEES_SQL = """
             full_name TEXT NOT NULL,
             is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
             active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-            legacy_salt BLOB,
-            legacy_hash BLOB,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )"""
-_EMPLOYEES_V5_SQL = """
-        CREATE TABLE IF NOT EXISTS employees_v5 (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            full_name TEXT NOT NULL,
-            is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
-            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-            legacy_salt BLOB,
-            legacy_hash BLOB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
 
@@ -120,7 +98,7 @@ _EMPLOYEES_V5_SQL = """
 _KEY_SLOTS_SQL = """
     CREATE TABLE IF NOT EXISTS key_slots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        kind TEXT NOT NULL CHECK (kind IN ('employee', 'passphrase', 'legacy')),
+        kind TEXT NOT NULL CHECK (kind IN ('employee', 'passphrase')),
         employee_id INTEGER UNIQUE REFERENCES employees(id) ON DELETE CASCADE,
         salt BLOB NOT NULL,
         kdf_n INTEGER NOT NULL,
@@ -185,24 +163,16 @@ class DatabaseManager:
         return self._dek
 
     def unlock_with_passphrase(self, passphrase) -> None:
-        """Tests and CI (SIGVER_DB_PASSPHRASE), and the v4 key file during the upgrade."""
+        """Tests and CI (SIGVER_DB_PASSPHRASE)."""
         passphrase = self._to_secret(passphrase)
         with closing(self.get_connection()) as conn:
-            rows = conn.execute(
-                "SELECT kind, salt, kdf_n, nonce, wrapped_dek FROM key_slots "
-                "WHERE kind IN ('passphrase', 'legacy') ORDER BY kind DESC"
-            ).fetchall()
+            row = conn.execute(
+                "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE kind = 'passphrase'"
+            ).fetchone()
             any_slot = conn.execute("SELECT 1 FROM key_slots LIMIT 1").fetchone()
-        if rows:
-            error = None
-            for kind, salt, n, nonce, wrapped in rows:
-                aad = LEGACY_WRAP_AAD if kind == "legacy" else WRAP_AAD
-                try:
-                    self._dek = self._unwrap(passphrase, salt, n, nonce, wrapped, aad)
-                    return
-                except InvalidTag as e:  # wrong passphrase: never falls through to a new key
-                    error = e
-            raise error
+        if row:
+            self._dek = self._unwrap(passphrase, *row)  # wrong passphrase: InvalidTag, never a new key
+            return
         if any_slot:
             raise ValueError("This database is unlocked by employee passwords only; log in instead")
         dek = AESGCM.generate_key(256)
@@ -214,11 +184,6 @@ class DatabaseManager:
                 "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
                 "VALUES ('passphrase', NULL, ?, ?, ?, ?)", slot)
         self._dek = dek
-
-    def has_legacy_slot(self) -> bool:
-        """True while some employee still has to log in once after the v4 -> v5 upgrade."""
-        with closing(self.get_connection()) as conn:
-            return conn.execute("SELECT 1 FROM key_slots WHERE kind = 'legacy'").fetchone() is not None
 
     # -------------------------------------------------------------- database
     def get_connection(self):
@@ -262,24 +227,19 @@ class DatabaseManager:
             conn.close()
 
     def init_db(self):
-        """ISO/IEC 9075-1: relational schema. Migrates v3 and v4; refuses anything older."""
+        """ISO/IEC 9075-1: relational schema. Refuses a database made before v5 (nothing is written)."""
         with closing(self.get_connection()) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             has_tables = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrollments'"
             ).fetchone()
         if has_tables:
-            if version == 3:
-                self._migrate_3_to_4()
-                version = 4
-            if version == 4:
-                self._migrate_4_to_5()
-                version = 5
+            if version < SCHEMA_VERSION:
+                raise RuntimeError(f"schema v{version} is older than v{SCHEMA_VERSION} and is not supported")
             if version != SCHEMA_VERSION:
                 raise RuntimeError(
                     f"{self.db_path} was created with schema version {version}, expected "
-                    f"{SCHEMA_VERSION} (versions {OLDEST_MIGRATABLE_SCHEMA} and 4 are migrated). "
-                    f"Delete it and re-enroll."
+                    f"{SCHEMA_VERSION}. Delete it and re-enroll."
                 )
             return
         with self._migration() as conn:
@@ -338,49 +298,6 @@ class DatabaseManager:
                     probe_hashes TEXT
                 )""")
             conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")  # skylos: ignore[SKY-D211] PRAGMA takes no bound parameter; module int constant
-
-    def _migrate_3_to_4(self):
-        """v3 -> v4 keeps all data: adds per-set enrolment time and the fuller audit columns."""
-        with self._migration() as conn:
-            conn.execute("ALTER TABLE enrollments ADD COLUMN enrolled_at TEXT")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN routing TEXT")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN degraded INTEGER")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN reasons TEXT")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN model_version TEXT")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN threshold REAL")
-            conn.execute("PRAGMA user_version = 4")
-
-    def _migrate_4_to_5(self):
-        """
-        v4 -> v5 keeps all data and needs no secret:
-          * the v4 key-file wrap moves from `meta` into a "legacy" key slot;
-          * employees gain is_admin (the oldest account becomes the admin) and active, and
-            their v4 password hash is kept as legacy_salt / legacy_hash until their first
-            login, which gives them a key slot and erases the hash;
-          * expires_at goes (retention was never wired), capture_device and the audit
-            event / probe_hashes columns arrive.
-        """
-        with self._migration() as conn:
-            conn.execute(_KEY_SLOTS_SQL)
-            conn.execute(_ONE_SHARED_SLOT_SQL)
-            conn.execute(
-                "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
-                "SELECT 'legacy', NULL, salt, ?, nonce, wrapped_dek FROM meta WHERE id = 1",
-                (int(self.KDF_N),))
-            conn.execute("DROP TABLE meta")
-            conn.execute(_EMPLOYEES_V5_SQL)
-            conn.execute(
-                "INSERT INTO employees_v5 (id, username, full_name, is_admin, active, legacy_salt, "
-                "legacy_hash, created_at) SELECT id, username, full_name, 0, 1, salt, password_hash, "
-                "created_at FROM employees")
-            conn.execute("UPDATE employees_v5 SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM employees_v5)")
-            conn.execute("DROP TABLE employees")
-            conn.execute("ALTER TABLE employees_v5 RENAME TO employees")
-            conn.execute("ALTER TABLE enrollments DROP COLUMN expires_at")
-            conn.execute("ALTER TABLE enrollments ADD COLUMN capture_device TEXT")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN event TEXT NOT NULL DEFAULT 'verify'")
-            conn.execute("ALTER TABLE audit_log ADD COLUMN probe_hashes TEXT")
-            conn.execute("PRAGMA user_version = 5")
 
     # ---------------------------------------------------------------- crypto
     @staticmethod
@@ -524,19 +441,14 @@ class DatabaseManager:
             ).fetchall()
         return [self._employee_dict(r) for r in rows]
 
-    def authenticate_employee(self, username: str, password: str, new_password: str = None):
+    def authenticate_employee(self, username: str, password: str):
         """
-        Returns (employee dict or None, reason), reason in
-        {"", "not_found", "bad_password", "weak_password"}.
+        Returns (employee dict or None, reason), reason in {"", "not_found", "bad_password"}.
         Success loads the data key: the password unwraps the employee's key slot.
-
-        new_password is used only on the first login after the v4 upgrade: an old password
-        shorter than MIN_PASSWORD_LENGTH is never made into a key slot ("weak_password"),
-        so that login must give a new password, which becomes the slot instead.
         """
         with closing(self.get_connection()) as conn:
             row = conn.execute(
-                "SELECT id, username, full_name, is_admin, legacy_salt, legacy_hash FROM employees "
+                "SELECT id, username, full_name, is_admin FROM employees "
                 "WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((username or "").strip(),),
             ).fetchone()
@@ -545,40 +457,12 @@ class DatabaseManager:
             slot = conn.execute(
                 "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE employee_id = ?", (row[0],)
             ).fetchone()
-        secret = (password or "").encode("utf-8")
-        if slot is not None:
-            try:
-                self._dek = self._unwrap(secret, *slot)
-            except InvalidTag:
-                return None, "bad_password"
-            return self._employee_dict(row), ""
-        if row[5] is not None:
-            return self._legacy_login(row, secret, new_password)
-        return None, "bad_password"
-
-    def _legacy_login(self, row, secret: bytes, new_password: str = None):
-        """First login after the v4 upgrade: check the old hash, give the employee a key slot,
-        erase the hash. The legacy slot is removed once no employee needs it.
-        A short old password must be replaced here (new_password): the key slot is what an
-        attacker with a copy of the database guesses against."""
-        candidate = hashlib.scrypt(secret, salt=row[4], **LEGACY_PASSWORD_SCRYPT)
-        if not hmac.compare_digest(candidate, row[5]):
+        if slot is None:
             return None, "bad_password"
-        dek = self._require_key()   # opened with the old key file
-        if new_password:
-            secret = self._check_password(new_password)
-        elif len(secret.decode("utf-8")) < MIN_PASSWORD_LENGTH:
-            return None, "weak_password"
-        slot = self._wrap(secret, dek)
-        with self._transaction() as conn:
-            conn.execute(
-                "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
-                "VALUES ('employee', ?, ?, ?, ?, ?)", (row[0],) + slot)
-            conn.execute("UPDATE employees SET legacy_salt = NULL, legacy_hash = NULL WHERE id = ?", (row[0],))
-            waiting = conn.execute(
-                "SELECT 1 FROM employees WHERE active = 1 AND legacy_hash IS NOT NULL").fetchone()
-            if waiting is None:
-                conn.execute("DELETE FROM key_slots WHERE kind = 'legacy'")
+        try:
+            self._dek = self._unwrap((password or "").encode("utf-8"), *slot)
+        except InvalidTag:
+            return None, "bad_password"
         return self._employee_dict(row), ""
 
     def update_employee(self, actor_id: int, old_username: str, new_full_name: str, new_username: str,
@@ -642,7 +526,6 @@ class DatabaseManager:
         conn.execute(
             "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
             "VALUES ('employee', ?, ?, ?, ?, ?)", (emp_id,) + slot)
-        conn.execute("UPDATE employees SET legacy_salt = NULL, legacy_hash = NULL WHERE id = ?", (emp_id,))
 
     def reset_password(self, admin_id: int, username: str, new_password: str) -> None:
         """The admin gives an employee a new password (a new key slot). Only that slot changes."""
@@ -674,9 +557,7 @@ class DatabaseManager:
             if row[0] == admin_id:
                 raise ValueError("The admin cannot remove their own account")
             conn.execute("DELETE FROM key_slots WHERE employee_id = ?", (row[0],))
-            conn.execute(
-                "UPDATE employees SET active = 0, legacy_salt = NULL, legacy_hash = NULL WHERE id = ?",
-                (row[0],))
+            conn.execute("UPDATE employees SET active = 0 WHERE id = ?", (row[0],))
 
     # --------------------------------------------------------------- clients
     @staticmethod
@@ -1146,7 +1027,7 @@ class DatabaseManager:
         """
         Replace this database with a backup. Everything is checked on a scratch copy first,
         and nothing is replaced unless all of it passes: the file is a sound SQLite database
-        of a schema this code reads (older ones are migrated on the copy), and `username` /
+        of the schema this code reads (an older one is refused), and `username` /
         `password` is an ADMIN of the backup whose key slot opens it. Afterwards the store is
         unlocked with the backup's key. Returns that admin's employee dict.
         Raises ValueError (not a usable backup), PermissionError (wrong password or not an admin).
@@ -1167,14 +1048,7 @@ class DatabaseManager:
                 raise ValueError("This file is not a backup of this app") from None
             except RuntimeError as e:
                 raise ValueError(str(e)) from None
-            try:
-                employee, reason = candidate.authenticate_employee(username, password)
-            except DatabaseLockedError:
-                raise ValueError("This backup predates per-employee passwords; open it with its "
-                                 "old key file in the version that made it, then back up again") from None
-            if reason == "weak_password":
-                raise PermissionError("This admin's password in the backup is too short; log in to "
-                                      "the backup's app once to choose a new one, then back up again")
+            employee, _ = candidate.authenticate_employee(username, password)
             if employee is None:
                 raise PermissionError("The user ID or password does not open this backup")
             if not employee["is_admin"]:

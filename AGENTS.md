@@ -640,8 +640,7 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   only their own profile, and a new password needs the current one. A forgotten password
   is reset by the admin, who wraps a new copy (never their own: the admin uses their
   profile). If every password is lost, the templates cannot be recovered. Passwords need
-  `MIN_PASSWORD_LENGTH` (`config/settings.py`) characters, and a shorter password from
-  before key slots must be replaced at its first login. `SIGVER_DB_PASSPHRASE` is for
+  `MIN_PASSWORD_LENGTH` (`config/settings.py`) characters. `SIGVER_DB_PASSPHRASE` is for
   tests and CI only.
 - **A write is done by whoever is logged in.** `src/gui/storage.py` takes the acting
   employee from the session, never from a name a page passes; a different name is

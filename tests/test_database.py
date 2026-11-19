@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from config.settings import MAX_REFERENCES, REPLAY_WINDOW_DAYS
 from src.database.db_manager import (
-    SCHEMA_VERSION,
     DatabaseLockedError,
     DatabaseManager,
     probe_fingerprint,
@@ -364,11 +363,10 @@ def test_restore_checks_everything_before_replacing_anything(db, staff, path, tm
     assert DatabaseManager(path).authenticate_employee("admin", PW_ADMIN)[0] is not None
 
 
-# ------------------------------------------------------ migration (v3 / v4)
+# ------------------------------------------------------ old databases (v3 / v4)
 LEGACY_KEY = "legacy-key-file-contents"
 OLD_A = "old-a"                  # a v4 password too short for a key slot (v4 had no minimum)
 OLD_B = "old-bob-password"       # a v4 password long enough to become the key slot
-NEW_A = "alice-new-password"     # what Alice chooses on her first login after the upgrade
 
 
 def _make_v4(path, legacy_passphrase=LEGACY_KEY, with_meta=True):
@@ -438,54 +436,21 @@ def _v4_to_v3(path):
 
 
 @pytest.mark.parametrize("from_version", [4, 3])
-def test_an_old_database_is_migrated_and_each_login_moves_to_a_key_slot(path, from_version):
-    template = _make_v4(path)
+def test_an_old_database_is_refused_and_left_unchanged(path, from_version):
+    _make_v4(path)
     if from_version == 3:
         _v4_to_v3(path)
-    db = DatabaseManager(path)                      # migrates; needs no secret
-    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    assert db.find_employee("alice")["is_admin"] and not db.find_employee("bob")["is_admin"]
-    with pytest.raises(DatabaseLockedError):        # an old login needs the old key once
-        db.authenticate_employee("alice", OLD_A)
-
-    db.unlock_with_passphrase(LEGACY_KEY)           # what storage does with db.key
-    assert db.authenticate_employee("alice", "wrong") == (None, "bad_password")
-    assert db.authenticate_employee("alice", OLD_A) == (None, "weak_password")   # never a 5-char slot
-    with pytest.raises(ValueError, match="at least"):
-        db.authenticate_employee("alice", OLD_A, new_password="short")
-    assert db.authenticate_employee("alice", "wrong", new_password=NEW_A) == (None, "bad_password")
-    assert db.authenticate_employee("alice", OLD_A, new_password=NEW_A)[0] is not None
-    assert db.has_legacy_slot()                     # Bob has not logged in yet
-    assert db.authenticate_employee("bob", OLD_B)[0] is not None
-    assert not db.has_legacy_slot()                 # nobody needs the key file any more
-
-    later = DatabaseManager(path)                   # no key file, no passphrase
-    assert later.authenticate_employee("bob", OLD_B)[0] is not None
-    assert later.authenticate_employee("alice", OLD_A) == (None, "bad_password")    # replaced
-    assert later.authenticate_employee("alice", NEW_A)[0] is not None
-    rec = later.get_client_record("c1")
-    assert np.array_equal(rec["spatial"][0], template) and rec["enrolled_by"] == "alice"
-    assert later.get_log_events()[0]["employee"] == "bob"
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT legacy_hash FROM employees").fetchall() == [(None,), (None,)]
-        columns = [r[1] for r in conn.execute("PRAGMA table_info(enrollments)")]
-    assert "expires_at" not in columns and "capture_device" in columns
-
-
-def test_a_failed_migration_changes_nothing(path):
-    _make_v4(path, with_meta=False)                 # broken: the key table is missing
-    with pytest.raises(sqlite3.OperationalError):
+    with open(path, "rb") as f:
+        before = f.read()
+    with pytest.raises(RuntimeError, match=f"schema v{from_version} is older than v5 and is not supported"):
         DatabaseManager(path)
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
-        columns = [r[1] for r in conn.execute("PRAGMA table_info(employees)")]
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert "password_hash" in columns and "key_slots" not in tables
+    with open(path, "rb") as f:
+        assert f.read() == before
 
 
 def test_an_unknown_schema_version_is_refused(path):
     _make_v4(path)
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA user_version = 2")
-    with pytest.raises(RuntimeError, match="schema version 2"):
+    with pytest.raises(RuntimeError, match="schema v2 is older than v5"):
         DatabaseManager(path)

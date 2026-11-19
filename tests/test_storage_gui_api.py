@@ -12,7 +12,7 @@ import pytest
 from config.settings import MAX_REFERENCES
 from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager, probe_fingerprint
 from src.gui import storage
-from tests.test_database import LEGACY_KEY, NEW_A, OLD_A, OLD_B, _make_v4
+from tests.test_database import OLD_B, _make_v4
 
 CLIENT_KEYS = {"display_name", "enrolled_by", "image_references", "dynamic_references",
                "spatial_embeddings", "spatial_origin", "enrolled_at", "updated_at",
@@ -465,32 +465,12 @@ def test_data_folder_is_private(people, isolated_storage):
     assert (os.stat(isolated_storage).st_mode & 0o777) == 0o700
 
 
-def test_an_old_database_is_upgraded_and_its_key_file_deleted(isolated_storage):
+def test_an_old_database_is_refused_with_the_folder_to_move(isolated_storage):
     isolated_storage.mkdir(parents=True)
     _make_v4(str(isolated_storage / "signatures.db"))
-    (isolated_storage / "db.key").write_text(LEGACY_KEY)
-    assert storage.authenticate_employee("alice", OLD_A) == (False, None, storage.WEAK_PASSWORD_MESSAGE)
-    assert storage.authenticate_employee("alice", OLD_A, new_password="short")[0] is False
-    assert storage.authenticate_employee("alice", OLD_A, new_password=NEW_A)[0]
-    assert (isolated_storage / "db.key").exists()                  # Bob still needs it once
-    storage.logout()
-    assert storage.authenticate_employee("bob", OLD_B)[0]
-    assert not (isolated_storage / "db.key").exists()              # nobody does now
-    storage._reset()
-    assert not storage.authenticate_employee("alice", OLD_A)[0]    # the short one is gone
-    assert storage.authenticate_employee("alice", NEW_A)[0]
-    assert len(storage.get_client("c1")["spatial_embeddings"]) == 1
-
-
-def test_an_old_database_without_its_key_file_says_so(isolated_storage):
-    isolated_storage.mkdir(parents=True)
-    _make_v4(str(isolated_storage / "signatures.db"))
-    with pytest.raises(storage.StorageKeyError, match="db.key"):
+    with pytest.raises(storage.StorageError, match="older version") as e:
         storage.authenticate_employee("bob", OLD_B)
-    (isolated_storage / "db.key").write_text("wrong")
-    storage._reset()
-    with pytest.raises(storage.StorageKeyError, match="does not match"):
-        storage.authenticate_employee("bob", OLD_B)
+    assert str(isolated_storage) in str(e.value)
 
 
 # ------------------------------------------------- several sets (issue #33, item 3)

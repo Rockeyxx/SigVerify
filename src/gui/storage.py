@@ -22,9 +22,8 @@ profile, and a new password needs the current one.
 
 Where the data lives (never relative to the working directory):
   ~/.sigverify/signatures.db   (override the folder with SIGVER_HOME)
-SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A `db.key` file
-from before per-employee passwords is read only to upgrade that database, and is
-deleted once every employee has logged in once.
+SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A database made
+before per-employee passwords (schema v4 or older) is refused; clients enrol again.
 
 Only embeddings are stored. `image_references` is a list of file PATHS the employee
 picked (kept for the View button), never image data; it is encrypted anyway because
@@ -51,7 +50,6 @@ MODEL_VERSION = _settings.MODEL_VERSION
 MAX_REFERENCES = _settings.MAX_REFERENCES
 
 DB_FILENAME = "signatures.db"
-LEGACY_KEY_FILENAME = "db.key"
 HOME_ENV_VAR = "SIGVER_HOME"
 
 # The third decision of step-up verification (src.verification.SIGN_AGAIN).
@@ -94,15 +92,6 @@ def _data_dir() -> str:
     return os.path.abspath(os.path.expanduser(base))
 
 
-def _legacy_key_path() -> str:
-    return os.path.join(_data_dir(), LEGACY_KEY_FILENAME)
-
-
-def _read_legacy_key(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:  # skylos: ignore[SKY-D215,SKY-D325] pre-v5 key file in the fixed data folder (SIGVER_HOME set by the operator)
-        return f.read().strip()
-
-
 def _get_db() -> DatabaseManager:
     global _db, _unlocked_by_passphrase
     if _db is not None:
@@ -115,30 +104,23 @@ def _get_db() -> DatabaseManager:
             try:
                 db = DatabaseManager(db_path)        # opens locked; a login unlocks it
             except RuntimeError as e:                # a schema this code cannot read
+                if "is older than" in str(e):
+                    raise StorageError(
+                        "This database was made by an older version of the app and cannot be opened. "
+                        f"Move the folder {data_dir} somewhere else and start the app again; "
+                        "clients must enrol again.") from None
                 raise StorageError(str(e)) from None
             env = os.environ.get(PASSPHRASE_ENV_VAR)
-            legacy = _legacy_key_path()
             try:
                 if env:
                     db.unlock_with_passphrase(env)
-                elif os.path.exists(legacy) and db.has_legacy_slot():
-                    db.unlock_with_passphrase(_read_legacy_key(legacy))
             except InvalidTag:
-                source = PASSPHRASE_ENV_VAR if env else LEGACY_KEY_FILENAME
-                raise StorageKeyError(f"{source} does not match the database {db_path}.") from None
+                raise StorageKeyError(f"{PASSPHRASE_ENV_VAR} does not match the database {db_path}.") from None
             except ValueError as e:
                 raise StorageKeyError(str(e)) from None
             _unlocked_by_passphrase = bool(env)
             _db = db
-            _forget_legacy_key(db)
     return _db
-
-
-def _forget_legacy_key(db: DatabaseManager) -> None:
-    """Delete the pre-v5 key file once no employee still needs it to log in."""
-    path = _legacy_key_path()
-    if os.path.exists(path) and not db.has_legacy_slot():
-        os.remove(path)
 
 
 def _unlocked_db() -> DatabaseManager:
@@ -243,50 +225,13 @@ def register_employee(full_name: str, username: str, password: str) -> tuple:
     return True, "Account created successfully"
 
 
-WEAK_PASSWORD_MESSAGE = (
-    f"Your password is shorter than {_settings.MIN_PASSWORD_LENGTH} characters. "
-    f"Choose a new password of at least {_settings.MIN_PASSWORD_LENGTH} characters to log in."
-)
-
-
-def authenticate_employee(username: str, password: str, new_password: str = None) -> tuple:
-    """Logging in unlocks the signature data. Returns (success, employee or None, message).
-
-    new_password: only for the first login after upgrading a pre-v5 database, when the old
-    password is too short to protect the data key (message WEAK_PASSWORD_MESSAGE). Log in
-    again with the old password AND new_password; from then on the new one is the password.
-    """
+def authenticate_employee(username: str, password: str) -> tuple:
+    """Logging in unlocks the signature data. Returns (success, employee or None, message)."""
     global _session
-    db = _get_db()
-    try:
-        try:
-            emp, reason = db.authenticate_employee(username, password, new_password)
-        except DatabaseLockedError:
-            # A login still on the old password hash needs the pre-v5 key once; a logout
-            # in between forgot it, so read it again while the file is there.
-            legacy = _legacy_key_path()
-            if not (os.path.exists(legacy) and db.has_legacy_slot()):
-                raise
-            try:
-                db.unlock_with_passphrase(_read_legacy_key(legacy))
-            except InvalidTag:
-                raise StorageKeyError(f"{LEGACY_KEY_FILENAME} does not match the database.") from None
-            emp, reason = db.authenticate_employee(username, password, new_password)
-    except DatabaseLockedError:
-        raise StorageKeyError(
-            f"This database was made before per-employee passwords. Put its {LEGACY_KEY_FILENAME} "
-            f"file back in {_data_dir()} once, then log in to upgrade it."
-        ) from None
-    except ValueError as e:                     # a new_password that is too short
-        return False, None, str(e)
+    emp, reason = _get_db().authenticate_employee(username, password)
     if emp is None:
-        if reason == "not_found":
-            return False, None, "User ID not found"
-        if reason == "weak_password":
-            return False, None, WEAK_PASSWORD_MESSAGE
-        return False, None, "Incorrect password"
+        return False, None, "User ID not found" if reason == "not_found" else "Incorrect password"
     _session = emp
-    _forget_legacy_key(db)
     return True, _public_employee(emp), ""
 
 
@@ -699,5 +644,4 @@ def restore_database(backup_path: str, username: str, password: str) -> tuple:
     except (ValueError, PermissionError) as e:
         return False, str(e)
     _session = emp
-    _forget_legacy_key(db)
     return True, "Backup restored"
