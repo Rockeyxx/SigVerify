@@ -65,6 +65,7 @@ EVENT_DELETE = "delete"
 EVENT_REENROL_REFUSED = "re-enrol refused"
 EVENT_DELETE_REFUSED = "delete refused"
 EVENT_RESTORE = "restore"
+EVENT_REPLAY_REFUSED = "replay refused"
 
 
 class DatabaseLockedError(RuntimeError):
@@ -915,6 +916,17 @@ class DatabaseManager:
                  None if reasons is None else json.dumps(list(reasons)), model_version, threshold,
                  json.dumps(list(probe_hashes)) if probe_hashes else None),
             )
+
+    def log_replay_refused(self, user_id: str, display_name: str, employee_id: int, probe_hashes) -> None:
+        """A visit refused as a replay, with its probe hashes. Not a verdict: it is not
+        counted and not listed with the verifications (get_log_events' default)."""
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO audit_log (event, user_id, client_display_name, employee_id, timestamp,
+                                          probe_hashes)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (EVENT_REPLAY_REFUSED, user_id, display_name, employee_id, _now_local(),
+                 json.dumps(list(probe_hashes)) if probe_hashes else None))
 
     def is_replayed_probe(self, user_id: str, probe_hashes, window_days: float = REPLAY_WINDOW_DAYS,
                           now: datetime = None) -> bool:

@@ -1,6 +1,7 @@
 """Issue #33 at the database level: key slots per employee, the admin role, company-wide
 clients with an audit trail, the pen set kept on re-save, stale sets, the replay check,
 backup / restore, and the migration of v3 / v4 databases. Temporary databases only."""
+import json
 import os
 import shutil
 import sqlite3
@@ -335,6 +336,16 @@ def test_one_signing_given_twice_in_a_visit_is_a_replay(db):
     probe = probe_fingerprint(vec(512, 4))
     assert db.is_replayed_probe("c1", [probe, probe])
     assert not db.is_replayed_probe("c1", [])
+
+
+def test_a_refused_replay_is_logged_with_its_hashes_and_not_counted(db, staff, path):
+    admin, _ = staff
+    probe = probe_fingerprint(vec(512, 6))
+    db.log_replay_refused("c1", "C1", admin, [probe])
+    assert events(db) == [("replay refused", "c1", "admin")]
+    assert db.get_log_events() == [] and db.count_log_events() == (0, 0)
+    with closing(sqlite3.connect(path)) as conn:
+        assert json.loads(conn.execute("SELECT probe_hashes FROM audit_log").fetchone()[0]) == [probe]
 
 
 def test_the_log_stores_the_hash_never_the_embedding(db, staff, path):

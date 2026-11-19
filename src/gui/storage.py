@@ -44,6 +44,7 @@ from src.database.db_manager import (
     PASSPHRASE_ENV_VAR,
     DatabaseLockedError,
     DatabaseManager,
+    probe_fingerprint,  # noqa: F401 — re-exported: the GUI hashes verify()'s probe_embeddings
 )
 
 MODEL_VERSION = _settings.MODEL_VERSION
@@ -461,6 +462,13 @@ def is_replayed_probe(client_id: str, probe_fingerprints: list) -> bool:
     the client's stored references (e.g. an enrolment scan given again), was already
     accepted for the client within REPLAY_WINDOW_DAYS, or repeats one signing."""
     return _unlocked_db().is_replayed_probe(_norm(client_id), probe_fingerprints)
+
+
+def log_replay_refused(client_id: str, employee_username: str, probe_fingerprints: list) -> None:
+    """Log a visit refused as a replay (not a verdict, not counted), as the logged-in
+    employee; another name raises NotLoggedInAsError, no login StorageLockedError."""
+    emp_id = _actor(employee_username)
+    _get_db().log_replay_refused(_norm(client_id), client_id.strip(), emp_id, probe_fingerprints)
 
 
 def get_verification_log(employee_username: str = None) -> list:

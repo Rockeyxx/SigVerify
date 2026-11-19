@@ -325,6 +325,20 @@ class VerificationPanel(QWidget):
         decision = result["decision"]
         confidence = round(result["confidence"], 1)
 
+        # Replay check first, every round: the model returns the embeddings, storage hashes them.
+        probes = result.get("probe_embeddings") or {}
+        fingerprints = [storage.probe_fingerprint(b)
+                        for b in probes.get("spatial", []) + probes.get("temporal", [])]
+        if storage.is_replayed_probe(client_id, fingerprints):
+            self._end_round()
+            self._show_idle_message("Refused: this signing was already used (replay)")
+            self.confirmButton.setVisible(False)
+            self.verifyButton.setEnabled(True)
+            self.verifyButton.setText("Verify")
+            storage.log_replay_refused(
+                client_id, self.current_employee_username or "unknown", fingerprints)
+            return
+
         if decision == SIGN_AGAIN and not self._awaiting_second:
             # Not a verdict. Neutral request only: no score, no hint of how close it was.
             use_image, use_pen = self._uses()
@@ -347,14 +361,7 @@ class VerificationPanel(QWidget):
             decision = "Forged"
 
         signings = visit_signings(self._pending_images, self._pending_trajectories)
-        self._first_probe_path = None
-        self._first_trajectory = None
-        self._awaiting_second = False
-        self.selectProbeButton.setText("Select Probe Image")
-        self.signPenButton.setText("Sign on Tablet")
-        # A pen signature is used for one verification only.
-        self.selected_trajectory = None
-        self.penStatusLabel.setText("No pen signature yet")
+        self._end_round()
 
         threshold = threshold_for(result)
         self.resultDisplay.setText(decision)
@@ -383,7 +390,8 @@ class VerificationPanel(QWidget):
             decision=decision,
             confidence=confidence,
             modality_state=interfaces.modality_state(result),
-            employee_username=self.current_employee_username or "unknown"
+            employee_username=self.current_employee_username or "unknown",
+            probe_fingerprints=fingerprints,
         )
 
         accepted = decision == "Genuine" and not result.get("degraded")
@@ -393,6 +401,17 @@ class VerificationPanel(QWidget):
 
         self.verifyButton.setEnabled(True)
         self.verifyButton.setText("Verify")
+
+    def _end_round(self):
+        """The visit's signings are used: forget the first signing and the pen probe."""
+        self._first_probe_path = None
+        self._first_trajectory = None
+        self._awaiting_second = False
+        self.selectProbeButton.setText("Select Probe Image")
+        self.signPenButton.setText("Sign on Tablet")
+        # A pen signature is used for one verification only.
+        self.selected_trajectory = None
+        self.penStatusLabel.setText("No pen signature yet")
 
     def confirm_identity(self):
         """The employee confirms the person's identity: add this visit to the references."""

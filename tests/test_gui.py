@@ -31,7 +31,9 @@ def _trajectory(seed=0):
 
 
 RESULT = {"decision": "Genuine", "confidence": 90.0, "routing": "multimodal",
-          "degraded": False, "reasons": [], "threshold": 0.76}
+          "degraded": False, "reasons": [], "threshold": 0.76,
+          "probe_embeddings": {"spatial": [_blob(512, 50)], "temporal": [_blob(128, 50)]}}
+OTHER_PROBE = {"spatial": [_blob(512, 51)], "temporal": [_blob(128, 51)]}
 
 
 class FakeService:
@@ -329,8 +331,34 @@ def test_panel_logs_routing_and_offers_confirm_only_when_fused(app, db, fake_wor
     event = storage.get_last_verification_for_client("c", "alice")
     assert event["modality_state"].startswith("Paper + pen (fused)")
 
-    panel._on_verify_success({**RESULT, "routing": "temporal_only", "degraded": True})
+    panel._on_verify_success({**RESULT, "routing": "temporal_only", "degraded": True,
+                              "probe_embeddings": OTHER_PROBE})
     assert panel.confirmButton.isHidden()
+
+
+def test_panel_refuses_a_replayed_probe_and_logs_it(app, db, fake_workers):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    panel = _panel()
+    panel._pending_client_id = "c"
+    panel._pending_images, panel._pending_trajectories = "probe.png", _trajectory()
+    panel._on_verify_success(dict(RESULT))
+    assert len(storage.get_verification_log("alice")) == 1
+
+    panel._on_verify_success(dict(RESULT))       # the same probe bytes again
+    assert panel.resultDisplay.text() == "Refused: this signing was already used (replay)"
+    assert panel.confirmButton.isHidden() and panel.verifyButton.isEnabled()
+    assert len(storage.get_verification_log("alice")) == 1
+    events = storage._get_db().get_log_events(event=None)
+    assert [e["event"] for e in events][-1] == "replay refused"
+
+    # A "Sign again" round is checked too, and its round state is reset.
+    panel._awaiting_second, panel._first_probe_path = True, "first.png"
+    panel.selectProbeButton.setText("Select Second Signing")
+    panel._on_verify_success({**RESULT, "decision": "Sign again"})
+    assert panel.resultDisplay.text() == "Refused: this signing was already used (replay)"
+    assert not panel._awaiting_second and panel._first_probe_path is None
+    assert panel.selectProbeButton.text() == "Select Probe Image"
+    assert len(storage.get_verification_log("alice")) == 1
 
 
 def test_confirmed_visit_adds_paper_and_pen(app, db):

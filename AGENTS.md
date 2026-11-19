@@ -563,6 +563,11 @@ signatures lowered FRR from 13.90% to 8.07% while FAR at the same threshold rose
                                # THRESHOLD alone, STEP_UP_ACCEPT on a step-up first
                                # signing (also when it returns "Sign again" or a reject
                                # below STEP_UP_REJECT), STEP_UP_TWO on the second.
+    "probe_embeddings": dict   # {"spatial": [bytes, ...], "temporal": [bytes, ...]}:
+                               # each probe embedding verify() computed, made by
+                               # embedding_to_bytes as at enrolment, in signing order.
+                               # [] for a branch that did not run or failed its gate.
+                               # For the backend's replay check only; never stored.
 }
 ```
 
@@ -659,6 +664,12 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   (never the embedding). A probe equal to one of the client's stored references (an
   enrolment scan given again), a probe whose hash was already accepted for the same
   client within `REPLAY_WINDOW_DAYS`, or a visit that gives one signing twice, is a replay.
+  The hashing happens in the backend: `verify()` only returns the embeddings it already
+  made (`probe_embeddings`), and the GUI hashes them with `db_manager.probe_fingerprint`,
+  the one function that also hashes the stored references, so the two can never differ.
+  The check runs after every `verify()` call, a "Sign again" round included. A replay is
+  refused, logged as a `replay refused` event with its hashes, and is not a verdict: it is
+  not counted and offers no confirmation.
   A confirmed signing is added only to the set of its own origin (`scan` or `render`).
 - **Stale sets and the tablet.** A reference set holding any row whose `model_version`
   differs from `MODEL_VERSION` is stale and must be re-enrolled, not scored against. The

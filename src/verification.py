@@ -192,7 +192,9 @@ def _step_up_round(spatial_probes, temporal_probes):
 
 def _branch_score(model, references, probe, modality, gate, fallback, device):
     """
-    Mean nearest-reference score over the signings, or None and the gate messages.
+    Mean nearest-reference score over the signings, or None and the gate messages,
+    plus the probe embeddings as bytes (embedding_to_bytes, as at enrolment) for the
+    backend's replay check; [] when the branch is dropped.
 
     If any signing fails its gate the whole branch is dropped: averaging only the
     signings that pass would let a forger hand in one careful forgery and one
@@ -206,10 +208,10 @@ def _branch_score(model, references, probe, modality, gate, fallback, device):
             label = modality if len(probes) == 1 else f"{modality}, signing {index + 1}"
             errors.append(f"{label}: {details.get('error', fallback)}")
     if errors:
-        return None, probes, errors
-    scores = [_nearest_reference_score(references, embed(model, sample, modality, device))
-              for sample in probes]
-    return float(np.mean(scores)), probes, []
+        return None, probes, errors, []
+    embeddings = [embed(model, sample, modality, device) for sample in probes]
+    scores = [_nearest_reference_score(references, e) for e in embeddings]
+    return float(np.mean(scores)), probes, [], [embedding_to_bytes(e) for e in embeddings]
 
 
 def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True,
@@ -232,7 +234,9 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     Returns:
         Dictionary with decision, confidence score, routing mode, degraded flag,
-        reasons, and the threshold the decision was taken against.
+        reasons, the threshold the decision was taken against, and probe_embeddings:
+        {"spatial": [bytes, ...], "temporal": [bytes, ...]}, one per signing in order,
+        [] for a branch that did not run or was dropped by its gate.
     """
     if auto_render_spatial and spatial is not None and temporal is not None:
         s_model, s_references, *s_probe_parts = spatial
@@ -254,16 +258,17 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
     temporal_score = None
     pressure_imputed = False
     gate_errors = []
+    probe_embeddings = {"spatial": [], "temporal": []}
 
     if spatial is not None:
         model, references, probe = spatial
-        spatial_score, spatial_probes, errors = _branch_score(
+        spatial_score, spatial_probes, errors, probe_embeddings["spatial"] = _branch_score(
             model, references, probe, "spatial", quality_gate, "failed the quality gate", device)
         gate_errors.extend(errors)
 
     if temporal is not None:
         model, references, probe = temporal
-        temporal_score, probes, errors = _branch_score(
+        temporal_score, probes, errors, probe_embeddings["temporal"] = _branch_score(
             model, references, probe, "temporal", trajectory_gate, "failed the input gate", device)
         gate_errors.extend(errors)
         if temporal_score is not None:
@@ -297,6 +302,8 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
     # The acceptance bar applied, for the audit log. On a step-up first round it is
     # STEP_UP_ACCEPT even when the outcome is SIGN_AGAIN or a reject below STEP_UP_REJECT.
     result["threshold"] = engine.threshold
+    # Kept in memory, never stored: the backend hashes them (db_manager.probe_fingerprint).
+    result["probe_embeddings"] = probe_embeddings
     # Below STEP_UP_ACCEPT on a first signing: the same fused score against the floor.
     if step_up_round == 1 and result["decision"] == "Forged":
         floor = FusionEngine(alpha=ALPHA_DEFAULT, threshold=STEP_UP_REJECT)
