@@ -215,10 +215,13 @@ class EnrollmentPanel(QWidget):
             return
 
         if own_record:
-            self.image_references = list(own_record.get("image_references", []))
+            self.image_references = []   # paths are not stored: only photos picked this session
             self.dynamic_references = list(own_record.get("dynamic_references", []))
+            n_paper = len(own_record["spatial_sets"].get("scan", {}).get("embeddings", []))
+            n_pen = len((own_record["temporal_set"] or {}).get("embeddings", []))
             self.clientStatusLabel.setText(
-                f"Loaded existing client '{client_id}' — edit references below"
+                f"Loaded existing client '{client_id}' · Paper: {n_paper} · Pen: {n_pen}. "
+                f"Picking {REQUIRED_IMAGE_REFERENCES} photos again re-enrols the paper set (admin only)"
             )
         else:
             self.image_references = []
@@ -376,7 +379,7 @@ class EnrollmentPanel(QWidget):
         pen_b64 = result.get("dynamic_embeddings") or list(self.dynamic_references)
 
         success, message = storage.save_client_enrollment(
-            client_id, self.image_references, pen_b64,
+            client_id, pen_b64,
             self.current_employee_username or "unknown",
             spatial_embeddings=embeddings_b64,
             spatial_origin=spatial_origin,

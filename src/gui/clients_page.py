@@ -51,14 +51,15 @@ class ClientsPage(QWidget):
         for row, client in enumerate(clients):
             display_name = client.get("display_name", client.get("key", "—"))
             enrolled_at = client.get("enrolled_at", "—")
-            ref_count = len(client.get("image_references", []))
+            n_scan = len(client["spatial_sets"].get("scan", {}).get("embeddings", []))
+            n_pen = len((client["temporal_set"] or {}).get("embeddings", []))
 
             last_event = storage.get_last_verification_for_client(display_name, employee_username)
             last_verification = last_event.get("timestamp", "—") if last_event else "Never"
 
             self.table.setItem(row, 0, QTableWidgetItem(display_name))
             self.table.setItem(row, 1, QTableWidgetItem(enrolled_at))
-            self.table.setItem(row, 2, QTableWidgetItem(str(ref_count)))
+            self.table.setItem(row, 2, QTableWidgetItem(f"scan {n_scan} · pen {n_pen}"))
             self.table.setItem(row, 3, QTableWidgetItem(last_verification))
 
     def _on_row_double_clicked(self, row, column):

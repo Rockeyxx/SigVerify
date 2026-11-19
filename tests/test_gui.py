@@ -280,7 +280,7 @@ def _panel(employee="alice"):
 
 
 def test_panel_fuses_paper_and_pen(app, db, fake_workers):
-    storage.save_client_enrollment("c", [], [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     panel = _panel()
     panel.clientIdInput.setText("c")
     panel.selected_image_path = "probe.png"
@@ -304,7 +304,7 @@ def test_panel_forgets_the_probe_image_when_the_client_changes(app, db):
 
 
 def test_panel_pen_only_client_needs_pen_mode(app, db, fake_workers):
-    storage.save_client_enrollment("c", [], [_b64(128)], "alice", spatial_embeddings=[])
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[])
     panel = _panel()
     panel.clientIdInput.setText("c")
     panel.selected_image_path = "probe.png"
@@ -320,7 +320,7 @@ def test_panel_pen_only_client_needs_pen_mode(app, db, fake_workers):
 
 
 def test_panel_logs_routing_and_offers_confirm_only_when_fused(app, db, fake_workers):
-    storage.save_client_enrollment("c", [], [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     panel = _panel()
     panel._pending_client_id = "c"
     panel._pending_images, panel._pending_trajectories = "probe.png", _trajectory()
@@ -334,7 +334,7 @@ def test_panel_logs_routing_and_offers_confirm_only_when_fused(app, db, fake_wor
 
 
 def test_confirmed_visit_adds_paper_and_pen(app, db):
-    storage.save_client_enrollment("c", [], [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     panel = _panel()
     panel._last_accepted_client = "c"
     panel._last_accepted_signings = [("probe.png", _trajectory())]
@@ -344,7 +344,7 @@ def test_confirmed_visit_adds_paper_and_pen(app, db):
 
 
 def test_storage_refuses_a_pen_reference_without_a_pen_set(db):
-    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=[_b64(512)])
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512)])
     assert storage.add_confirmed_reference("c", _b64(128), "alice", modality="temporal") is False
     with pytest.raises(ValueError):
         storage.add_confirmed_reference("c", _b64(128), "alice", modality="tilt")

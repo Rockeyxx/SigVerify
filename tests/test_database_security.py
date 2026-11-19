@@ -118,7 +118,7 @@ def test_data_key_is_not_stored_in_the_database(db, db_path):
 @pytest.mark.parametrize("origin", ["scan", "render"])
 def test_spatial_origin_saved_is_the_one_returned(db, db_path, origin):
     emp, _ = two_employees(db)
-    db.save_client("c1", "C1", emp, [], [vec(512, 8)], origin, [], MODEL)
+    db.save_client("c1", "C1", emp, spatial_embeddings=[vec(512, 8)], spatial_origin=origin, temporal_embeddings=[], model_version=MODEL)
     assert db.get_client_record("c1")["spatial_origin"] == origin
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT spatial_origin FROM enrollments").fetchall() == [(origin,)]
@@ -126,7 +126,7 @@ def test_spatial_origin_saved_is_the_one_returned(db, db_path, origin):
 
 def test_model_version_is_stored_per_template(db, db_path):
     emp, _ = two_employees(db)
-    db.save_client("c1", "C1", emp, [], [vec(512, 9)], "scan", [vec(128, 10)], "v-spatial-temporal-7")
+    db.save_client("c1", "C1", emp, spatial_embeddings=[vec(512, 9)], spatial_origin="scan", temporal_embeddings=[vec(128, 10)], model_version="v-spatial-temporal-7")
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT modality, model_version FROM enrollments ORDER BY id").fetchall()
     assert rows == [("spatial", "v-spatial-temporal-7"), ("temporal", "v-spatial-temporal-7")]
@@ -135,8 +135,7 @@ def test_model_version_is_stored_per_template(db, db_path):
 
 def test_spatial_and_temporal_templates_are_both_held(db):
     emp, _ = two_employees(db)
-    db.save_client("tab", "Tab", emp, [], [vec(512, i) for i in range(5)], "render",
-                   [vec(128, 100 + i) for i in range(5)], MODEL)
+    db.save_client("tab", "Tab", emp, spatial_embeddings=[vec(512, i) for i in range(5)], spatial_origin="render", temporal_embeddings=[vec(128, 100 + i) for i in range(5)], model_version=MODEL)
     rec = db.get_client_record("tab")
     assert len(rec["spatial"]) == 5 and rec["spatial"][0].shape == (512,)
     assert len(rec["temporal"]) == 5 and rec["temporal"][0].shape == (128,)
@@ -247,7 +246,7 @@ def test_the_admin_cannot_reset_their_own_password(db):
 def test_any_employee_reads_any_client_and_the_enroller_is_recorded(db):
     a, b = two_employees(db)
     original = vec(512, 11)
-    db.save_client("shared-id", "Shared-ID", a, ["/p/1.png"], [original], "scan", [], MODEL)
+    db.save_client("shared-id", "Shared-ID", a, spatial_embeddings=[original], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     assert db.get_client_record("shared-id")["enrolled_by"] == "alice"
     assert db.get_client_record("shared-id", b) is None          # "enrolled by Bob": no
     assert not db.has_client("shared-id", b) and db.has_client("shared-id")
@@ -257,7 +256,7 @@ def test_any_employee_reads_any_client_and_the_enroller_is_recorded(db):
 
 def test_rename_keeps_clients_and_log_with_the_employee(db):
     a, b = two_employees(db)
-    db.save_client("c1", "C1", a, [], [vec(512, 13)], "scan", [], MODEL)
+    db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, 13)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     db.log_verification("c1", "scan", 80.0, "Genuine", employee_id=a, display_name="C1")
     db.update_employee(a, "alice", "Alice N", "alice.new", None)
     new_id = db.find_employee("alice.new")["id"]
@@ -282,37 +281,31 @@ def audit(db):
     return [(e["event"], e["employee"], e["reasons"]) for e in db.get_log_events(event=None)]
 
 
-def test_a_non_admin_cannot_change_a_clients_images_or_name(db):
+def test_a_non_admin_cannot_change_a_clients_name(db):
     a, b = two_employees(db)
-    db.save_client("c1", "Client", a, ["/real.png"], [vec(512, 1)], "scan", [], MODEL)
-    with pytest.raises(PermissionError):
-        db.save_client("c1", "CLIENT", b, ["/evil.png"], None, "scan", None, MODEL)
-    rec = db.get_client_record("c1")
-    assert rec["image_references"] == ["/real.png"] and rec["display_name"] == "Client"
-    assert audit(db)[-1] == ("re-enrol refused", "bob", ["image references"])
-    # a set the client lacks is still open to everyone, but the name stays the admin's
-    db.save_client("c1", "CLIENT", b, ["/real.png"], None, "scan", [vec(128, 2)], MODEL)
+    db.save_client("c1", "Client", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
+    # a set the client lacks is open to everyone, but the name stays the admin's
+    db.save_client("c1", "CLIENT", b, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=[vec(128, 2)], model_version=MODEL)
     assert db.get_client_record("c1")["display_name"] == "Client"
     assert audit(db)[-1] == ("enrol", "bob", ["pen set"])
 
 
-def test_a_non_admin_adds_a_scan_set_with_its_images_to_a_pen_only_client(db):
+def test_a_non_admin_adds_a_scan_set_to_a_pen_only_client(db):
     a, b = two_employees(db)
-    db.save_client("c1", "C1", a, [], None, "scan", [vec(128, 1)], MODEL)
-    db.save_client("c1", "C1", b, ["/s.png"], [vec(512, 2)], "scan", None, MODEL)
-    assert db.get_client_record("c1")["image_references"] == ["/s.png"]
+    db.save_client("c1", "C1", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=[vec(128, 1)], model_version=MODEL)
+    db.save_client("c1", "C1", b, spatial_embeddings=[vec(512, 2)], spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)
     assert audit(db)[-1] == ("enrol", "bob", ["scan set"])
 
 
-def test_the_admins_image_and_name_changes_are_logged(db):
+def test_the_admins_name_change_is_logged(db):
     a, _ = two_employees(db)
-    db.save_client("c1", "Client", a, ["/a.png"], [vec(512, 1)], "scan", [], MODEL)
-    db.save_client("c1", "CLIENT", a, ["/b.png"], None, "scan", None, MODEL)
+    db.save_client("c1", "Client", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
+    db.save_client("c1", "CLIENT", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)
     rec = db.get_client_record("c1")
-    assert rec["image_references"] == ["/b.png"] and rec["display_name"] == "CLIENT"
-    assert audit(db)[-1] == ("re-enrol", "alice", ["image references", "display name"])
+    assert rec["display_name"] == "CLIENT"
+    assert audit(db)[-1] == ("re-enrol", "alice", ["display name"])
     before = len(audit(db))
-    db.save_client("c1", "CLIENT", a, ["/b.png"], None, "scan", None, MODEL)   # no change
+    db.save_client("c1", "CLIENT", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)   # no change
     assert len(audit(db)) == before
 
 
@@ -320,7 +313,7 @@ def test_the_admins_image_and_name_changes_are_logged(db):
 def test_an_enrolled_or_added_reference_given_as_a_probe_is_a_replay(db):
     a, _ = two_employees(db)
     scan, pen, added = vec(512, 1), vec(128, 2), vec(512, 3)
-    db.save_client("c1", "C1", a, ["/s.png"], [scan], "scan", [pen], MODEL)
+    db.save_client("c1", "C1", a, spatial_embeddings=[scan], spatial_origin="scan", temporal_embeddings=[pen], model_version=MODEL)
     db.add_confirmed_reference("c1", "spatial", added, MODEL, spatial_origin="scan")
     for emb in (scan, pen, added):
         assert db.is_replayed_probe("c1", [probe_fingerprint(emb)])
@@ -335,36 +328,35 @@ def test_an_enrolled_or_added_reference_given_as_a_probe_is_a_replay(db):
 def test_failed_save_leaves_the_old_enrollment_untouched(db):
     a, _ = two_employees(db)
     first = [vec(512, i) for i in range(5)]
-    db.save_client("c1", "C1", a, ["/old.png"], first, "scan", [], MODEL)
+    db.save_client("c1", "C1", a, spatial_embeddings=first, spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     with pytest.raises(ValueError):
-        db.save_client("c1", "C1", a, ["/new.png"], [vec(512, 50), vec(10, 51)], "scan", [], MODEL)
+        db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, 50), vec(10, 51)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     rec = db.get_client_record("c1", a)
-    assert rec["image_references"] == ["/old.png"]
     assert all(np.array_equal(x, y) for x, y in zip(rec["spatial"], first)) and len(rec["spatial"]) == 5
 
 
 def test_error_inside_the_transaction_rolls_everything_back(db, db_path):
     a, _ = two_employees(db)
     first = [vec(512, i) for i in range(5)]
-    db.save_client("c1", "C1", a, ["/old.png"], first, "scan", [], MODEL)
+    db.save_client("c1", "C1", a, spatial_embeddings=first, spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     with sqlite3.connect(db_path) as conn:  # a failure that only happens at INSERT time
         conn.execute("""CREATE TRIGGER boom BEFORE INSERT ON enrollments WHEN NEW.model_version = 'boom'
                         BEGIN SELECT RAISE(ABORT, 'disk on fire'); END""")
     with pytest.raises(sqlite3.DatabaseError):
-        db.save_client("c1", "C1", a, ["/new.png"], [vec(512, 60)], "scan", [], "boom")
+        db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, 60)], spatial_origin="scan", temporal_embeddings=[], model_version="boom")
     rec = db.get_client_record("c1", a)
-    assert rec["image_references"] == ["/old.png"] and len(rec["spatial"]) == 5
+    assert len(rec["spatial"]) == 5
     assert np.array_equal(rec["spatial"][2], first[2])
     assert [e["event"] for e in db.get_log_events(event=None)] == ["enrol"]   # the log rolled back too
 
 
 def test_reenrolment_replaces_old_templates_and_keeps_enrolled_at(db, db_path):
     a, _ = two_employees(db)
-    db.save_client("c1", "C1", a, [], [vec(512, i) for i in range(5)], "scan", [], MODEL)
+    db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, i) for i in range(5)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     with sqlite3.connect(db_path) as conn:  # backdate, so "kept" cannot be confused with "same second"
         conn.execute("UPDATE users SET enrolled_at = '2020-01-02T03:04:05', updated_at = '2020-01-02T03:04:05'")
     new = [vec(512, 200 + i) for i in range(5)]
-    db.save_client("c1", "c1 renamed", a, [], new, "scan", [], MODEL)
+    db.save_client("c1", "c1 renamed", a, spatial_embeddings=new, spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     rec = db.get_client_record("c1")
     assert len(rec["spatial"]) == 5
     assert np.array_equal(rec["spatial"][0], new[0])
@@ -373,15 +365,16 @@ def test_reenrolment_replaces_old_templates_and_keeps_enrolled_at(db, db_path):
     assert rec["display_name"] == "c1 renamed"
 
 
-def test_image_references_are_bound_to_their_client(db, db_path):
+def test_no_image_path_is_stored(db, db_path):
     a, _ = two_employees(db)
-    db.save_client("a", "A", a, ["/a.png"], [vec(512, 1)], "scan", [], MODEL)
-    db.save_client("b", "B", a, ["/b.png"], [vec(512, 2)], "scan", [], MODEL)
-    with sqlite3.connect(db_path) as conn:   # move A's encrypted image list onto B
-        ct, nonce = conn.execute("SELECT image_refs_enc, image_refs_nonce FROM users WHERE user_id = 'a'").fetchone()
-        conn.execute("UPDATE users SET image_refs_enc = ?, image_refs_nonce = ? WHERE user_id = 'b'", (ct, nonce))
-    with pytest.raises(InvalidTag):
-        db.get_client_record("b")
+    db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
+    with sqlite3.connect(db_path) as conn:
+        columns = [r[1] for t in ("users", "enrollments")
+                   for r in conn.execute(f"PRAGMA table_info({t})")]
+        assert not [c for c in columns if "image" in c.lower()]
+        row = conn.execute("SELECT * FROM users WHERE user_id = 'c1'").fetchone()
+    assert not [v for v in row if isinstance(v, (str, bytes)) and (b"/" in v if isinstance(v, bytes) else "/" in v)]
+    assert "image_references" not in db.get_client_record("c1")
 
 
 def test_a_passphrase_never_creates_a_second_key_on_a_password_database(tmp_path):

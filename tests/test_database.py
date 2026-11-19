@@ -90,7 +90,7 @@ def test_a_new_database_opens_locked_and_the_first_account_is_the_admin(db, path
 
 
 def test_a_copied_database_cannot_be_opened_without_a_password(db, staff, path, tmp_path):
-    db.save_client("c1", "C1", staff[0], [], scan(), "scan", pen(), V1)
+    db.save_client("c1", "C1", staff[0], spatial_embeddings=scan(), spatial_origin="scan", temporal_embeddings=pen(), model_version=V1)
     copy = str(tmp_path / "stolen.db")
     shutil.copyfile(path, copy)
     thief = DatabaseManager(copy)
@@ -104,7 +104,7 @@ def test_a_copied_database_cannot_be_opened_without_a_password(db, staff, path, 
 
 
 def test_login_unwraps_the_key_and_logout_forgets_it(db, staff, path):
-    db.save_client("c1", "C1", staff[1], [], scan(), "scan", None, V1)
+    db.save_client("c1", "C1", staff[1], spatial_embeddings=scan(), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     fresh = DatabaseManager(path)
     emp, reason = fresh.authenticate_employee("BOB", PW_BOB)
     assert reason == "" and emp["username"] == "bob" and emp["is_admin"] is False
@@ -157,7 +157,7 @@ def test_a_non_admin_cannot_reset_or_remove_and_the_admin_cannot_remove_themself
 
 def test_a_reset_password_opens_the_same_templates(db, staff, path):
     admin, _ = staff
-    db.save_client("c1", "C1", admin, [], scan(7), "scan", None, V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(7), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.reset_password(admin, "bob", "bob-new-password")
     later = DatabaseManager(path)
     assert later.authenticate_employee("bob", "bob-new-password")[0] is not None
@@ -167,8 +167,8 @@ def test_a_reset_password_opens_the_same_templates(db, staff, path):
 # --------------------------------------------- company-wide clients, admin role
 def test_anyone_enrols_a_new_client_or_adds_a_missing_set(db, staff):
     admin, bob = staff
-    db.save_client("c1", "C1", admin, [], scan(), "scan", None, V1)
-    db.save_client("c1", "C1", bob, [], [], "scan", pen(), V1)         # Bob adds the pen set
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    db.save_client("c1", "C1", bob, spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=pen(), model_version=V1)         # Bob adds the pen set
     rec = db.get_client_record("c1")
     assert rec["enrolled_by"] == "admin" and len(rec["temporal"]) == 5
     assert events(db) == [("enrol", "c1", "admin"), ("enrol", "c1", "bob")]
@@ -176,25 +176,24 @@ def test_anyone_enrols_a_new_client_or_adds_a_missing_set(db, staff):
 
 def test_a_non_admin_reenrol_or_delete_is_refused_logged_and_changes_nothing(db, staff):
     admin, bob = staff
-    db.save_client("c1", "C1", admin, ["/a.png"], scan(0), "scan", pen(100), V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=pen(100), model_version=V1)
     with pytest.raises(PermissionError):
-        db.save_client("c1", "C1", bob, [], scan(50), "scan", None, V1)
+        db.save_client("c1", "C1", bob, spatial_embeddings=scan(50), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     with pytest.raises(PermissionError):
-        db.save_client("c1", "C1", bob, [], [], "scan", [], V1)         # removing the pen set
+        db.save_client("c1", "C1", bob, spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=[], model_version=V1)         # removing the pen set
     with pytest.raises(PermissionError):
         db.delete_client("c1", bob)
     rec = db.get_client_record("c1")
     assert np.array_equal(rec["spatial"][0], scan(0)[0]) and len(rec["temporal"]) == 5
-    assert rec["image_references"] == ["/a.png"]
     assert events(db) == [("enrol", "c1", "admin"), ("re-enrol refused", "c1", "bob"),
                           ("re-enrol refused", "c1", "bob"), ("delete refused", "c1", "bob")]
 
 
 def test_the_admin_reenrols_and_verifies_a_client_bob_enrolled_and_both_are_logged(db, staff):
     admin, bob = staff
-    db.save_client("c1", "C1", bob, [], scan(0), "scan", None, V1)
+    db.save_client("c1", "C1", bob, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.log_verification("c1", "scan", 81.0, "Genuine", employee_id=admin, display_name="C1")
-    db.save_client("c1", "C1", admin, [], scan(50), "scan", None, V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(50), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     rec = db.get_client_record("c1")
     assert np.array_equal(rec["spatial"][0], scan(50)[0]) and rec["enrolled_by"] == "bob"
     assert events(db) == [("enrol", "c1", "bob"), ("verify", "c1", "admin"), ("re-enrol", "c1", "admin")]
@@ -203,7 +202,7 @@ def test_the_admin_reenrols_and_verifies_a_client_bob_enrolled_and_both_are_logg
 
 def test_a_deleted_clients_audit_rows_stay(db, staff):
     admin, bob = staff
-    db.save_client("gone", "Gone", bob, [], scan(), "scan", None, V1)
+    db.save_client("gone", "Gone", bob, spatial_embeddings=scan(), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.log_verification("gone", "scan", 70.0, "Forged", employee_id=bob, display_name="Gone")
     assert db.delete_client("gone", admin) is True
     assert db.get_client_record("gone") is None
@@ -214,7 +213,7 @@ def test_a_deleted_clients_audit_rows_stay(db, staff):
 
 def test_verification_counts_and_lists_ignore_enrolment_events(db, staff):
     admin, bob = staff
-    db.save_client("c1", "C1", bob, [], scan(), "scan", None, V1)
+    db.save_client("c1", "C1", bob, spatial_embeddings=scan(), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.log_verification("c1", "scan", 81.0, "Genuine", employee_id=bob)
     assert db.count_log_events() == (1, 1)
     assert [e["event"] for e in db.get_log_events()] == ["verify"]
@@ -223,7 +222,7 @@ def test_verification_counts_and_lists_ignore_enrolment_events(db, staff):
 def test_an_ownerless_row_starts_clean_when_first_saved(db, staff):
     _, bob = staff
     db.add_references("orphan", "spatial", scan(900), "older", spatial_origin="render")
-    db.save_client("orphan", "Orphan", bob, [], scan(0), "scan", None, V1)
+    db.save_client("orphan", "Orphan", bob, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     rec = db.get_client_record("orphan")
     assert rec["enrolled_by"] == "bob" and set(rec["sets"]) == {"scan"}   # nothing inherited
     assert events(db) == [("enrol", "orphan", "bob")]
@@ -231,19 +230,19 @@ def test_an_ownerless_row_starts_clean_when_first_saved(db, staff):
 
 def test_a_new_client_with_nothing_to_save_is_refused(db, staff):
     with pytest.raises(ValueError, match="Nothing to save"):
-        db.save_client("c1", "C1", staff[0], [], [], "scan", None, V1)
+        db.save_client("c1", "C1", staff[0], spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     assert not db.has_client("c1")
 
 
 # ---------------------------------------------------- pen set kept on re-save
 def test_resaving_with_no_new_pen_set_keeps_its_rows_exactly(db, staff, path):
     admin, _ = staff
-    db.save_client("c1", "C1", admin, [], scan(0), "scan", pen(100), V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=pen(100), model_version=V1)
     db.add_confirmed_reference("c1", "temporal", vec(128, 999), V1)
     with sqlite3.connect(path) as conn:
         before = conn.execute("SELECT id, source, model_version FROM enrollments "
                               "WHERE modality = 'temporal' ORDER BY id").fetchall()
-    db.save_client("c1", "C1", admin, ["/swapped.png"], scan(50), "scan", None, "v-new")
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(50), spatial_origin="scan", temporal_embeddings=None, model_version="v-new")
     with sqlite3.connect(path) as conn:
         after = conn.execute("SELECT id, source, model_version FROM enrollments "
                              "WHERE modality = 'temporal' ORDER BY id").fetchall()
@@ -254,8 +253,8 @@ def test_resaving_with_no_new_pen_set_keeps_its_rows_exactly(db, staff, path):
 
 def test_an_empty_pen_list_removes_the_pen_set(db, staff):
     admin, _ = staff
-    db.save_client("c1", "C1", admin, [], scan(0), "scan", pen(100), V1)
-    db.save_client("c1", "C1", admin, [], [], "scan", [], V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=pen(100), model_version=V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=[], model_version=V1)
     rec = db.get_client_record("c1")
     assert rec["temporal_set"] is None and len(rec["spatial"]) == 5
     assert db.get_log_events(event=None)[-1]["reasons"] == ["pen set removed"]
@@ -264,14 +263,14 @@ def test_an_empty_pen_list_removes_the_pen_set(db, staff):
 def test_capture_device_is_stored_with_the_pen_set(db, staff):
     admin, _ = staff
     device = {"device_model": "XPPen Deco 640", "os": "Windows", "qt_platform": "windows"}
-    db.save_client("c1", "C1", admin, [], [], "scan", pen(), V1, capture_device=device)
+    db.save_client("c1", "C1", admin, spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=pen(), model_version=V1, capture_device=device)
     db.add_confirmed_reference("c1", "temporal", vec(128, 5), V1)
     assert db.get_client_record("c1")["temporal_set"]["capture_device"] == device
 
 
 def test_a_set_lists_every_model_version_it_holds(db, staff):
     admin, _ = staff
-    db.save_client("c1", "C1", admin, [], scan(0), "scan", None, V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.add_confirmed_reference("c1", "spatial", vec(512, 77), "v-new", spatial_origin="scan")
     found = db.get_client_record("c1")["sets"]["scan"]
     assert found["model_version"] == V1 and found["model_versions"] == ["v-new", V1]
@@ -324,7 +323,7 @@ def test_the_log_stores_the_hash_never_the_embedding(db, staff, path):
 
 # -------------------------------------------------- backup / restore (item 9)
 def test_backup_holds_no_key_or_password_and_opens_with_the_same_passwords(db, staff, path, tmp_path):
-    db.save_client("c1", "C1", staff[0], [], scan(3), "scan", None, V1)
+    db.save_client("c1", "C1", staff[0], spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(str(tmp_path / "backup.db"))
     data = file_bytes(backup)
     assert db._dek not in data and PW_ADMIN.encode() not in data and PW_BOB.encode() not in data
@@ -337,7 +336,7 @@ def test_backup_holds_no_key_or_password_and_opens_with_the_same_passwords(db, s
 
 def test_restore_brings_the_backup_back(db, staff, path, tmp_path):
     admin, _ = staff
-    db.save_client("c1", "C1", admin, [], scan(3), "scan", None, V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(str(tmp_path / "backup.db"))
     db.delete_client("c1", admin)
     emp = db.restore_from(backup, "admin", PW_ADMIN)
@@ -346,9 +345,9 @@ def test_restore_brings_the_backup_back(db, staff, path, tmp_path):
 
 def test_restore_checks_everything_before_replacing_anything(db, staff, path, tmp_path):
     admin, _ = staff
-    db.save_client("c1", "C1", admin, [], scan(3), "scan", None, V1)
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(str(tmp_path / "backup.db"))
-    db.save_client("c2", "C2", admin, [], scan(9), "scan", None, V1)   # only in the live database
+    db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)   # only in the live database
     with pytest.raises(PermissionError):
         db.restore_from(backup, "admin", "wrong-password-1")
     with pytest.raises(PermissionError, match="admin"):
@@ -386,8 +385,7 @@ def _make_v4(path, legacy_passphrase=LEGACY_KEY, with_meta=True):
             salt BLOB NOT NULL, password_hash BLOB NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE users (user_id TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            display_name TEXT, enrolled_by INTEGER REFERENCES employees(id), image_refs_enc BLOB,
-            image_refs_nonce BLOB,
+            display_name TEXT, enrolled_by INTEGER REFERENCES employees(id),
             spatial_origin TEXT CHECK (spatial_origin IS NULL OR spatial_origin IN ('render', 'scan')),
             enrolled_at TEXT, updated_at TEXT);
         CREATE TABLE enrollments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,

@@ -25,9 +25,8 @@ Where the data lives (never relative to the working directory):
 SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A database made
 before per-employee passwords (schema v4 or older) is refused; clients enrol again.
 
-Only embeddings are stored. `image_references` is a list of file PATHS the employee
-picked (kept for the View button), never image data; it is encrypted anyway because
-file names can contain the client's name. Pen trajectories are never written to disk.
+Only embeddings are stored: never an image, an image path or a pen trajectory. The
+View button works only for photos picked in the current session.
 """
 
 import base64
@@ -307,7 +306,6 @@ def _client_to_gui(rec: dict) -> dict:
     return {
         "display_name": rec["display_name"],
         "enrolled_by": rec["enrolled_by"],
-        "image_references": list(rec["image_references"]),
         "dynamic_references": [_b64(a) for a in rec["temporal"]],
         "spatial_embeddings": [_b64(a) for a in rec["spatial"]],
         "spatial_origin": rec["spatial_origin"],
@@ -361,7 +359,7 @@ def _decode_embeddings(values, what: str) -> list:
     return out
 
 
-def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs, employee_username: str,
+def save_client_enrollment(client_id: str, dynamic_refs, employee_username: str, *,
                            spatial_embeddings: list = None, spatial_origin: str = "scan",
                            capture_device: dict = None) -> tuple:
     """
@@ -394,8 +392,8 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs, emplo
         spatial = _decode_embeddings(spatial_embeddings, "Spatial embedding")
         temporal = None if dynamic_refs is None else _decode_embeddings(dynamic_refs, "Dynamic reference")
         _unlocked_db().save_client(
-            key, client_id.strip(), emp_id, image_refs or [], spatial, spatial_origin,
-            temporal, MODEL_VERSION, capture_device=capture_device,
+            key, client_id.strip(), emp_id, spatial_embeddings=spatial, spatial_origin=spatial_origin,
+            temporal_embeddings=temporal, model_version=MODEL_VERSION, capture_device=capture_device,
         )
     except PermissionError:
         return False, (

@@ -14,7 +14,7 @@ from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager, probe_f
 from src.gui import storage
 from tests.test_database import OLD_B, _make_v4
 
-CLIENT_KEYS = {"display_name", "enrolled_by", "image_references", "dynamic_references",
+CLIENT_KEYS = {"display_name", "enrolled_by", "dynamic_references",
                "spatial_embeddings", "spatial_origin", "enrolled_at", "updated_at",
                "spatial_sets", "temporal_set"}
 SET_KEYS = {"embeddings", "model_version", "enrolled_at", "stale", "capture_device"}
@@ -151,13 +151,13 @@ def test_a_new_password_needs_the_current_one(people):
 
 def test_writes_run_as_the_logged_in_employee_never_a_name_passed_in(people, tmp_path):
     """Bob, logged in, passes the admin's name to every write: each is refused."""
-    storage.save_client_enrollment("C", ["/a.png"], None, "alice", spatial(), "scan")
+    storage.save_client_enrollment("C", None, "alice", spatial_embeddings=spatial(), spatial_origin="scan")
     login("bob", PW_B)
     assert storage.reset_employee_password("alice", "alice", "taken-over-pass")[0] is False
     assert storage.reset_employee_password("alice", "bob", "bob-new-password")[0] is False
     assert storage.remove_employee("alice", "bob")[0] is False
     assert storage.register_employee("Mallory", "mallory", "mallory-pass-1")[0] is False
-    assert storage.save_client_enrollment("C", [], None, "alice", spatial(base=9), "scan")[0] is False
+    assert storage.save_client_enrollment("C", None, "alice", spatial_embeddings=spatial(base=9), spatial_origin="scan")[0] is False
     assert storage.delete_client("C", "alice") is False
     assert storage.add_confirmed_reference("c", b64(512, 5), "alice") is False
     assert storage.backup_database(str(tmp_path), "alice")[0] is False
@@ -169,7 +169,7 @@ def test_writes_run_as_the_logged_in_employee_never_a_name_passed_in(people, tmp
 
 
 def test_writes_need_a_login(people):
-    storage.save_client_enrollment("C", [], None, "alice", spatial(1), "scan")
+    storage.save_client_enrollment("C", None, "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     storage.logout()
     with pytest.raises(storage.StorageLockedError):
         storage.append_verification_log("C", "Genuine", 90.0, "scan", "alice")
@@ -187,7 +187,7 @@ def test_admin_resets_a_forgotten_password_and_removes_an_employee(people):
 
 
 def test_renaming_a_username_keeps_clients_and_log_visible(people):
-    assert storage.save_client_enrollment("Client One", ["/x/1.png"], [], "alice", spatial(), "scan")[0]
+    assert storage.save_client_enrollment("Client One", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")[0]
     storage.append_verification_log("Client One", "Genuine", 88.0, "scan", "alice")
     assert storage.update_employee_profile("alice", "Alice A", "alice.renamed")[0]
 
@@ -200,19 +200,18 @@ def test_renaming_a_username_keeps_clients_and_log_visible(people):
     assert storage.get_verification_stats("alice.renamed")["total"] == 1
     assert storage.get_verification_log("alice.renamed")[0]["employee"] == "alice.renamed"
     assert storage.count_clients_enrolled_this_month("alice.renamed") == 1
-    assert storage.save_client_enrollment("client one", [], [], "alice.renamed", spatial(base=9), "scan")[0]
+    assert storage.save_client_enrollment("client one", [], "alice.renamed", spatial_embeddings=spatial(base=9), spatial_origin="scan")[0]
 
 
 # ------------------------------------------------------------------ clients
 def test_save_and_get_client_shape_and_round_trip(people):
     embs = spatial()
-    assert storage.save_client_enrollment("  Client A ", ["/p/a.png"], [], "alice", embs, "scan") == (True, "Saved")
+    assert storage.save_client_enrollment("  Client A ", [], "alice", spatial_embeddings=embs, spatial_origin="scan") == (True, "Saved")
     rec = storage.get_client("CLIENT a", "alice")
     assert set(rec) == CLIENT_KEYS and set(rec["spatial_sets"]["scan"]) == SET_KEYS
     assert rec["display_name"] == "Client A"
     assert rec["enrolled_by"] == "alice"
     assert rec["spatial_embeddings"] == embs
-    assert rec["image_references"] == ["/p/a.png"]
     assert rec["dynamic_references"] == [] and rec["temporal_set"] is None
     assert rec["spatial_origin"] == "scan"
     datetime.fromisoformat(rec["enrolled_at"])
@@ -222,9 +221,9 @@ def test_save_and_get_client_shape_and_round_trip(people):
 
 
 def test_the_client_list_is_the_companys_and_can_be_narrowed(people):
-    storage.save_client_enrollment("Alpha", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("Alpha", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     login("bob", PW_B)
-    storage.save_client_enrollment("Beta", [], [], "bob", spatial(1, 5), "scan")
+    storage.save_client_enrollment("Beta", [], "bob", spatial_embeddings=spatial(1, 5), spatial_origin="scan")
     assert sorted(c["key"] for c in storage.list_clients()) == ["alpha", "beta"]
     assert [c["key"] for c in storage.list_clients("alice")] == ["alpha"]
     assert [c["key"] for c in storage.list_clients("bob")] == ["beta"]
@@ -235,61 +234,60 @@ def test_the_client_list_is_the_companys_and_can_be_narrowed(people):
 
 def test_a_non_admin_cannot_replace_a_clients_references(people):
     mine = spatial()
-    storage.save_client_enrollment("Shared", ["/a.png"], [], "alice", mine, "scan")
+    storage.save_client_enrollment("Shared", [], "alice", spatial_embeddings=mine, spatial_origin="scan")
     login("bob", PW_B)
-    ok, msg = storage.save_client_enrollment("SHARED", [], [], "bob", spatial(base=77), "scan")
+    ok, msg = storage.save_client_enrollment("SHARED", [], "bob", spatial_embeddings=spatial(base=77), spatial_origin="scan")
     assert ok is False and "Only the admin" in msg
     assert storage.get_client("shared")["spatial_embeddings"] == mine
     # adding a set the client does not have yet is an enrolment, open to everyone
-    assert storage.save_client_enrollment("shared", [], pen(), "bob", None, "scan")[0]
+    assert storage.save_client_enrollment("shared", pen(), "bob", spatial_embeddings=None, spatial_origin="scan")[0]
     events = storage.get_audit_log()
     assert [(e["event"], e["employee"]) for e in events] == [
         ("enrol", "alice"), ("re-enrol refused", "bob"), ("enrol", "bob")]
 
 
 def test_reenrolment_replaces_templates_and_keeps_enrolled_at(people):
-    storage.save_client_enrollment("C", ["/1.png"], [], "alice", spatial(), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")
     with storage._get_db().get_connection() as conn:  # backdate: "kept" must not mean "same second"
         conn.execute("UPDATE users SET enrolled_at = '2020-01-02T03:04:05', updated_at = '2020-01-02T03:04:05'")
     first = storage.get_client("c", "alice")
     new = spatial(base=300)
-    assert storage.save_client_enrollment("C", ["/2.png"], [], "alice", new, "scan")[0]
+    assert storage.save_client_enrollment("C", [], "alice", spatial_embeddings=new, spatial_origin="scan")[0]
     rec = storage.get_client("c", "alice")
     assert rec["spatial_embeddings"] == new and len(rec["spatial_embeddings"]) == 5
-    assert rec["image_references"] == ["/2.png"]
     assert rec["enrolled_at"] == first["enrolled_at"] == "2020-01-02T03:04:05"
     assert rec["updated_at"] != "2020-01-02T03:04:05"
 
 
 def test_bad_input_is_refused_without_touching_old_data(people):
     old = spatial()
-    storage.save_client_enrollment("C", [], [], "alice", old, "scan")
-    assert storage.save_client_enrollment("C", [], [], "alice", [b64(10, 1)], "scan")[0] is False
-    assert storage.save_client_enrollment("C", [], [], "alice", ["!!not base64!!"], "scan")[0] is False
-    assert storage.save_client_enrollment("C", [], [], "alice", spatial(1), "sideways")[0] is False
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=old, spatial_origin="scan")
+    assert storage.save_client_enrollment("C", [], "alice", spatial_embeddings=[b64(10, 1)], spatial_origin="scan")[0] is False
+    assert storage.save_client_enrollment("C", [], "alice", spatial_embeddings=["!!not base64!!"], spatial_origin="scan")[0] is False
+    assert storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="sideways")[0] is False
     assert storage.get_client("c", "alice")["spatial_embeddings"] == old
-    assert storage.save_client_enrollment("", [], [], "alice", spatial(1), "scan")[0] is False
-    assert storage.save_client_enrollment("a|b", [], [], "alice", spatial(1), "scan")[0] is False
-    assert storage.save_client_enrollment("C", [], [], "ghost", spatial(1), "scan") == (False, "Employee not found")
-    assert storage.save_client_enrollment("New", [], None, "alice", None)[0] is False   # nothing to save
+    assert storage.save_client_enrollment("", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")[0] is False
+    assert storage.save_client_enrollment("a|b", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")[0] is False
+    assert storage.save_client_enrollment("C", [], "ghost", spatial_embeddings=spatial(1), spatial_origin="scan") == (False, "Employee not found")
+    assert storage.save_client_enrollment("New", None, "alice", spatial_embeddings=None)[0] is False   # nothing to save
 
 
 def test_failed_save_keeps_the_previous_enrollment(people):
     old = spatial()
-    storage.save_client_enrollment("C", ["/old.png"], [], "alice", old, "scan")
-    ok, _ = storage.save_client_enrollment("C", ["/new.png"], [], "alice", spatial(2) + [b64(7, 1)], "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=old, spatial_origin="scan")
+    ok, _ = storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(2) + [b64(7, 1)], spatial_origin="scan")
     assert ok is False
     rec = storage.get_client("c", "alice")
-    assert rec["spatial_embeddings"] == old and rec["image_references"] == ["/old.png"]
+    assert rec["spatial_embeddings"] == old
 
 
 def test_tablet_enrolment_stores_temporal_and_the_tablet(people):
-    assert storage.save_client_enrollment("Tab", [], pen(), "alice", None, "render", capture_device=XPPEN)[0]
+    assert storage.save_client_enrollment("Tab", pen(), "alice", spatial_embeddings=None, spatial_origin="render", capture_device=XPPEN)[0]
     rec = storage.get_client("tab", "alice")
     assert rec["dynamic_references"] == pen() and rec["spatial_embeddings"] == []
     assert rec["spatial_origin"] is None and rec["spatial_sets"] == {}   # pen only: no spatial set
     assert rec["temporal_set"]["capture_device"] == XPPEN
-    assert storage.save_client_enrollment("Both", ["/s.png"], pen(), "alice", spatial(), "scan")[0]
+    assert storage.save_client_enrollment("Both", pen(), "alice", spatial_embeddings=spatial(), spatial_origin="scan")[0]
     rec = storage.get_client("both", "alice")
     assert rec["dynamic_references"] == pen() and len(rec["spatial_embeddings"]) == 5
     assert rec["spatial_origin"] == "scan"
@@ -297,13 +295,13 @@ def test_tablet_enrolment_stores_temporal_and_the_tablet(people):
 
 def test_spatial_origin_saved_is_the_one_returned(people):
     for origin in ("scan", "render"):
-        storage.save_client_enrollment(f"c-{origin}", [], [], "alice", spatial(1), origin)
+        storage.save_client_enrollment(f"c-{origin}", [], "alice", spatial_embeddings=spatial(1), spatial_origin=origin)
         assert storage.get_client(f"c-{origin}", "alice")["spatial_origin"] == origin
 
 
 def test_only_the_admin_deletes_and_the_log_is_kept(people):
     login("bob", PW_B)
-    storage.save_client_enrollment("Gone", [], [], "bob", spatial(), "scan")
+    storage.save_client_enrollment("Gone", [], "bob", spatial_embeddings=spatial(), spatial_origin="scan")
     storage.append_verification_log("Gone", "Genuine", 90.0, "scan", "bob")
     assert storage.delete_client("Gone", "bob") is False
     assert storage.delete_client("Gone", "ghost") is False
@@ -317,9 +315,9 @@ def test_only_the_admin_deletes_and_the_log_is_kept(people):
 
 
 def test_count_clients_enrolled_this_month(people):
-    storage.save_client_enrollment("A1", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("A1", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     login("bob", PW_B)
-    storage.save_client_enrollment("B1", [], [], "bob", spatial(1, 3), "scan")
+    storage.save_client_enrollment("B1", [], "bob", spatial_embeddings=spatial(1, 3), spatial_origin="scan")
     assert storage.count_clients_enrolled_this_month("alice") == 1
     assert storage.count_clients_enrolled_this_month() == 2
     assert storage.count_clients_enrolled_this_month("ghost") == 0
@@ -367,7 +365,7 @@ def test_non_final_decisions_are_not_logged_or_counted(people):
 
 
 def test_enrolment_events_do_not_count_as_verifications(people):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     assert storage.get_verification_stats()["total"] == 0 and storage.get_verification_log() == []
     assert storage.get_last_verification_for_client("c") is None
 
@@ -388,14 +386,12 @@ def test_audit_log_keeps_routing_degraded_reasons_model_version_threshold(people
 
 
 # ------------------------------------------------------- at-rest protection
-def test_embeddings_and_image_paths_are_not_readable_in_the_file(people, isolated_storage):
+def test_embeddings_are_not_readable_in_the_file(people, isolated_storage):
     embs = spatial(2)
-    path = "/Users/someone/Desktop/Jane-Doe-signature.png"
-    storage.save_client_enrollment("Jane Doe", [path], [b64(128, 5)], "alice", embs, "scan")
+    storage.save_client_enrollment("Jane Doe", [b64(128, 5)], "alice", spatial_embeddings=embs, spatial_origin="scan")
     data = db_bytes(isolated_storage)
     for e in embs + [b64(128, 5)]:
         assert base64.b64decode(e) not in data and e.encode() not in data
-    assert path.encode() not in data and b"Jane-Doe-signature" not in data
 
 
 def test_no_json_storage_code_is_left():
@@ -409,7 +405,7 @@ def test_no_json_storage_code_is_left():
 
 # ------------------------------------------------- key: logins only (item 6)
 def test_no_key_file_is_ever_written_and_the_cwd_stays_clean(people, tmp_path, monkeypatch, isolated_storage):
-    storage.save_client_enrollment("Persist", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("Persist", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     elsewhere = tmp_path / "some" / "other" / "dir"
     elsewhere.mkdir(parents=True)
     monkeypatch.chdir(elsewhere)
@@ -421,11 +417,11 @@ def test_no_key_file_is_ever_written_and_the_cwd_stays_clean(people, tmp_path, m
 
 
 def test_nothing_decrypts_before_login_or_after_logout(people):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     storage.logout()
     with pytest.raises(storage.StorageLockedError):
         storage.get_client("c")
-    assert storage.save_client_enrollment("C2", [], [], "alice", spatial(1), "scan")[0] is False
+    assert storage.save_client_enrollment("C2", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")[0] is False
     storage._reset()                                                # the app restarts
     with pytest.raises(storage.StorageLockedError):
         storage.list_clients()
@@ -434,7 +430,7 @@ def test_nothing_decrypts_before_login_or_after_logout(people):
 
 
 def test_a_copied_data_folder_cannot_be_opened(people, isolated_storage, tmp_path, monkeypatch):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     stolen = tmp_path / "stolen"
     shutil.copytree(isolated_storage, stolen)
     monkeypatch.setenv(storage.HOME_ENV_VAR, str(stolen))
@@ -448,7 +444,7 @@ def test_passphrase_env_var_unlocks_for_tests_and_ci_without_a_file(isolated_sto
     monkeypatch.setenv(PASSPHRASE_ENV_VAR, "from-environment")
     storage._reset()
     assert storage.register_employee("E", "env", "env-password-1")[0]
-    storage.save_client_enrollment("C", [], [], "env", spatial(1), "scan")
+    storage.save_client_enrollment("C", [], "env", spatial_embeddings=spatial(1), spatial_origin="scan")
     storage._reset()
     assert storage.get_client("c") is not None                      # no login needed
     storage.logout()
@@ -476,23 +472,22 @@ def test_an_old_database_is_refused_with_the_folder_to_move(isolated_storage):
 # ------------------------------------------------- several sets (issue #33, item 3)
 def test_scan_then_render_are_stored_side_by_side(people):
     scan, render = spatial(5, 0), spatial(5, 100)
-    assert storage.save_client_enrollment("C", ["/p/1.png"], [], "alice", scan, "scan")[0]
-    assert storage.save_client_enrollment("C", [], pen(), "alice", render, "render")[0]
+    assert storage.save_client_enrollment("C", [], "alice", spatial_embeddings=scan, spatial_origin="scan")[0]
+    assert storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=render, spatial_origin="render")[0]
     rec = storage.get_client("c", "alice")
     assert rec["spatial_sets"]["scan"]["embeddings"] == scan
     assert rec["spatial_sets"]["render"]["embeddings"] == render
     assert rec["temporal_set"]["embeddings"] == pen()
-    assert rec["image_references"] == ["/p/1.png"]            # enrolling by tablet keeps the scan refs
     assert rec["spatial_embeddings"] == scan and rec["spatial_origin"] == "scan"   # old keys: scan first
     assert storage.get_reference_embeddings("c", spatial_origin="render") == (render, "render")
 
 
 def test_reenrolling_one_set_leaves_the_others_untouched(people):
     scan, render = spatial(5, 0), spatial(5, 100)
-    storage.save_client_enrollment("C", ["/a.png"], pen(), "alice", scan, "scan")
-    storage.save_client_enrollment("C", [], None, "alice", render, "render")
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=scan, spatial_origin="scan")
+    storage.save_client_enrollment("C", None, "alice", spatial_embeddings=render, spatial_origin="render")
     new_scan = spatial(5, 500)
-    storage.save_client_enrollment("C", ["/b.png"], None, "alice", new_scan, "scan")
+    storage.save_client_enrollment("C", None, "alice", spatial_embeddings=new_scan, spatial_origin="scan")
     rec = storage.get_client("c", "alice")
     assert rec["spatial_sets"]["scan"]["embeddings"] == new_scan and len(new_scan) == 5
     assert rec["spatial_sets"]["render"]["embeddings"] == render
@@ -501,18 +496,18 @@ def test_reenrolling_one_set_leaves_the_others_untouched(people):
 
 def test_reenrolling_the_pen_set_replaces_it_and_keeps_the_spatial_sets(people):
     scan = spatial(5, 0)
-    storage.save_client_enrollment("C", ["/a.png"], pen(base=700), "alice", scan, "scan")
-    storage.save_client_enrollment("C", [], pen(base=800), "alice", None, "render")
+    storage.save_client_enrollment("C", pen(base=700), "alice", spatial_embeddings=scan, spatial_origin="scan")
+    storage.save_client_enrollment("C", pen(base=800), "alice", spatial_embeddings=None, spatial_origin="render")
     rec = storage.get_client("c", "alice")
     assert rec["temporal_set"]["embeddings"] == pen(base=800)      # replaced, 5 not 10
     assert rec["spatial_sets"]["scan"]["embeddings"] == scan       # untouched
 
 
 def test_resaving_without_new_pen_signatures_keeps_the_pen_set_and_its_added_signings(people, monkeypatch):
-    storage.save_client_enrollment("C", [], pen(), "alice", spatial(), "scan")
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=spatial(), spatial_origin="scan")
     assert storage.add_confirmed_reference("c", b64(128, 999), "alice", modality="temporal")
     monkeypatch.setattr(storage, "MODEL_VERSION", "v-next")
-    assert storage.save_client_enrollment("C", ["/new.png"], None, "alice", spatial(base=50), "scan")[0]
+    assert storage.save_client_enrollment("C", None, "alice", spatial_embeddings=spatial(base=50), spatial_origin="scan")[0]
     t = storage.get_client("c")["temporal_set"]
     assert t["embeddings"] == pen() + [b64(128, 999)]
     assert t["stale"] is True                               # still labelled with the old version
@@ -522,9 +517,9 @@ def test_resaving_without_new_pen_signatures_keeps_the_pen_set_and_its_added_sig
 
 def test_each_set_has_its_own_model_version_and_stale_flag(people, monkeypatch):
     old_version = storage.MODEL_VERSION
-    storage.save_client_enrollment("C", [], [], "alice", spatial(1), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     monkeypatch.setattr(storage, "MODEL_VERSION", "v-next")
-    storage.save_client_enrollment("C", [], [], "alice", spatial(1, 9), "render")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1, 9), spatial_origin="render")
     sets = storage.get_client("c", "alice")["spatial_sets"]
     assert sets["render"]["model_version"] == "v-next" and sets["render"]["stale"] is False
     assert sets["scan"]["model_version"] == old_version != "v-next"
@@ -533,7 +528,7 @@ def test_each_set_has_its_own_model_version_and_stale_flag(people, monkeypatch):
 
 
 def test_one_row_from_other_weights_makes_the_set_stale(people, monkeypatch):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     monkeypatch.setattr(storage, "MODEL_VERSION", "v-next")
     assert storage.add_confirmed_reference("c", b64(512, 99), "alice")       # newest row is v-next
     assert storage.get_client("c")["spatial_sets"]["scan"]["stale"] is True
@@ -541,7 +536,7 @@ def test_one_row_from_other_weights_makes_the_set_stale(people, monkeypatch):
 
 # ----------------------------------------- checks before verifying (items 7, 11)
 def test_stale_references_are_not_verified_against(people, monkeypatch):
-    storage.save_client_enrollment("C", [], pen(), "alice", spatial(), "scan")
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=spatial(), spatial_origin="scan")
     assert storage.check_references("c", "scan", use_pen=True) == []
     monkeypatch.setattr(storage, "MODEL_VERSION", "v-next")
     problems = storage.check_references("c", "scan", use_pen=True)
@@ -551,7 +546,7 @@ def test_stale_references_are_not_verified_against(people, monkeypatch):
 
 
 def test_a_pen_signing_from_another_tablet_or_system_is_refused(people):
-    storage.save_client_enrollment("C", [], pen(), "alice", None, capture_device=XPPEN)
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=None, capture_device=XPPEN)
     assert storage.check_references("c", use_pen=True, capture_device=dict(XPPEN)) == []
     assert storage.check_references("c", use_pen=True,
                                     capture_device={**XPPEN, "device_model": "xppen deco 640 "}) == []
@@ -562,7 +557,7 @@ def test_a_pen_signing_from_another_tablet_or_system_is_refused(people):
 
 
 def test_a_pen_set_enrolled_before_devices_were_recorded_is_not_checked(people):
-    storage.save_client_enrollment("C", [], pen(), "alice", None)
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=None)
     assert storage.check_references("c", use_pen=True, capture_device={"device_model": "Any"}) == []
 
 
@@ -580,26 +575,23 @@ def test_a_replayed_probe_is_refused_and_two_real_signings_are_not(people):
 
 def test_an_enrolment_scan_given_again_as_the_probe_is_a_replay(people):
     refs = spatial(5)
-    storage.save_client_enrollment("C", ["/scan1.png"], pen(), "alice", refs, "scan")
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=refs, spatial_origin="scan")
     for emb in (refs[0], pen()[2]):
         assert storage.is_replayed_probe("c", [probe_fingerprint(base64.b64decode(emb))])
     assert not storage.is_replayed_probe("c", [probe_fingerprint(base64.b64decode(b64(512, 4242)))])
 
 
-def test_a_non_admin_cannot_swap_a_clients_images_or_name(people):
-    storage.save_client_enrollment("Client", ["/real.png"], None, "alice", spatial(1), "scan")
+def test_a_non_admin_cannot_swap_a_clients_name(people):
+    storage.save_client_enrollment("Client", None, "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     login("bob", PW_B)
-    ok, msg = storage.save_client_enrollment("CLIENT", ["/evil.png"], None, "bob", None)
-    assert not ok and "Only the admin" in msg
-    rec = storage.get_client("client")
-    assert rec["image_references"] == ["/real.png"] and rec["display_name"] == "Client"
-    assert storage.get_audit_log()[-1]["event"] == "re-enrol refused"
+    storage.save_client_enrollment("CLIENT", pen(), "bob", spatial_embeddings=None)
+    assert storage.get_client("client")["display_name"] == "Client"
 
 
 # --------------------------------------------------- confirmed signings (restored)
 def test_reference_embeddings_are_enrolled_then_added(people):
     enrolled = spatial(5)
-    storage.save_client_enrollment("C", [], [], "alice", spatial_embeddings=enrolled)
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=enrolled)
     added = b64(512, 99)
     assert storage.add_confirmed_reference("c", added, "alice") is True
     refs, origin = storage.get_reference_embeddings("C", "alice")
@@ -607,14 +599,14 @@ def test_reference_embeddings_are_enrolled_then_added(people):
 
 
 def test_reference_embeddings_of_unknown_or_other_employees_client(people):
-    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=spatial(5))
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=spatial(5))
     assert storage.get_reference_embeddings("ghost", "alice") == ([], "scan")
     assert storage.get_reference_embeddings("c", "bob") == ([], "scan")        # narrowed to Bob's clients
     assert storage.get_reference_embeddings("c") == (spatial(5), "scan")       # the company list
 
 
 def test_any_employee_adds_a_confirmed_signing_but_not_to_an_unknown_client(people):
-    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=spatial(5))
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=spatial(5))
     login("bob", PW_B)
     assert storage.add_confirmed_reference("c", b64(512, 7), "bob") is True
     assert storage.add_confirmed_reference("c", b64(512, 8), "ghost") is False
@@ -624,7 +616,7 @@ def test_any_employee_adds_a_confirmed_signing_but_not_to_an_unknown_client(peop
 
 def test_confirmed_references_cap_drops_oldest_added_never_enrolled(people):
     enrolled = spatial(5)
-    storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=enrolled)
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=enrolled)
     added = [b64(512, 100 + i) for i in range(5)]
     for emb in added:
         assert storage.add_confirmed_reference("c", emb, "alice")
@@ -635,8 +627,7 @@ def test_confirmed_references_cap_drops_oldest_added_never_enrolled(people):
 
 
 def test_confirmed_reference_goes_into_the_set_of_its_own_origin(people):
-    storage.save_client_enrollment("c", [], [b64(128, 1)], "alice",
-                                   spatial_embeddings=spatial(5), spatial_origin="render")
+    storage.save_client_enrollment("c", [b64(128, 1)], "alice", spatial_embeddings=spatial(5), spatial_origin="render")
     added = b64(512, 50)
     assert storage.add_confirmed_reference("c", added, "alice") is False      # a scan: no scan set
     assert storage.add_confirmed_reference("c", added, "alice", spatial_origin="render")
@@ -647,8 +638,8 @@ def test_confirmed_reference_goes_into_the_set_of_its_own_origin(people):
 
 def test_a_rendered_signing_never_lands_in_the_scan_set(people):
     scan, render = spatial(5, 0), spatial(5, 100)
-    storage.save_client_enrollment("C", [], None, "alice", scan, "scan")
-    storage.save_client_enrollment("C", [], None, "alice", render, "render")
+    storage.save_client_enrollment("C", None, "alice", spatial_embeddings=scan, spatial_origin="scan")
+    storage.save_client_enrollment("C", None, "alice", spatial_embeddings=render, spatial_origin="render")
     drawn = b64(512, 999)
     assert storage.add_confirmed_reference("c", drawn, "alice", spatial_origin="render")
     sets = storage.get_client("c")["spatial_sets"]
@@ -658,7 +649,7 @@ def test_a_rendered_signing_never_lands_in_the_scan_set(people):
 
 def test_confirmed_reference_insert_and_trim_are_one_transaction(people):
     db = storage._get_db()
-    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     for i in range(6):
         db.add_confirmed_reference("c", "spatial", np.full(512, i, dtype=np.float32), "v", "scan", max_per_set=7)
     assert len(db.get_references("c", "spatial", "scan")) == 7      # 5 enrolled kept, oldest added dropped
@@ -675,14 +666,14 @@ def test_an_ownerless_row_is_started_clean_by_the_first_save(people):
     db.add_reference("orphan", "spatial", np.zeros(512, dtype=np.float32), "old", spatial_origin="render")
     assert not storage.client_exists("orphan")                  # invisible while ownerless
     login("bob", PW_B)
-    assert storage.save_client_enrollment("orphan", [], [], "bob", spatial(1), "scan")[0]
+    assert storage.save_client_enrollment("orphan", [], "bob", spatial_embeddings=spatial(1), spatial_origin="scan")[0]
     rec = storage.get_client("orphan")
     assert rec["enrolled_by"] == "bob" and set(rec["spatial_sets"]) == {"scan"}
 
 
 # ------------------------------------------------- backup / restore (item 9)
 def test_backup_and_restore(people, tmp_path):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     folder = tmp_path / "usb"
     folder.mkdir()
     login("bob", PW_B)                                             # any employee backs up
@@ -702,7 +693,7 @@ def test_backup_and_restore(people, tmp_path):
 
 
 def test_a_backup_can_be_restored_on_a_new_install(people, tmp_path, monkeypatch):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(2), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(2), spatial_origin="scan")
     folder = tmp_path / "usb"
     folder.mkdir()
     path = storage.backup_database(str(folder), "alice")[1]
@@ -722,7 +713,7 @@ def test_backup_needs_a_login(people, tmp_path):
 
 
 def test_a_damaged_backup_is_refused_before_anything_is_replaced(people, tmp_path):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     backup = storage._get_db().backup_to(str(tmp_path / "b.db"))
     with sqlite3.connect(backup) as conn:   # an index that no longer matches its table
         conn.execute("CREATE INDEX damaged ON audit_log(event)")
@@ -731,13 +722,13 @@ def test_a_damaged_backup_is_refused_before_anything_is_replaced(people, tmp_pat
                      "WHERE name = 'damaged'")
     with sqlite3.connect(backup) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok"   # opens, but is damaged
-    storage.save_client_enrollment("D", [], [], "alice", spatial(5, 9), "scan")
+    storage.save_client_enrollment("D", [], "alice", spatial_embeddings=spatial(5, 9), spatial_origin="scan")
     ok, _ = storage.restore_database(backup, "alice", PW_A)
     assert not ok and storage.client_exists("d")             # live database untouched
 
 
 def test_an_older_added_row_makes_a_current_set_stale(people, monkeypatch):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")   # enrolled at MODEL_VERSION
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")   # enrolled at MODEL_VERSION
     monkeypatch.setattr(storage, "MODEL_VERSION", "v-older")
     assert storage.add_confirmed_reference("c", b64(512, 99), "alice")
     monkeypatch.undo()
@@ -746,6 +737,6 @@ def test_an_older_added_row_makes_a_current_set_stale(people, monkeypatch):
 
 
 def test_a_confirmed_pen_signing_needs_a_pen_set(people):
-    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     assert storage.add_confirmed_reference("c", b64(128, 5), "alice", modality="temporal") is False
     assert storage.get_client("c")["temporal_set"] is None

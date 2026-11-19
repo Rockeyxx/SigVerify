@@ -254,8 +254,6 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     display_name TEXT,
                     enrolled_by INTEGER REFERENCES employees(id),
-                    image_refs_enc BLOB,
-                    image_refs_nonce BLOB,
                     spatial_origin TEXT CHECK (spatial_origin IS NULL OR spatial_origin IN ('render', 'scan')),
                     enrolled_at TEXT,
                     updated_at TEXT
@@ -312,17 +310,6 @@ class DatabaseManager:
     def decrypt_embedding(self, user_id, modality, spatial_origin, ct: bytes, nonce: bytes) -> np.ndarray:
         raw = AESGCM(self._require_key()).decrypt(nonce, ct, self._aad(user_id, modality, spatial_origin))
         return np.frombuffer(raw, dtype=np.float32).copy()
-
-    @staticmethod
-    def _refs_aad(user_id: str) -> bytes:
-        return f"{user_id}|image_refs".encode("utf-8")
-
-    def _encrypt_blob(self, aad: bytes, raw: bytes):
-        nonce = os.urandom(12)
-        return AESGCM(self._require_key()).encrypt(nonce, raw, aad), nonce
-
-    def _decrypt_blob(self, aad: bytes, ct: bytes, nonce: bytes) -> bytes:
-        return AESGCM(self._require_key()).decrypt(nonce, ct, aad)
 
     # ------------------------------------------------------------ validation
     @staticmethod
@@ -566,7 +553,7 @@ class DatabaseManager:
             "SELECT 1 FROM enrollments WHERE user_id = ? AND modality = ? AND spatial_origin IS ? LIMIT 1",
             (user_id, modality, spatial_origin)).fetchone() is not None
 
-    def save_client(self, user_id: str, display_name: str, employee_id: int, image_refs,
+    def save_client(self, user_id: str, display_name: str, employee_id: int, *,
                     spatial_embeddings, spatial_origin, temporal_embeddings,
                     model_version: str, capture_device: dict = None) -> None:
         """
@@ -578,11 +565,9 @@ class DatabaseManager:
                               model_version untouched); [] removes it; a list replaces it.
           capture_device:     {"device_model", "os", ...} of the tablet the pen set was
                               signed on, stored with the new pen set.
-        image_refs are replaced when given or when a scan set is replaced.
 
-        Any employee enrols a new client or adds a set the client does not have yet (with
-        the image references of a scan set the client did not have). Replacing or removing
-        a set the client already holds, or changing its stored image references or display
+        Any employee enrols a new client or adds a set the client does not have yet.
+        Replacing or removing a set the client already holds, or changing the display
         name, is a re-enrolment: admin only (PermissionError, and the refused attempt is
         logged; a non-admin's differently-cased name is simply not applied). Every change
         is logged. A row with no owner (made by add_references) is treated as new: its
@@ -606,18 +591,13 @@ class DatabaseManager:
                 raw = self._to_raw_bytes(modality, emb)
                 ct, nonce = self.encrypt_embedding(user_id, modality, origin, raw)
                 rows.append((user_id, modality, origin, ct, nonce, model_version, "enroll", now, dev))
-        replace_refs = bool(image_refs) or (spatial_origin == "scan" and bool(spatial))
-        new_refs = [str(p) for p in (image_refs or [])]
-        refs_json = json.dumps(new_refs).encode("utf-8")
-        refs_ct, refs_nonce = self._encrypt_blob(self._refs_aad(user_id), refs_json)
 
         changes = []
         try:
             with self._transaction() as conn:
                 is_admin = self._is_admin(conn, employee_id)
                 existing = conn.execute(
-                    "SELECT enrolled_by, display_name, image_refs_enc, image_refs_nonce "
-                    "FROM users WHERE user_id = ?", (user_id,)).fetchone()
+                    "SELECT enrolled_by, display_name FROM users WHERE user_id = ?", (user_id,)).fetchone()
                 if existing is not None and existing[0] is None:   # ownerless: start clean
                     conn.execute("DELETE FROM enrollments WHERE user_id = ?", (user_id,))
                     conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
@@ -626,18 +606,10 @@ class DatabaseManager:
                     raise ValueError("Nothing to save: give paper or pen signatures")
                 replaced = []
                 if existing is not None:
-                    adds_scan_set = (spatial and spatial_origin == "scan"
-                                     and not self._set_exists(conn, user_id, "spatial", "scan"))
                     if spatial and self._set_exists(conn, user_id, "spatial", spatial_origin):
                         replaced.append(f"{spatial_origin} set")
                     if not keep_temporal and self._set_exists(conn, user_id, "temporal", None):
                         replaced.append("pen set")
-                    old_refs = []
-                    if existing[2] is not None:
-                        old_refs = json.loads(self._decrypt_blob(
-                            self._refs_aad(user_id), existing[2], existing[3]).decode("utf-8"))
-                    if replace_refs and new_refs != old_refs and not (adds_scan_set and not old_refs):
-                        replaced.append("image references")
                     if display_name != existing[1]:
                         if is_admin:
                             replaced.append("display name")
@@ -654,18 +626,13 @@ class DatabaseManager:
                     conn.execute("DELETE FROM enrollments WHERE user_id = ? AND modality = 'temporal'", (user_id,))
                 if existing is None:
                     conn.execute(
-                        """INSERT INTO users (user_id, display_name, enrolled_by, image_refs_enc,
-                                              image_refs_nonce, enrolled_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (user_id, display_name, employee_id, refs_ct, refs_nonce, now, now))
+                        """INSERT INTO users (user_id, display_name, enrolled_by, enrolled_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (user_id, display_name, employee_id, now, now))
                 else:  # enrolled_by and enrolled_at stay: who enrolled first is recorded
                     conn.execute(
                         "UPDATE users SET display_name = ?, updated_at = ? WHERE user_id = ?",
                         (display_name, now, user_id))
-                    if replace_refs:
-                        conn.execute(
-                            "UPDATE users SET image_refs_enc = ?, image_refs_nonce = ? WHERE user_id = ?",
-                            (refs_ct, refs_nonce, user_id))
                 conn.executemany(
                     """INSERT INTO enrollments
                        (user_id, modality, spatial_origin, encrypted_embedding, nonce,
@@ -677,7 +644,7 @@ class DatabaseManager:
                     saved.append("pen set")
                 elif "pen set" in replaced:
                     saved.append("pen set removed")
-                saved += [c for c in replaced if c in ("image references", "display name")]
+                saved += [c for c in replaced if c == "display name"]
                 if saved:
                     self._log_event(conn, EVENT_REENROL if replaced else EVENT_ENROL,
                                     user_id, display_name, employee_id, saved)
@@ -687,13 +654,11 @@ class DatabaseManager:
             raise
 
     _CLIENT_BY_ID = """
-        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
-               u.image_refs_nonce, u.enrolled_at, u.updated_at
+        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.enrolled_at, u.updated_at
         FROM users u JOIN employees e ON e.id = u.enrolled_by
         WHERE u.user_id = ?"""
     _CLIENTS = """
-        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.image_refs_enc,
-               u.image_refs_nonce, u.enrolled_at, u.updated_at
+        SELECT u.user_id, u.display_name, u.enrolled_by, e.username, u.enrolled_at, u.updated_at
         FROM users u JOIN employees e ON e.id = u.enrolled_by
         WHERE ? IS NULL OR u.enrolled_by = ?
         ORDER BY u.rowid ASC"""
@@ -721,10 +686,7 @@ class DatabaseManager:
         }
 
     def _assemble_client(self, conn, row) -> dict:
-        user_id, display_name, _, owner_name, refs_ct, refs_nonce, enrolled_at, updated_at = row
-        refs = []
-        if refs_ct is not None:
-            refs = json.loads(self._decrypt_blob(self._refs_aad(user_id), refs_ct, refs_nonce).decode("utf-8"))
+        user_id, display_name, _, owner_name, enrolled_at, updated_at = row
         sets = {}
         for o in SPATIAL_ORIGINS:
             found = self._fetch_set(conn, user_id, "spatial", o)
@@ -736,7 +698,6 @@ class DatabaseManager:
             "key": user_id,
             "display_name": display_name,
             "enrolled_by": owner_name,
-            "image_references": refs,
             "sets": sets,                  # {"scan": {...}, "render": {...}}, a missing origin is absent
             "temporal_set": temporal,      # {...} or None
             # flat view kept for the pages written before several sets existed:
@@ -947,7 +908,7 @@ class DatabaseManager:
         """
         True if one of `probe_hashes` is a replayed file rather than a new signing:
           * it equals one of the client's stored references (enrolled or added), at any age:
-            the enrolment scans stay on disk (image_references), and resubmitting one gives
+            the enrolment scans may still be on disk, and resubmitting one gives
             exactly the stored embedding;
           * it was already ACCEPTED (Genuine) for this client within `window_days`;
           * the visit repeats one signing.

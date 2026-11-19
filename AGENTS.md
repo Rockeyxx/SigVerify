@@ -649,11 +649,11 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   client, adds a set the client lacks, and verifies any client. Only the admin (the
   first account on a new database) adds employees, resets a password, removes an
   employee, deletes a client, replaces or removes a set a client already holds, or
-  changes a client's stored image references or name.
+  changes a client's name.
   `enrolled_by` is recorded and never used to block. Every enrolment, re-enrolment and
   deletion, and every refused attempt, goes to the audit log with the employee.
-- **Data after capture.** The database stores embeddings and the encrypted list of the
-  file paths the employee picked, never an image or a trajectory. Templates have no
+- **Data after capture.** The database stores embeddings only, never an image, an
+  image path or a trajectory. Templates have no
   expiry date: a client's templates are removed only when the admin deletes the client.
 - **Replay check.** Each verification row stores the SHA-256 of each probe embedding
   (never the embedding). A probe equal to one of the client's stored references (an
