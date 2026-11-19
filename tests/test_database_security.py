@@ -7,7 +7,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from src.database import db_manager
-from src.database.db_manager import DatabaseManager
+from src.database.db_manager import DatabaseLockedError, DatabaseManager, probe_fingerprint
 
 MODEL = "test-model-v1"
 PW_A = "alice-password-1"
@@ -184,9 +184,9 @@ def test_each_slot_records_its_scrypt_cost_and_the_default_is_2_17(db, db_path, 
 
 
 def test_new_password_rewraps_the_slot(db, db_path):
-    db.create_employee("A", "a", "old-password-1")
+    a = db.create_employee("A", "a", "old-password-1")
     before = slots(db_path)
-    db.update_employee("a", "A", "a", "new-password-2")
+    db.update_employee(a, "a", "A", "a", "new-password-2", current_password="old-password-1")
     after = slots(db_path)
     assert [r for r in after if r[0] == "employee"] != [r for r in before if r[0] == "employee"]
     assert db.authenticate_employee("a", "old-password-1")[0] is None
@@ -198,10 +198,49 @@ def test_short_passwords_are_refused(db):
         db.create_employee("A", "a", "short")
     a = db.create_employee("A", "a", PW_A)
     with pytest.raises(ValueError, match="at least"):
-        db.update_employee("a", "A", "a", "short")
+        db.update_employee(a, "a", "A", "a", "short", current_password=PW_A)
     with pytest.raises(ValueError, match="at least"):
         db.reset_password(a, "a", "short")
     assert db.authenticate_employee("a", PW_A)[0] is not None
+
+
+# ------------------------------------------- own account only (account takeover)
+def test_an_employee_cannot_change_another_account(db):
+    a, b = two_employees(db)
+    for target in ("alice", "bob"):
+        actor = b if target == "alice" else a
+        with pytest.raises(PermissionError, match="own account"):
+            db.update_employee(actor, target, "X", target, "taken-over-pass", current_password="anything-at-all")
+        with pytest.raises(PermissionError, match="own account"):
+            db.update_employee(actor, target, "X", "renamed")                   # no rename either
+    assert db.authenticate_employee("alice", PW_A)[0] is not None
+    assert db.find_employee("bob")["full_name"] == "Bob"
+
+
+def test_a_new_password_needs_the_current_one(db, db_path):
+    a = db.create_employee("A", "a", PW_A)
+    before = slots(db_path)
+    with pytest.raises(PermissionError, match="current password"):
+        db.update_employee(a, "a", "A", "a", "new-password-2")
+    with pytest.raises(PermissionError, match="incorrect"):
+        db.update_employee(a, "a", "A", "a", "new-password-2", current_password="wrong-password-9")
+    assert slots(db_path) == before
+    assert db.authenticate_employee("a", PW_A)[0] is not None
+
+
+def test_a_locked_store_changes_no_profile(db):
+    a = db.create_employee("A", "a", PW_A)
+    db.lock()
+    with pytest.raises(DatabaseLockedError):
+        db.update_employee(a, "a", "Hacked", "mallory")
+    assert db.find_employee("a")["full_name"] == "A" and db.find_employee("mallory") is None
+
+
+def test_the_admin_cannot_reset_their_own_password(db):
+    a, _ = two_employees(db)
+    with pytest.raises(ValueError, match="own password"):
+        db.reset_password(a, "alice", "taken-over-pass")
+    assert db.authenticate_employee("alice", PW_A)[0] is not None
 
 
 # ------------------------------------------------------ company-wide clients
@@ -220,7 +259,7 @@ def test_rename_keeps_clients_and_log_with_the_employee(db):
     a, b = two_employees(db)
     db.save_client("c1", "C1", a, [], [vec(512, 13)], "scan", [], MODEL)
     db.log_verification("c1", "scan", 80.0, "Genuine", employee_id=a, display_name="C1")
-    db.update_employee("alice", "Alice N", "alice.new", None)
+    db.update_employee(a, "alice", "Alice N", "alice.new", None)
     new_id = db.find_employee("alice.new")["id"]
     assert new_id == a
     assert [r["key"] for r in db.list_client_records(new_id)] == ["c1"]
@@ -232,10 +271,64 @@ def test_rename_keeps_clients_and_log_with_the_employee(db):
 
 
 def test_rename_to_a_taken_username_is_refused(db):
-    two_employees(db)
+    a, _ = two_employees(db)
     with pytest.raises(ValueError):
-        db.update_employee("alice", "Alice", "BOB", None)
+        db.update_employee(a, "alice", "Alice", "BOB", None)
     assert db.find_employee("alice") is not None
+
+
+# -------------------------------- client images and name (re-enrolment, logged)
+def audit(db):
+    return [(e["event"], e["employee"], e["reasons"]) for e in db.get_log_events(event=None)]
+
+
+def test_a_non_admin_cannot_change_a_clients_images_or_name(db):
+    a, b = two_employees(db)
+    db.save_client("c1", "Client", a, ["/real.png"], [vec(512, 1)], "scan", [], MODEL)
+    with pytest.raises(PermissionError):
+        db.save_client("c1", "CLIENT", b, ["/evil.png"], None, "scan", None, MODEL)
+    rec = db.get_client_record("c1")
+    assert rec["image_references"] == ["/real.png"] and rec["display_name"] == "Client"
+    assert audit(db)[-1] == ("re-enrol refused", "bob", ["image references"])
+    # a set the client lacks is still open to everyone, but the name stays the admin's
+    db.save_client("c1", "CLIENT", b, ["/real.png"], None, "scan", [vec(128, 2)], MODEL)
+    assert db.get_client_record("c1")["display_name"] == "Client"
+    assert audit(db)[-1] == ("enrol", "bob", ["pen set"])
+
+
+def test_a_non_admin_adds_a_scan_set_with_its_images_to_a_pen_only_client(db):
+    a, b = two_employees(db)
+    db.save_client("c1", "C1", a, [], None, "scan", [vec(128, 1)], MODEL)
+    db.save_client("c1", "C1", b, ["/s.png"], [vec(512, 2)], "scan", None, MODEL)
+    assert db.get_client_record("c1")["image_references"] == ["/s.png"]
+    assert audit(db)[-1] == ("enrol", "bob", ["scan set"])
+
+
+def test_the_admins_image_and_name_changes_are_logged(db):
+    a, _ = two_employees(db)
+    db.save_client("c1", "Client", a, ["/a.png"], [vec(512, 1)], "scan", [], MODEL)
+    db.save_client("c1", "CLIENT", a, ["/b.png"], None, "scan", None, MODEL)
+    rec = db.get_client_record("c1")
+    assert rec["image_references"] == ["/b.png"] and rec["display_name"] == "CLIENT"
+    assert audit(db)[-1] == ("re-enrol", "alice", ["image references", "display name"])
+    before = len(audit(db))
+    db.save_client("c1", "CLIENT", a, ["/b.png"], None, "scan", None, MODEL)   # no change
+    assert len(audit(db)) == before
+
+
+# ------------------------------------------------- replay of a stored reference
+def test_an_enrolled_or_added_reference_given_as_a_probe_is_a_replay(db):
+    a, _ = two_employees(db)
+    scan, pen, added = vec(512, 1), vec(128, 2), vec(512, 3)
+    db.save_client("c1", "C1", a, ["/s.png"], [scan], "scan", [pen], MODEL)
+    db.add_confirmed_reference("c1", "spatial", added, MODEL, spatial_origin="scan")
+    for emb in (scan, pen, added):
+        assert db.is_replayed_probe("c1", [probe_fingerprint(emb)])
+    assert not db.is_replayed_probe("c1", [probe_fingerprint(vec(512, 4))])
+    assert not db.is_replayed_probe("c2", [probe_fingerprint(scan)])       # another client's
+    db.lock()
+    with pytest.raises(DatabaseLockedError):
+        db.is_replayed_probe("c1", [probe_fingerprint(scan)])
 
 
 # --------------------------------------------------------------- atomic save
@@ -278,3 +371,23 @@ def test_reenrolment_replaces_old_templates_and_keeps_enrolled_at(db, db_path):
     assert rec["enrolled_at"] == "2020-01-02T03:04:05"
     assert rec["updated_at"] != "2020-01-02T03:04:05"
     assert rec["display_name"] == "c1 renamed"
+
+
+def test_image_references_are_bound_to_their_client(db, db_path):
+    a, _ = two_employees(db)
+    db.save_client("a", "A", a, ["/a.png"], [vec(512, 1)], "scan", [], MODEL)
+    db.save_client("b", "B", a, ["/b.png"], [vec(512, 2)], "scan", [], MODEL)
+    with sqlite3.connect(db_path) as conn:   # move A's encrypted image list onto B
+        ct, nonce = conn.execute("SELECT image_refs_enc, image_refs_nonce FROM users WHERE user_id = 'a'").fetchone()
+        conn.execute("UPDATE users SET image_refs_enc = ?, image_refs_nonce = ? WHERE user_id = 'b'", (ct, nonce))
+    with pytest.raises(InvalidTag):
+        db.get_client_record("b")
+
+
+def test_a_passphrase_never_creates_a_second_key_on_a_password_database(tmp_path):
+    path = str(tmp_path / "s.db")
+    DatabaseManager(path).create_employee("Admin", "admin", PW_A)
+    before = slots(path)
+    with pytest.raises(ValueError, match="employee passwords"):
+        DatabaseManager(path, passphrase="ci-secret")
+    assert slots(path) == before

@@ -524,10 +524,15 @@ class DatabaseManager:
             ).fetchall()
         return [self._employee_dict(r) for r in rows]
 
-    def authenticate_employee(self, username: str, password: str):
+    def authenticate_employee(self, username: str, password: str, new_password: str = None):
         """
-        Returns (employee dict or None, reason), reason in {"", "not_found", "bad_password"}.
+        Returns (employee dict or None, reason), reason in
+        {"", "not_found", "bad_password", "weak_password"}.
         Success loads the data key: the password unwraps the employee's key slot.
+
+        new_password is used only on the first login after the v4 upgrade: an old password
+        shorter than MIN_PASSWORD_LENGTH is never made into a key slot ("weak_password"),
+        so that login must give a new password, which becomes the slot instead.
         """
         with closing(self.get_connection()) as conn:
             row = conn.execute(
@@ -548,16 +553,22 @@ class DatabaseManager:
                 return None, "bad_password"
             return self._employee_dict(row), ""
         if row[5] is not None:
-            return self._legacy_login(row, secret)
+            return self._legacy_login(row, secret, new_password)
         return None, "bad_password"
 
-    def _legacy_login(self, row, secret: bytes):
+    def _legacy_login(self, row, secret: bytes, new_password: str = None):
         """First login after the v4 upgrade: check the old hash, give the employee a key slot,
-        erase the hash. The legacy slot is removed once no employee needs it."""
+        erase the hash. The legacy slot is removed once no employee needs it.
+        A short old password must be replaced here (new_password): the key slot is what an
+        attacker with a copy of the database guesses against."""
         candidate = hashlib.scrypt(secret, salt=row[4], **LEGACY_PASSWORD_SCRYPT)
         if not hmac.compare_digest(candidate, row[5]):
             return None, "bad_password"
         dek = self._require_key()   # opened with the old key file
+        if new_password:
+            secret = self._check_password(new_password)
+        elif len(secret.decode("utf-8")) < MIN_PASSWORD_LENGTH:
+            return None, "weak_password"
         slot = self._wrap(secret, dek)
         with self._transaction() as conn:
             conn.execute(
@@ -570,28 +581,48 @@ class DatabaseManager:
                 conn.execute("DELETE FROM key_slots WHERE kind = 'legacy'")
         return self._employee_dict(row), ""
 
-    def update_employee(self, old_username: str, new_full_name: str, new_username: str,
-                        new_password: str = None) -> dict:
+    def update_employee(self, actor_id: int, old_username: str, new_full_name: str, new_username: str,
+                        new_password: str = None, current_password: str = None) -> dict:
         """
-        Change name / username / password in one transaction. A new password re-wraps the
-        employee's key slot (needs the store unlocked, i.e. a logged-in session).
+        An employee changes their OWN name / username / password, in one transaction.
+        `actor_id` is the logged-in employee and must be the one changed: nobody, the admin
+        included, edits another account here (the admin uses reset_password for a forgotten
+        one). A new password needs `current_password`, checked by unwrapping the employee's
+        key slot, and re-wraps that slot. The store must be unlocked (a logged-in session).
         Clients and log rows point at employees.id, so a rename keeps all of them.
-        Raises LookupError (unknown employee) or ValueError (empty / taken username, short password).
+        Raises LookupError (unknown employee), PermissionError (another account, or a wrong
+        current password) or ValueError (empty / taken username, short password).
         """
         new_username = (new_username or "").strip()
         if not new_username:
             raise ValueError("User ID is required")
-        slot = None
-        if new_password:
-            slot = self._wrap(self._check_password(new_password), self._require_key())
-        with self._transaction() as conn:
+        dek = self._require_key()
+        with closing(self.get_connection()) as conn:
             row = conn.execute(
                 "SELECT id, is_admin FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((old_username or "").strip(),),
             ).fetchone()
             if row is None:
                 raise LookupError("Employee not found")
+            if row[0] != actor_id:
+                raise PermissionError("You can only change your own account")
+            current = conn.execute(
+                "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE employee_id = ?",
+                (row[0],)).fetchone()
+        slot = None
+        if new_password:
+            secret = self._check_password(new_password)
+            if not current_password or current is None:
+                raise PermissionError("Enter your current password to set a new one")
+            try:
+                self._unwrap(current_password.encode("utf-8"), *current)
+            except InvalidTag:
+                raise PermissionError("The current password is incorrect") from None
+            slot = self._wrap(secret, dek)
+        with self._transaction() as conn:
             emp_id = row[0]
+            if conn.execute("SELECT active FROM employees WHERE id = ?", (emp_id,)).fetchone() != (1,):
+                raise LookupError("Employee not found")
             clash = conn.execute(
                 "SELECT 1 FROM employees WHERE username = ? COLLATE NOCASE AND id != ?",
                 (new_username, emp_id),
@@ -624,6 +655,9 @@ class DatabaseManager:
                 ((username or "").strip(),)).fetchone()
             if row is None:
                 raise LookupError("Employee not found")
+            if row[0] == admin_id:
+                # Otherwise anyone at an unlocked admin session could take the account over.
+                raise ValueError("Change your own password in your profile, with your current password")
             self._replace_slot(conn, row[0], slot)
 
     def remove_employee(self, admin_id: int, username: str) -> None:
@@ -665,11 +699,13 @@ class DatabaseManager:
                               signed on, stored with the new pen set.
         image_refs are replaced when given or when a scan set is replaced.
 
-        Any employee enrols a new client or adds a set the client does not have yet.
-        Replacing or removing a set the client already holds is a re-enrolment: admin only
-        (PermissionError, and the refused attempt is logged). A row with no owner (made by
-        add_references) is treated as new: its templates are dropped first, so nobody
-        inherits sets they never enrolled.
+        Any employee enrols a new client or adds a set the client does not have yet (with
+        the image references of a scan set the client did not have). Replacing or removing
+        a set the client already holds, or changing its stored image references or display
+        name, is a re-enrolment: admin only (PermissionError, and the refused attempt is
+        logged; a non-admin's differently-cased name is simply not applied). Every change
+        is logged. A row with no owner (made by add_references) is treated as new: its
+        templates are dropped first, so nobody inherits sets they never enrolled.
         """
         self._check_user(user_id)
         if not model_version:
@@ -690,7 +726,8 @@ class DatabaseManager:
                 ct, nonce = self.encrypt_embedding(user_id, modality, origin, raw)
                 rows.append((user_id, modality, origin, ct, nonce, model_version, "enroll", now, dev))
         replace_refs = bool(image_refs) or (spatial_origin == "scan" and bool(spatial))
-        refs_json = json.dumps([str(p) for p in (image_refs or [])]).encode("utf-8")
+        new_refs = [str(p) for p in (image_refs or [])]
+        refs_json = json.dumps(new_refs).encode("utf-8")
         refs_ct, refs_nonce = self._encrypt_blob(self._refs_aad(user_id), refs_json)
 
         changes = []
@@ -698,7 +735,8 @@ class DatabaseManager:
             with self._transaction() as conn:
                 is_admin = self._is_admin(conn, employee_id)
                 existing = conn.execute(
-                    "SELECT enrolled_by FROM users WHERE user_id = ?", (user_id,)).fetchone()
+                    "SELECT enrolled_by, display_name, image_refs_enc, image_refs_nonce "
+                    "FROM users WHERE user_id = ?", (user_id,)).fetchone()
                 if existing is not None and existing[0] is None:   # ownerless: start clean
                     conn.execute("DELETE FROM enrollments WHERE user_id = ?", (user_id,))
                     conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
@@ -707,10 +745,23 @@ class DatabaseManager:
                     raise ValueError("Nothing to save: give paper or pen signatures")
                 replaced = []
                 if existing is not None:
+                    adds_scan_set = (spatial and spatial_origin == "scan"
+                                     and not self._set_exists(conn, user_id, "spatial", "scan"))
                     if spatial and self._set_exists(conn, user_id, "spatial", spatial_origin):
                         replaced.append(f"{spatial_origin} set")
                     if not keep_temporal and self._set_exists(conn, user_id, "temporal", None):
                         replaced.append("pen set")
+                    old_refs = []
+                    if existing[2] is not None:
+                        old_refs = json.loads(self._decrypt_blob(
+                            self._refs_aad(user_id), existing[2], existing[3]).decode("utf-8"))
+                    if replace_refs and new_refs != old_refs and not (adds_scan_set and not old_refs):
+                        replaced.append("image references")
+                    if display_name != existing[1]:
+                        if is_admin:
+                            replaced.append("display name")
+                        else:
+                            display_name = existing[1]   # only the admin renames a client
                 if replaced and not is_admin:
                     changes = replaced
                     raise PermissionError("Only the admin can replace a client's existing references")
@@ -745,6 +796,7 @@ class DatabaseManager:
                     saved.append("pen set")
                 elif "pen set" in replaced:
                     saved.append("pen set removed")
+                saved += [c for c in replaced if c in ("image references", "display name")]
                 if saved:
                     self._log_event(conn, EVENT_REENROL if replaced else EVENT_ENROL,
                                     user_id, display_name, employee_id, saved)
@@ -1012,15 +1064,21 @@ class DatabaseManager:
     def is_replayed_probe(self, user_id: str, probe_hashes, window_days: float = REPLAY_WINDOW_DAYS,
                           now: datetime = None) -> bool:
         """
-        True if one of `probe_hashes` was already ACCEPTED (Genuine) for this client within
-        `window_days`, or if the visit repeats one signing. Two real signings never give
-        identical embeddings; a replayed file does.
+        True if one of `probe_hashes` is a replayed file rather than a new signing:
+          * it equals one of the client's stored references (enrolled or added), at any age:
+            the enrolment scans stay on disk (image_references), and resubmitting one gives
+            exactly the stored embedding;
+          * it was already ACCEPTED (Genuine) for this client within `window_days`;
+          * the visit repeats one signing.
+        Two real signings never give identical embeddings; a replayed file does.
+        Needs the store unlocked (the references are decrypted to be hashed).
         """
         wanted = [h for h in (probe_hashes or []) if h]
         if not wanted:
             return False
         if len(set(wanted)) < len(wanted):
             return True
+        self._require_key()
         cutoff = ((now or datetime.now()) - timedelta(days=window_days)).isoformat(timespec="seconds")
         with closing(self.get_connection()) as conn:
             rows = conn.execute(
@@ -1028,7 +1086,13 @@ class DatabaseManager:
                    WHERE event = 'verify' AND user_id = ? AND decision = 'Genuine'
                    AND probe_hashes IS NOT NULL AND timestamp >= ?""",
                 (user_id, cutoff)).fetchall()
+            refs = conn.execute(
+                "SELECT modality, spatial_origin, encrypted_embedding, nonce FROM enrollments WHERE user_id = ?",
+                (user_id,)).fetchall()
         wanted = set(wanted)
+        if any(probe_fingerprint(self.decrypt_embedding(user_id, m, o, ct, n)) in wanted
+               for m, o, ct, n in refs):
+            return True
         return any(wanted & set(json.loads(r[0])) for r in rows)
 
     def get_log_events(self, employee_id: int = None, user_id: str = None,
@@ -1104,10 +1168,13 @@ class DatabaseManager:
             except RuntimeError as e:
                 raise ValueError(str(e)) from None
             try:
-                employee, _reason = candidate.authenticate_employee(username, password)
+                employee, reason = candidate.authenticate_employee(username, password)
             except DatabaseLockedError:
                 raise ValueError("This backup predates per-employee passwords; open it with its "
                                  "old key file in the version that made it, then back up again") from None
+            if reason == "weak_password":
+                raise PermissionError("This admin's password in the backup is too short; log in to "
+                                      "the backup's app once to choose a new one, then back up again")
             if employee is None:
                 raise PermissionError("The user ID or password does not open this backup")
             if not employee["is_admin"]:

@@ -366,6 +366,9 @@ def test_restore_checks_everything_before_replacing_anything(db, staff, path, tm
 
 # ------------------------------------------------------ migration (v3 / v4)
 LEGACY_KEY = "legacy-key-file-contents"
+OLD_A = "old-a"                  # a v4 password too short for a key slot (v4 had no minimum)
+OLD_B = "old-bob-password"       # a v4 password long enough to become the key slot
+NEW_A = "alice-new-password"     # what Alice chooses on her first login after the upgrade
 
 
 def _make_v4(path, legacy_passphrase=LEGACY_KEY, with_meta=True):
@@ -409,7 +412,7 @@ def _make_v4(path, legacy_passphrase=LEGACY_KEY, with_meta=True):
         conn.execute("INSERT INTO meta VALUES (1, ?, ?, ?)", (salt, wrapped, nonce))
     else:
         conn.execute("DROP TABLE meta")
-    for name, pw in (("alice", "old-a"), ("bob", "old-b")):   # v4 had no minimum length
+    for name, pw in (("alice", OLD_A), ("bob", OLD_B)):
         s = os.urandom(16)
         h = hashlib.scrypt(pw.encode(), salt=s, n=2 ** 14, r=8, p=1, dklen=32)
         conn.execute("INSERT INTO employees (username, full_name, salt, password_hash) VALUES (?, ?, ?, ?)",
@@ -443,17 +446,23 @@ def test_an_old_database_is_migrated_and_each_login_moves_to_a_key_slot(path, fr
     assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert db.find_employee("alice")["is_admin"] and not db.find_employee("bob")["is_admin"]
     with pytest.raises(DatabaseLockedError):        # an old login needs the old key once
-        db.authenticate_employee("alice", "old-a")
+        db.authenticate_employee("alice", OLD_A)
 
     db.unlock_with_passphrase(LEGACY_KEY)           # what storage does with db.key
     assert db.authenticate_employee("alice", "wrong") == (None, "bad_password")
-    assert db.authenticate_employee("alice", "old-a")[0] is not None
+    assert db.authenticate_employee("alice", OLD_A) == (None, "weak_password")   # never a 5-char slot
+    with pytest.raises(ValueError, match="at least"):
+        db.authenticate_employee("alice", OLD_A, new_password="short")
+    assert db.authenticate_employee("alice", "wrong", new_password=NEW_A) == (None, "bad_password")
+    assert db.authenticate_employee("alice", OLD_A, new_password=NEW_A)[0] is not None
     assert db.has_legacy_slot()                     # Bob has not logged in yet
-    assert db.authenticate_employee("bob", "old-b")[0] is not None
+    assert db.authenticate_employee("bob", OLD_B)[0] is not None
     assert not db.has_legacy_slot()                 # nobody needs the key file any more
 
     later = DatabaseManager(path)                   # no key file, no passphrase
-    assert later.authenticate_employee("bob", "old-b")[0] is not None
+    assert later.authenticate_employee("bob", OLD_B)[0] is not None
+    assert later.authenticate_employee("alice", OLD_A) == (None, "bad_password")    # replaced
+    assert later.authenticate_employee("alice", NEW_A)[0] is not None
     rec = later.get_client_record("c1")
     assert np.array_equal(rec["spatial"][0], template) and rec["enrolled_by"] == "alice"
     assert later.get_log_events()[0]["employee"] == "bob"

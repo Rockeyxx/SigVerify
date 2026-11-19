@@ -13,10 +13,12 @@ lives in one SQLite database managed by src.database.db_manager.DatabaseManager:
 
 Clients belong to the company. Any logged-in employee finds, enrols and verifies any
 client. On a lookup, `employee_username` only narrows the list to the clients that
-employee enrolled ("my clients"); pass None for the whole list. On a write it names who
-did it, for the audit log. Only the admin (the first account) adds employees, resets a
-password, removes an employee, deletes a client, or replaces a client's existing
-references; a refused attempt is logged too.
+employee enrolled ("my clients"); pass None for the whole list. A write is always done,
+and logged, as the LOGGED-IN employee: the username a write is given must be theirs, or
+it is refused. Only the admin (the first account) adds employees, resets a password,
+removes an employee, deletes a client, or replaces a client's existing references, image
+references or name; a refused attempt is logged too. Each employee edits only their own
+profile, and a new password needs the current one.
 
 Where the data lives (never relative to the working directory):
   ~/.sigverify/signatures.db   (override the folder with SIGVER_HOME)
@@ -171,6 +173,28 @@ def _employee_id(username):
     return None if emp is None else emp["id"]
 
 
+class NotLoggedInAsError(PermissionError):
+    """A write named an employee other than the one logged in."""
+
+
+def _actor(employee_username: str = None) -> int:
+    """
+    The id of the employee doing a write: always the LOGGED-IN employee. The username a
+    page passes is only a cross-check; a name that is not the session's is refused
+    (NotLoggedInAsError), so nobody acts, or is logged, as somebody else (the admin above
+    all). Raises StorageLockedError when nobody is logged in.
+    """
+    if _session is None:
+        raise StorageLockedError("Log in first.")
+    if employee_username is not None and _norm(employee_username) != _norm(_session["username"]):
+        raise NotLoggedInAsError(
+            f"You are logged in as {_session['username']}, not {employee_username.strip()}.")
+    emp = _get_db().find_employee(_session["username"])
+    if emp is None or emp["id"] != _session["id"]:          # removed meanwhile
+        raise StorageLockedError("This account no longer exists. Log in again.")
+    return emp["id"]
+
+
 def _public_employee(emp: dict) -> dict:
     """What the GUI sees of an employee: never a key or a password."""
     return {"full_name": emp["full_name"], "username": emp["username"], "is_admin": emp["is_admin"]}
@@ -219,13 +243,24 @@ def register_employee(full_name: str, username: str, password: str) -> tuple:
     return True, "Account created successfully"
 
 
-def authenticate_employee(username: str, password: str) -> tuple:
-    """Logging in unlocks the signature data. Returns (success, employee or None, message)."""
+WEAK_PASSWORD_MESSAGE = (
+    f"Your password is shorter than {_settings.MIN_PASSWORD_LENGTH} characters. "
+    f"Choose a new password of at least {_settings.MIN_PASSWORD_LENGTH} characters to log in."
+)
+
+
+def authenticate_employee(username: str, password: str, new_password: str = None) -> tuple:
+    """Logging in unlocks the signature data. Returns (success, employee or None, message).
+
+    new_password: only for the first login after upgrading a pre-v5 database, when the old
+    password is too short to protect the data key (message WEAK_PASSWORD_MESSAGE). Log in
+    again with the old password AND new_password; from then on the new one is the password.
+    """
     global _session
     db = _get_db()
     try:
         try:
-            emp, reason = db.authenticate_employee(username, password)
+            emp, reason = db.authenticate_employee(username, password, new_password)
         except DatabaseLockedError:
             # A login still on the old password hash needs the pre-v5 key once; a logout
             # in between forgot it, so read it again while the file is there.
@@ -236,41 +271,50 @@ def authenticate_employee(username: str, password: str) -> tuple:
                 db.unlock_with_passphrase(_read_legacy_key(legacy))
             except InvalidTag:
                 raise StorageKeyError(f"{LEGACY_KEY_FILENAME} does not match the database.") from None
-            emp, reason = db.authenticate_employee(username, password)
+            emp, reason = db.authenticate_employee(username, password, new_password)
     except DatabaseLockedError:
         raise StorageKeyError(
             f"This database was made before per-employee passwords. Put its {LEGACY_KEY_FILENAME} "
             f"file back in {_data_dir()} once, then log in to upgrade it."
         ) from None
+    except ValueError as e:                     # a new_password that is too short
+        return False, None, str(e)
     if emp is None:
         if reason == "not_found":
             return False, None, "User ID not found"
+        if reason == "weak_password":
+            return False, None, WEAK_PASSWORD_MESSAGE
         return False, None, "Incorrect password"
     _session = emp
     _forget_legacy_key(db)
     return True, _public_employee(emp), ""
 
 
-def update_employee_profile(old_username: str, new_full_name: str,
-                            new_username: str, new_password: str = None) -> tuple:
+def update_employee_profile(old_username: str, new_full_name: str, new_username: str,
+                            new_password: str = None, current_password: str = None) -> tuple:
+    """The logged-in employee changes their OWN profile (old_username must be theirs).
+    A new password needs current_password. A forgotten password is reset by the admin
+    (reset_employee_password). Returns (success, message, employee or None)."""
     global _session
     try:
-        emp = _get_db().update_employee(old_username, new_full_name, new_username, new_password)
+        actor_id = _actor(old_username)
+        emp = _unlocked_db().update_employee(actor_id, old_username, new_full_name, new_username,
+                                             new_password, current_password)
+    except NotLoggedInAsError:
+        return False, "You can only change your own profile", None
     except LookupError:
         return False, "Employee not found", None
-    except DatabaseLockedError:
-        return False, "Log in first", None
-    except ValueError as e:
+    except (PermissionError, ValueError, StorageError) as e:
         return False, str(e), None
-    if _session and _session["id"] == emp["id"]:
-        _session = emp
+    _session = emp
     return True, "Profile updated successfully", _public_employee(emp)
 
 
 def _admin_action(admin_username: str, action) -> tuple:
-    admin_id = _employee_id(admin_username or "")
-    if admin_id is None:
-        return False, "Employee not found"
+    try:
+        admin_id = _actor(admin_username)
+    except (PermissionError, StorageError) as e:
+        return False, str(e)
     try:
         action(_unlocked_db(), admin_id)
     except PermissionError as e:
@@ -394,9 +438,12 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs, emplo
         return False, "Client ID is required"
     if "|" in key:
         return False, "Client ID must not contain '|'"
-    emp_id = _employee_id(employee_username or "")
-    if emp_id is None:
+    if _employee_id(employee_username or "") is None:
         return False, "Employee not found"
+    try:
+        emp_id = _actor(employee_username)
+    except (PermissionError, StorageError) as e:
+        return False, str(e)
 
     try:
         spatial = _decode_embeddings(spatial_embeddings, "Spatial embedding")
@@ -419,12 +466,11 @@ def save_client_enrollment(client_id: str, image_refs: list, dynamic_refs, emplo
 
 def delete_client(client_id: str, employee_username: str = None) -> bool:
     """Admin only: removes the client and all its templates; the verification log is kept and
-    the deletion is logged. Returns False if refused (not the admin) or there is no such client.
-    Without employee_username, the logged-in employee is the one deleting."""
-    if employee_username is None:
-        employee_username = _session["username"] if _session else ""
-    emp_id = _employee_id(employee_username or "")
-    if emp_id is None:
+    the deletion is logged. Returns False if refused (not the admin, or not the logged-in
+    employee) or there is no such client. The logged-in employee is the one deleting."""
+    try:
+        emp_id = _actor(employee_username)
+    except (PermissionError, StorageError):
         return False
     try:
         return _get_db().delete_client(_norm(client_id), emp_id)
@@ -450,24 +496,27 @@ def append_verification_log(client_id: str, decision: str, confidence: float,
                             probe_fingerprints: list = None):
     """One event per visit, final verdict only. routing / degraded / reasons / threshold are
     what verify() returned; model_version is the tag of the references used;
-    probe_fingerprints come from interfaces.verify_client(), for the replay check."""
+    probe_fingerprints are probe_fingerprint() of each probe embedding, for the replay check.
+    The event is logged as the logged-in employee; another name raises NotLoggedInAsError,
+    and no login raises StorageLockedError (nothing can be verified without one)."""
     if decision not in FINAL_DECISIONS:
         # "Sign again" is a request, not a verdict: one event per visit, final verdict only.
         return
-    emp_id = _employee_id(employee_username or "")
+    emp_id = _actor(employee_username)
     _get_db().log_verification(
         _norm(client_id), modality_state, confidence, decision,
         employee_id=emp_id, display_name=client_id.strip(),
-        employee_label=None if emp_id is not None else employee_username,
+        employee_label=None,
         routing=routing, degraded=degraded, reasons=reasons,
         model_version=model_version, threshold=threshold, probe_hashes=probe_fingerprints,
     )
 
 
 def is_replayed_probe(client_id: str, probe_fingerprints: list) -> bool:
-    """True if this visit's probe was already accepted for the client within
-    REPLAY_WINDOW_DAYS, or repeats one signing: a replayed file, not a new signing."""
-    return _get_db().is_replayed_probe(_norm(client_id), probe_fingerprints)
+    """True if this visit's probe is a replayed file, not a new signing: it equals one of
+    the client's stored references (e.g. an enrolment scan given again), was already
+    accepted for the client within REPLAY_WINDOW_DAYS, or repeats one signing."""
+    return _unlocked_db().is_replayed_probe(_norm(client_id), probe_fingerprints)
 
 
 def get_verification_log(employee_username: str = None) -> list:
@@ -568,20 +617,30 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
 
 
 def add_confirmed_reference(client_id: str, embedding_b64: str, employee_username: str,
-                            modality: str = "spatial") -> bool:
+                            modality: str = "spatial", spatial_origin: str = "scan") -> bool:
     """Append one confirmed signing's embedding to the client's references.
 
     modality "spatial" (paper, 512 values) or "temporal" (pen, 128 values).
+    spatial_origin: where the spatial signing came FROM: "scan" (a paper photo or scan,
+        every spatial probe the app makes today) or "render" (drawn from a pen signing).
+        It goes into that set only, never the client's other one (a render scored against
+        scans is worse than chance); False if the client has no such set.
     Call it only when decision == "Genuine", degraded is False, and the employee
     confirmed the person's identity (AGENTS.md). Stores the embedding only,
-    encrypted; a spatial one goes in the client's spatial_origin set. When the cap
-    (MAX_REFERENCES) is reached the OLDEST ADDED signing is dropped; the enrolled
-    references are never dropped. Any employee can add to any client.
+    encrypted. When the cap (MAX_REFERENCES) is reached the OLDEST ADDED signing is
+    dropped; the enrolled references are never dropped. Any logged-in employee can add
+    to any client.
     """
     if modality not in ("spatial", "temporal"):
         raise ValueError(f"modality must be 'spatial' or 'temporal', got {modality!r}")
+    if modality == "spatial" and spatial_origin not in ("scan", "render"):
+        raise ValueError(f"spatial_origin must be 'scan' or 'render', got {spatial_origin!r}")
     key = _norm(client_id or "")
     if not key or _employee_id(employee_username or "") is None:
+        return False
+    try:
+        _actor(employee_username)
+    except (PermissionError, StorageError):
         return False
     db = _unlocked_db()
     record = db.get_client_record(key)
@@ -593,10 +652,10 @@ def add_confirmed_reference(client_id: str, embedding_b64: str, employee_usernam
             return False   # no pen set to add to: enrol the client on the tablet first
         db.add_confirmed_reference(key, "temporal", raw, MODEL_VERSION, max_per_set=MAX_REFERENCES)
         return True
-    if record["spatial_origin"] is None or not record["spatial"]:
-        return False
+    if spatial_origin not in record["sets"]:
+        return False   # no set of that origin: never put it in the other one
     db.add_confirmed_reference(key, "spatial", raw, MODEL_VERSION,
-                               spatial_origin=record["spatial_origin"], max_per_set=MAX_REFERENCES)
+                               spatial_origin=spatial_origin, max_per_set=MAX_REFERENCES)
     return True
 
 
@@ -611,8 +670,9 @@ def backup_database(dest_folder: str, employee_username: str) -> tuple:
     if _employee_id(employee_username or "") is None:
         return False, "Employee not found"
     try:
+        _actor(employee_username)
         db = _unlocked_db()
-    except StorageLockedError as e:
+    except (PermissionError, StorageError) as e:
         return False, str(e)
     if not os.path.isdir(dest_folder):
         return False, f"No folder at {dest_folder}"

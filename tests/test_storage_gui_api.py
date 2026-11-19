@@ -12,7 +12,7 @@ import pytest
 from config.settings import MAX_REFERENCES
 from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager, probe_fingerprint
 from src.gui import storage
-from tests.test_database import LEGACY_KEY, _make_v4
+from tests.test_database import LEGACY_KEY, NEW_A, OLD_A, OLD_B, _make_v4
 
 CLIENT_KEYS = {"display_name", "enrolled_by", "image_references", "dynamic_references",
                "spatial_embeddings", "spatial_origin", "enrolled_at", "updated_at",
@@ -109,17 +109,72 @@ def test_password_is_not_in_the_database_file(people, isolated_storage):
 
 
 def test_update_profile_results(people):
-    ok, msg, emp = storage.update_employee_profile("alice", "Alice Z", "alice", "new-password-1")
+    ok, msg, emp = storage.update_employee_profile("alice", "Alice Z", "alice", "new-password-1",
+                                                   current_password=PW_A)
     assert (ok, msg) == (True, "Profile updated successfully")
     assert emp == {"full_name": "Alice Z", "username": "alice", "is_admin": True}
     assert storage.authenticate_employee("alice", "new-password-1")[0]
     assert not storage.authenticate_employee("alice", PW_A)[0]
+    login("alice", "new-password-1")
     assert storage.update_employee_profile("alice", "A", "bob") == (False, "This User ID is already taken", None)
-    assert storage.update_employee_profile("ghost", "G", "g") == (False, "Employee not found", None)
-    assert storage.update_employee_profile("alice", "A", "alice", "short")[0] is False
+    assert storage.update_employee_profile("ghost", "G", "g") == (False, "You can only change your own profile", None)
+    assert storage.update_employee_profile("alice", "A", "alice", "short",
+                                           current_password="new-password-1")[0] is False
     # no new password given: the old one keeps working
     storage.update_employee_profile("alice", "Alice Z", "alice2")
+    assert storage.find_employee("alice2")["full_name"] == "Alice Z"
     assert storage.authenticate_employee("alice2", "new-password-1")[0]
+
+
+def test_nobody_changes_another_employees_profile_or_password(people):
+    login("bob", PW_B)
+    for args in (("alice", "Alice", "alice", "bob-owns-alice-1"), ("alice", "Hacked", "mallory")):
+        assert storage.update_employee_profile(*args, current_password=PW_B) == (
+            False, "You can only change your own profile", None)
+    login("alice", PW_A)                                       # not even the admin
+    assert storage.update_employee_profile("bob", "B", "bob", "alice-owns-bob-1")[0] is False
+    storage.logout()                                           # nor anyone logged out
+    assert storage.update_employee_profile("alice", "Hacked", "mallory")[0] is False
+    assert storage.find_employee("mallory") is None
+    assert storage.authenticate_employee("alice", PW_A)[0] and storage.authenticate_employee("bob", PW_B)[0]
+
+
+def test_a_new_password_needs_the_current_one(people):
+    login("bob", PW_B)
+    ok, msg, _ = storage.update_employee_profile("bob", "Bob B", "bob", "bob-new-password")
+    assert not ok and "current password" in msg
+    ok, msg, _ = storage.update_employee_profile("bob", "Bob B", "bob", "bob-new-password",
+                                                 current_password="wrong-password-1")
+    assert not ok and "incorrect" in msg
+    assert storage.authenticate_employee("bob", PW_B)[0]
+
+
+def test_writes_run_as_the_logged_in_employee_never_a_name_passed_in(people, tmp_path):
+    """Bob, logged in, passes the admin's name to every write: each is refused."""
+    storage.save_client_enrollment("C", ["/a.png"], None, "alice", spatial(), "scan")
+    login("bob", PW_B)
+    assert storage.reset_employee_password("alice", "alice", "taken-over-pass")[0] is False
+    assert storage.reset_employee_password("alice", "bob", "bob-new-password")[0] is False
+    assert storage.remove_employee("alice", "bob")[0] is False
+    assert storage.register_employee("Mallory", "mallory", "mallory-pass-1")[0] is False
+    assert storage.save_client_enrollment("C", [], None, "alice", spatial(base=9), "scan")[0] is False
+    assert storage.delete_client("C", "alice") is False
+    assert storage.add_confirmed_reference("c", b64(512, 5), "alice") is False
+    assert storage.backup_database(str(tmp_path), "alice")[0] is False
+    with pytest.raises(storage.NotLoggedInAsError):
+        storage.append_verification_log("C", "Genuine", 90.0, "scan", "alice")
+    assert storage.get_client("c")["spatial_embeddings"] == spatial()
+    assert storage.authenticate_employee("alice", PW_A)[0]
+    assert [(e["event"], e["employee"]) for e in storage.get_audit_log()] == [("enrol", "alice")]
+
+
+def test_writes_need_a_login(people):
+    storage.save_client_enrollment("C", [], None, "alice", spatial(1), "scan")
+    storage.logout()
+    with pytest.raises(storage.StorageLockedError):
+        storage.append_verification_log("C", "Genuine", 90.0, "scan", "alice")
+    assert storage.delete_client("C", "alice") is False
+    assert storage.reset_employee_password("alice", "bob", "bob-new-password")[0] is False
 
 
 def test_admin_resets_a_forgotten_password_and_removes_an_employee(people):
@@ -168,6 +223,7 @@ def test_save_and_get_client_shape_and_round_trip(people):
 
 def test_the_client_list_is_the_companys_and_can_be_narrowed(people):
     storage.save_client_enrollment("Alpha", [], [], "alice", spatial(1), "scan")
+    login("bob", PW_B)
     storage.save_client_enrollment("Beta", [], [], "bob", spatial(1, 5), "scan")
     assert sorted(c["key"] for c in storage.list_clients()) == ["alpha", "beta"]
     assert [c["key"] for c in storage.list_clients("alice")] == ["alpha"]
@@ -180,6 +236,7 @@ def test_the_client_list_is_the_companys_and_can_be_narrowed(people):
 def test_a_non_admin_cannot_replace_a_clients_references(people):
     mine = spatial()
     storage.save_client_enrollment("Shared", ["/a.png"], [], "alice", mine, "scan")
+    login("bob", PW_B)
     ok, msg = storage.save_client_enrollment("SHARED", [], [], "bob", spatial(base=77), "scan")
     assert ok is False and "Only the admin" in msg
     assert storage.get_client("shared")["spatial_embeddings"] == mine
@@ -245,11 +302,13 @@ def test_spatial_origin_saved_is_the_one_returned(people):
 
 
 def test_only_the_admin_deletes_and_the_log_is_kept(people):
+    login("bob", PW_B)
     storage.save_client_enrollment("Gone", [], [], "bob", spatial(), "scan")
     storage.append_verification_log("Gone", "Genuine", 90.0, "scan", "bob")
     assert storage.delete_client("Gone", "bob") is False
     assert storage.delete_client("Gone", "ghost") is False
     assert storage.client_exists("gone")
+    login("alice", PW_A)
     assert storage.delete_client("Gone", "alice") is True
     assert storage.get_client("gone") is None and not storage.client_exists("gone")
     assert storage.get_last_verification_for_client("gone", "bob") is not None
@@ -259,6 +318,7 @@ def test_only_the_admin_deletes_and_the_log_is_kept(people):
 
 def test_count_clients_enrolled_this_month(people):
     storage.save_client_enrollment("A1", [], [], "alice", spatial(1), "scan")
+    login("bob", PW_B)
     storage.save_client_enrollment("B1", [], [], "bob", spatial(1, 3), "scan")
     assert storage.count_clients_enrolled_this_month("alice") == 1
     assert storage.count_clients_enrolled_this_month() == 2
@@ -272,6 +332,7 @@ def test_count_clients_enrolled_this_month(people):
 def test_log_events_and_stats(people):
     storage.append_verification_log("Client X", "Genuine", 87.3, "multimodal", "alice")
     storage.append_verification_log("client x", "Forged", 61.0, "scan", "alice")
+    login("bob", PW_B)
     storage.append_verification_log("Client Y", "Genuine", 90.5, "scan", "bob")
     events = storage.get_verification_log("alice")
     assert [e["decision"] for e in events] == ["Genuine", "Forged"]
@@ -408,13 +469,16 @@ def test_an_old_database_is_upgraded_and_its_key_file_deleted(isolated_storage):
     isolated_storage.mkdir(parents=True)
     _make_v4(str(isolated_storage / "signatures.db"))
     (isolated_storage / "db.key").write_text(LEGACY_KEY)
-    assert storage.authenticate_employee("alice", "old-a")[0]
+    assert storage.authenticate_employee("alice", OLD_A) == (False, None, storage.WEAK_PASSWORD_MESSAGE)
+    assert storage.authenticate_employee("alice", OLD_A, new_password="short")[0] is False
+    assert storage.authenticate_employee("alice", OLD_A, new_password=NEW_A)[0]
     assert (isolated_storage / "db.key").exists()                  # Bob still needs it once
     storage.logout()
-    assert storage.authenticate_employee("bob", "old-b")[0]
+    assert storage.authenticate_employee("bob", OLD_B)[0]
     assert not (isolated_storage / "db.key").exists()              # nobody does now
     storage._reset()
-    assert storage.authenticate_employee("alice", "old-a")[0]
+    assert not storage.authenticate_employee("alice", OLD_A)[0]    # the short one is gone
+    assert storage.authenticate_employee("alice", NEW_A)[0]
     assert len(storage.get_client("c1")["spatial_embeddings"]) == 1
 
 
@@ -422,11 +486,11 @@ def test_an_old_database_without_its_key_file_says_so(isolated_storage):
     isolated_storage.mkdir(parents=True)
     _make_v4(str(isolated_storage / "signatures.db"))
     with pytest.raises(storage.StorageKeyError, match="db.key"):
-        storage.authenticate_employee("alice", "old-a")
+        storage.authenticate_employee("bob", OLD_B)
     (isolated_storage / "db.key").write_text("wrong")
     storage._reset()
     with pytest.raises(storage.StorageKeyError, match="does not match"):
-        storage.authenticate_employee("alice", "old-a")
+        storage.authenticate_employee("bob", OLD_B)
 
 
 # ------------------------------------------------- several sets (issue #33, item 3)
@@ -534,6 +598,24 @@ def test_a_replayed_probe_is_refused_and_two_real_signings_are_not(people):
     assert storage.get_verification_stats()["genuine"] == 2
 
 
+def test_an_enrolment_scan_given_again_as_the_probe_is_a_replay(people):
+    refs = spatial(5)
+    storage.save_client_enrollment("C", ["/scan1.png"], pen(), "alice", refs, "scan")
+    for emb in (refs[0], pen()[2]):
+        assert storage.is_replayed_probe("c", [probe_fingerprint(base64.b64decode(emb))])
+    assert not storage.is_replayed_probe("c", [probe_fingerprint(base64.b64decode(b64(512, 4242)))])
+
+
+def test_a_non_admin_cannot_swap_a_clients_images_or_name(people):
+    storage.save_client_enrollment("Client", ["/real.png"], None, "alice", spatial(1), "scan")
+    login("bob", PW_B)
+    ok, msg = storage.save_client_enrollment("CLIENT", ["/evil.png"], None, "bob", None)
+    assert not ok and "Only the admin" in msg
+    rec = storage.get_client("client")
+    assert rec["image_references"] == ["/real.png"] and rec["display_name"] == "Client"
+    assert storage.get_audit_log()[-1]["event"] == "re-enrol refused"
+
+
 # --------------------------------------------------- confirmed signings (restored)
 def test_reference_embeddings_are_enrolled_then_added(people):
     enrolled = spatial(5)
@@ -553,6 +635,7 @@ def test_reference_embeddings_of_unknown_or_other_employees_client(people):
 
 def test_any_employee_adds_a_confirmed_signing_but_not_to_an_unknown_client(people):
     storage.save_client_enrollment("c", [], [], "alice", spatial_embeddings=spatial(5))
+    login("bob", PW_B)
     assert storage.add_confirmed_reference("c", b64(512, 7), "bob") is True
     assert storage.add_confirmed_reference("c", b64(512, 8), "ghost") is False
     assert storage.add_confirmed_reference("nobody", b64(512, 7), "alice") is False
@@ -571,12 +654,26 @@ def test_confirmed_references_cap_drops_oldest_added_never_enrolled(people):
     assert not hasattr(storage, "MAX_SPATIAL_REFERENCES") and not hasattr(storage, "MAX_TEMPORAL_REFERENCES")
 
 
-def test_confirmed_reference_keeps_the_client_origin(people):
+def test_confirmed_reference_goes_into_the_set_of_its_own_origin(people):
     storage.save_client_enrollment("c", [], [b64(128, 1)], "alice",
                                    spatial_embeddings=spatial(5), spatial_origin="render")
     added = b64(512, 50)
-    assert storage.add_confirmed_reference("c", added, "alice")
+    assert storage.add_confirmed_reference("c", added, "alice") is False      # a scan: no scan set
+    assert storage.add_confirmed_reference("c", added, "alice", spatial_origin="render")
     assert storage.get_reference_embeddings("c", "alice") == (spatial(5) + [added], "render")
+    with pytest.raises(ValueError):
+        storage.add_confirmed_reference("c", added, "alice", spatial_origin="sideways")
+
+
+def test_a_rendered_signing_never_lands_in_the_scan_set(people):
+    scan, render = spatial(5, 0), spatial(5, 100)
+    storage.save_client_enrollment("C", [], None, "alice", scan, "scan")
+    storage.save_client_enrollment("C", [], None, "alice", render, "render")
+    drawn = b64(512, 999)
+    assert storage.add_confirmed_reference("c", drawn, "alice", spatial_origin="render")
+    sets = storage.get_client("c")["spatial_sets"]
+    assert sets["scan"]["embeddings"] == scan
+    assert sets["render"]["embeddings"] == render + [drawn]
 
 
 def test_confirmed_reference_insert_and_trim_are_one_transaction(people):
@@ -597,6 +694,7 @@ def test_an_ownerless_row_is_started_clean_by_the_first_save(people):
     db = storage._get_db()
     db.add_reference("orphan", "spatial", np.zeros(512, dtype=np.float32), "old", spatial_origin="render")
     assert not storage.client_exists("orphan")                  # invisible while ownerless
+    login("bob", PW_B)
     assert storage.save_client_enrollment("orphan", [], [], "bob", spatial(1), "scan")[0]
     rec = storage.get_client("orphan")
     assert rec["enrolled_by"] == "bob" and set(rec["spatial_sets"]) == {"scan"}
@@ -607,9 +705,11 @@ def test_backup_and_restore(people, tmp_path):
     storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
     folder = tmp_path / "usb"
     folder.mkdir()
+    login("bob", PW_B)                                             # any employee backs up
     ok, path = storage.backup_database(str(folder), "bob")
     assert ok and os.path.dirname(path) == str(folder) and os.path.basename(path).endswith(".db")
     assert storage.backup_database(str(tmp_path / "missing"), "bob")[0] is False
+    login("alice", PW_A)
     assert storage.delete_client("C", "alice")
 
     login("bob", PW_B)
@@ -639,3 +739,33 @@ def test_backup_needs_a_login(people, tmp_path):
     storage.logout()
     ok, msg = storage.backup_database(str(tmp_path), "alice")
     assert not ok and "Log in" in msg
+
+
+def test_a_damaged_backup_is_refused_before_anything_is_replaced(people, tmp_path):
+    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    backup = storage._get_db().backup_to(str(tmp_path / "b.db"))
+    with sqlite3.connect(backup) as conn:   # an index that no longer matches its table
+        conn.execute("CREATE INDEX damaged ON audit_log(event)")
+        conn.execute("PRAGMA writable_schema = ON")
+        conn.execute("UPDATE sqlite_master SET sql = 'CREATE INDEX damaged ON audit_log(decision)' "
+                     "WHERE name = 'damaged'")
+    with sqlite3.connect(backup) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok"   # opens, but is damaged
+    storage.save_client_enrollment("D", [], [], "alice", spatial(5, 9), "scan")
+    ok, _ = storage.restore_database(backup, "alice", PW_A)
+    assert not ok and storage.client_exists("d")             # live database untouched
+
+
+def test_an_older_added_row_makes_a_current_set_stale(people, monkeypatch):
+    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")   # enrolled at MODEL_VERSION
+    monkeypatch.setattr(storage, "MODEL_VERSION", "v-older")
+    assert storage.add_confirmed_reference("c", b64(512, 99), "alice")
+    monkeypatch.undo()
+    found = storage.get_client("c")["spatial_sets"]["scan"]
+    assert found["model_version"] == storage.MODEL_VERSION and found["stale"] is True
+
+
+def test_a_confirmed_pen_signing_needs_a_pen_set(people):
+    storage.save_client_enrollment("C", [], [], "alice", spatial(5), "scan")
+    assert storage.add_confirmed_reference("c", b64(128, 5), "alice", modality="temporal") is False
+    assert storage.get_client("c")["temporal_set"] is None

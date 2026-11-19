@@ -593,7 +593,7 @@ To preserve strict separation of concerns and engineering modularity:
   reference templates for comparison. The model branch never holds encryption keys and never performs
   cryptographic operations.
 - **Backend / Database Layer:** Manages application-layer AES-256-GCM encryption and decryption (ISO/IEC 18033-1),
-  key management (OS keyring / environment), and SQLite persistence (ISO/IEC 9075-1). It receives plain
+  key management (one wrapped data key per employee, unlocked by the login password), and SQLite persistence (ISO/IEC 9075-1). It receives plain
   embeddings from `SignatureService.enroll_*()`, encrypts them for storage, and decrypts them before passing
   to `SignatureService.verify()`.
 
@@ -626,32 +626,41 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 
 - Encrypt embedding payloads with **AES-256-GCM** at the application layer
   via the `cryptography` package
-- Encryption key held **outside** the template store (key file / OS keyring /
-  operator-credential derivation) — never in the database
 - **Never persist raw images or raw coordinate streams** — only derived
   embeddings (ISO/IEC 24745)
 - Audit log: record every verification event — `User ID, Timestamp,
-Modality State, Similarity Score, Decision` — plaintext and queryable
+  Modality State, Similarity Score, Decision`, plus `routing`, `degraded`, `reasons`,
+  `model_version` and `threshold` — plaintext and queryable. Enrolments, re-enrolments,
+  deletions and every refused attempt are logged too, each with its employee.
 - **The login password unlocks the data (one key slot per employee).** The random data
   key is stored only wrapped, once per employee, by a key derived with scrypt
   (`DatabaseManager.KDF_N = 2**17`) from that employee's password. Unwrapping is the
   login check, so no password hash is stored. No password, no unwrapped key and no key
-  file is ever written to disk, the database, a log or a backup. A forgotten password
-  is reset by the admin, who wraps a new copy. If every password is lost, the
-  templates cannot be recovered. Passwords need `MIN_PASSWORD_LENGTH`
-  (`config/settings.py`) characters. `SIGVER_DB_PASSPHRASE` is for tests and CI only.
+  file is ever written to disk, the database, a log or a backup. An employee changes
+  only their own profile, and a new password needs the current one. A forgotten password
+  is reset by the admin, who wraps a new copy (never their own: the admin uses their
+  profile). If every password is lost, the templates cannot be recovered. Passwords need
+  `MIN_PASSWORD_LENGTH` (`config/settings.py`) characters, and a shorter password from
+  before key slots must be replaced at its first login. `SIGVER_DB_PASSPHRASE` is for
+  tests and CI only.
+- **A write is done by whoever is logged in.** `src/gui/storage.py` takes the acting
+  employee from the session, never from a name a page passes; a different name is
+  refused, so nobody acts, or is logged, as the admin.
 - **Clients belong to the company, not to one employee.** Any employee enrols a new
   client, adds a set the client lacks, and verifies any client. Only the admin (the
   first account on a new database) adds employees, resets a password, removes an
-  employee, deletes a client, or replaces or removes a set a client already holds.
+  employee, deletes a client, replaces or removes a set a client already holds, or
+  changes a client's stored image references or name.
   `enrolled_by` is recorded and never used to block. Every enrolment, re-enrolment and
   deletion, and every refused attempt, goes to the audit log with the employee.
 - **Data after capture.** The database stores embeddings and the encrypted list of the
   file paths the employee picked, never an image or a trajectory. Templates have no
   expiry date: a client's templates are removed only when the admin deletes the client.
 - **Replay check.** Each verification row stores the SHA-256 of each probe embedding
-  (never the embedding). A probe whose hash was already accepted for the same client
-  within `REPLAY_WINDOW_DAYS`, or a visit that gives one signing twice, is a replay.
+  (never the embedding). A probe equal to one of the client's stored references (an
+  enrolment scan given again), a probe whose hash was already accepted for the same
+  client within `REPLAY_WINDOW_DAYS`, or a visit that gives one signing twice, is a replay.
+  A confirmed signing is added only to the set of its own origin (`scan` or `render`).
 - **Stale sets and the tablet.** A reference set holding any row whose `model_version`
   differs from `MODEL_VERSION` is stale and must be re-enrolled, not scored against. The
   pen set stores the tablet model and operating system it was signed on, and a signing
