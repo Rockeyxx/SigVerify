@@ -196,14 +196,15 @@ def _writers(codes, forgeries=()):
     return out
 
 
-def test_every_forger_is_a_test_writer():
-    """A forger's own hand in training would teach the model their forgeries."""
+def test_a_forger_code_does_not_move_the_participant_with_that_code():
+    """Forger P01 is a different person from participant P01 (the forgers signed no genuines
+    here), so forging must not decide anyone's side."""
     codes = [f"P{i:02d}" for i in range(1, 24)]
-    forgers = ["P01", "P02", "P03", "P04"]
-    split = inhouse_split(_writers(codes, [("P10", f) for f in forgers]))
-    assert {f"inhouse_{f}" for f in forgers} <= set(split["test"])
-    assert set(split["train"]).isdisjoint(split["test"])
-    assert sorted(split["train"] + split["test"]) == sorted(f"inhouse_{c}" for c in codes)
+    plain = inhouse_split(_writers(codes))
+    forged = inhouse_split(_writers(codes, [("P10", f) for f in ("P01", "P02", "P03", "P04")]))
+    assert forged == plain
+    assert set(plain["train"]).isdisjoint(plain["test"])
+    assert sorted(plain["train"] + plain["test"]) == sorted(f"inhouse_{c}" for c in codes)
 
 
 def test_a_writer_keeps_their_side_when_others_join():
@@ -224,5 +225,6 @@ def test_the_split_record_lists_both_sides_and_its_rule(tmp_path):
     record = write_inhouse_split(writers, str(tmp_path / "inhouse_split.json"))
     saved = json.loads((tmp_path / "inhouse_split.json").read_text())
     assert saved == record
-    assert "inhouse_P07" in saved["test"] and saved["forgers"] == ["inhouse_P07"]
+    assert sorted(saved["train"] + saved["test"]) == ["inhouse_P05", "inhouse_P06", "inhouse_P07"]
+    assert "forgers" not in saved
     assert {"seed", "test_fraction", "rule"} <= set(saved)

@@ -1,8 +1,9 @@
 {
  "seed": 42,
  "test_fraction": 0.5,
- "rule": "every forger is test; others by sha256(seed:writer) < test_fraction",
+ "rule": "test when sha256(seed:writer) < test_fraction",
  "train": [
+  "inhouse_P02",
   "inhouse_P03",
   "inhouse_P08",
   "inhouse_P09",
@@ -18,15 +19,10 @@
  ],
  "test": [
   "inhouse_P01",
-  "inhouse_P02",
   "inhouse_P04",
   "inhouse_P05",
   "inhouse_P07",
   "inhouse_P11",
   "inhouse_P12"
- ],
- "forgers": [
-  "inhouse_P01",
-  "inhouse_P02"
  ]
 }

@@ -4,22 +4,30 @@ Campaign spec (docs/superpowers/specs/2026-11-02-xppen-capture-campaign-design.m
 M2 shipped weights, M3 calibration by rule D6, M7 warm-up, and the forgers' second attempt
 after "Sign again" for the step-up decision. Product order: each writer's first 5 genuine
 signings (tablet and paper of the same index) are the references, the later genuines and the
-team forgeries are probes. Forgers are team members and never scored as writers (spec 6).
+team forgeries are probes. A forger code (byP01) names a forger, not participant P01.
 Prints aggregates only: no file name and no signature leaves this script.
 
-    python tools/research/campaign_eval.py
+    python tools/research/campaign_eval.py            # paper as scanned
+    python tools/research/campaign_eval.py --faint    # paper made to look like a phone photo
 """
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import tempfile
+
+import cv2
 import numpy as np
 
-from config.settings import (ALPHA_DEFAULT, DECISION_THRESHOLD, NUM_ENROLLMENT_REFERENCES,
-                             SPATIAL_DECISION_THRESHOLD, SPATIAL_WEIGHTS_PATH, STEP_UP_ACCEPT,
-                             STEP_UP_REJECT, STEP_UP_TWO, TARGET_FAR, TARGET_FRR,
-                             TEMPORAL_DECISION_THRESHOLD, TEMPORAL_WEIGHTS_PATH)
+from config.settings import (ALPHA_DEFAULT, DECISION_THRESHOLD, INHOUSE_SPLIT_PATH,
+                             NUM_ENROLLMENT_REFERENCES, SPATIAL_DECISION_THRESHOLD,
+                             SPATIAL_WEIGHTS_PATH, STEP_UP_ACCEPT, STEP_UP_REJECT, STEP_UP_TWO,
+                             TARGET_FAR, TARGET_FRR, TEMPORAL_DECISION_THRESHOLD,
+                             TEMPORAL_WEIGHTS_PATH)
 from scripts.calibrate_fusion import DRAWS, draw_scores, evaluate, fused
 from scripts.evaluate import compute_eer, embed_samples
-from src.data.campaign import inhouse_split, load_inhouse_tablet_file, parse_inhouse
+from src.data.campaign import load_inhouse_tablet_file, parse_inhouse
 from src.data.dataset import quality_gate, trajectory_gate
 from src.gui.image_cleanup import SignatureNotFoundError, crop_to_ink
 from src.verification import load_model, nearest_reference_distances, similarity_from_distance
@@ -28,7 +36,22 @@ MIN_GENUINE = 10            # spec 6: fewer usable genuines per modality leaves 
 BOOTSTRAP, HALF_SPLITS = 1000, 200
 
 
-def embed_campaign(writers, spatial, temporal):
+def faint(image):
+    """A scan made to look like a phone photo (ENG_REPORT A10): grey paper (x 183/255), ink
+    contrast x 0.7, Gaussian blur sigma 1."""
+    paper = 183.0
+    x = image.astype(np.float32) * (paper / 255.0)
+    x = paper - (paper - x) * 0.7
+    return np.clip(cv2.GaussianBlur(x, (0, 0), 1.0), 0, 255).astype(np.uint8)
+
+
+def _faint_copy(path):
+    out = os.path.join(tempfile.gettempdir(), f"faint_{os.getpid()}_{os.path.basename(path)}")
+    cv2.imwrite(out, faint(cv2.imread(path)))
+    return out
+
+
+def embed_campaign(writers, spatial, temporal, faint_paper=False):
     """{writer: {"genuine": (scan, pen), "forged": (scan, pen), "attempt", "os", "lost"}}.
 
     Only signings with both sides count. The scan goes through the app's own crop
@@ -46,7 +69,7 @@ def embed_campaign(writers, spatial, temporal):
                 if not (e["tablet"] and e["paper"]):
                     continue
                 try:
-                    scan = crop_to_ink(e["paper"])
+                    scan = crop_to_ink(_faint_copy(e["paper"]) if faint_paper else e["paper"])
                 except SignatureNotFoundError:
                     lost += 1
                     continue
@@ -159,25 +182,53 @@ def report_branch(name, rows, alpha, tau, rng):
     return res
 
 
-def main():
+def held_out(rows, record, alpha, shipped):
+    """Issue #44 item 11: tau at the EER point of the split record's train writers, FAR and
+    FRR on its test writers, beside the shipped tau on the same test writers."""
+    train = {w: r for w, r in rows.items() if w in record["train"]}
+    test = {w: r for w, r in rows.items() if w in record["test"]}
+    tau = _eer(train, alpha)[1]
+    at_tau, at_shipped = evaluate([test], alpha, tau), evaluate([test], alpha, shipped)
+    return {"train": len(train), "test": len(test), "tau": tau,
+            "far": at_tau["far"][0], "frr": at_tau["frr"][0],
+            "far_shipped": at_shipped["far"][0], "frr_shipped": at_shipped["frr"][0],
+            "n_forged": len(fused(test, "forged", alpha)),
+            "n_genuine": len(fused(test, "genuine", alpha))}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--faint", action="store_true",
+                        help="make every paper box look like a phone photo first (A10)")
+    args = parser.parse_args(argv)
     spatial = load_model("spatial", SPATIAL_WEIGHTS_PATH)
     temporal = load_model("temporal", TEMPORAL_WEIGHTS_PATH)
     writers = parse_inhouse()
-    split = inhouse_split(writers)
-    embedded = embed_campaign(writers, spatial, temporal)
+    embedded = embed_campaign(writers, spatial, temporal, faint_paper=args.faint)
+    print("paper:", "made faint like a phone photo (A10)" if args.faint else "as scanned")
     headline = {w: r for w, r in embedded.items()
-                if w not in split["forgers"] and len(r["genuine"][0]) >= MIN_GENUINE
-                and len(r["forged"][0])}
-    print(f"read {len(writers)} writers; forgers (team, not scored): {split['forgers']}; "
-          f"headline {len(headline)}; signings the app refused (crop or gate): "
-          f"{sum(r['lost'] for r in embedded.values())}")
-    print("left out:", sorted(set(embedded) - set(headline) - set(split["forgers"])))
+                if len(r["genuine"][0]) >= MIN_GENUINE and len(r["forged"][0])}
+    print(f"read {len(writers)} writers; headline {len(headline)}; signings the app refused "
+          f"(crop or gate): {sum(r['lost'] for r in embedded.values())}")
+    print("left out:", sorted(set(embedded) - set(headline)))
 
     rng = np.random.default_rng(42)
     rows = product_rows(headline)
     report_branch("Fused", rows, ALPHA_DEFAULT, DECISION_THRESHOLD, rng)
     report_branch("Pen alone", rows, 0.0, TEMPORAL_DECISION_THRESHOLD, rng)
     report_branch("Scan alone", rows, 1.0, SPATIAL_DECISION_THRESHOLD, rng)
+
+    with open(INHOUSE_SPLIT_PATH) as f:
+        record = json.load(f)
+    print("\nHeld out (tau set on the split record's train writers, scored on its test writers):")
+    for name, a, shipped in (("fused", ALPHA_DEFAULT, DECISION_THRESHOLD),
+                             ("pen", 0.0, TEMPORAL_DECISION_THRESHOLD),
+                             ("scan", 1.0, SPATIAL_DECISION_THRESHOLD)):
+        h = held_out(rows, record, a, shipped)
+        print(f"  {name}: train {h['train']} writers -> tau {h['tau']:.4f}; test {h['test']} "
+              f"writers ({h['n_genuine']} genuine, {h['n_forged']} forged): FAR {h['far']:.2f}% "
+              f"FRR {h['frr']:.2f}%; at shipped {shipped}: FAR {h['far_shipped']:.2f}% "
+              f"FRR {h['frr_shipped']:.2f}%")
 
     print("\nRandom forgeries (other writers' genuines), FAR at the shipped thresholds: "
           f"fused {random_forgery_far(headline, ALPHA_DEFAULT, DECISION_THRESHOLD):.2f}%, "

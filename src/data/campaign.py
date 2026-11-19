@@ -141,21 +141,18 @@ def _goes_to_test(writer, seed, test_fraction):
 
 
 def inhouse_split(writers, seed=SEED, test_fraction=INHOUSE_TEST_FRACTION):
-    """Train and test writers. Every forger who is also a writer is test: their own hand in
-    training would teach the model their forgeries. Each other writer's side depends only on
-    their own code, so nobody moves when volunteers are added (splits must not shift)."""
-    forgers = sorted({f"inhouse_{f['forger']}" for w in writers.values() for f in w["forged"]}
-                     & set(writers))
-    test = sorted(w for w in writers
-                  if w in forgers or _goes_to_test(w, seed, test_fraction))
-    return {"train": sorted(set(writers) - set(test)), "test": test, "forgers": forgers}
+    """Train and test writers. Each writer's side depends only on their own code, so nobody
+    moves when volunteers are added (splits must not shift). A forger code (forgery_byP01)
+    names a forger, not the participant with that code: the forgers signed no genuines here."""
+    test = sorted(w for w in writers if _goes_to_test(w, seed, test_fraction))
+    return {"train": sorted(set(writers) - set(test)), "test": test}
 
 
 def write_inhouse_split(writers, path=INHOUSE_SPLIT_PATH, seed=SEED,
                         test_fraction=INHOUSE_TEST_FRACTION):
     """Save the split for training to hold out: `train.py --holdout-writers <test...>`."""
     record = {"seed": seed, "test_fraction": test_fraction,
-              "rule": "every forger is test; others by sha256(seed:writer) < test_fraction",
+              "rule": "test when sha256(seed:writer) < test_fraction",
               **inhouse_split(writers, seed, test_fraction)}
     with open(path, "w") as f:  # skylos: ignore[SKY-D215,SKY-D324] INHOUSE_SPLIT_PATH from config/settings.py, or the operator's own path
         json.dump(record, f, indent=1)

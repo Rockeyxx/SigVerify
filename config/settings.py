@@ -57,9 +57,10 @@ DEEPSIGNDB_DIR = os.path.join(DATA_DIR, "deepsigndb")
 # evaluation and calibration only; no weight trained on it ships.
 BIOSECURID_SONOF_DIR = os.path.join(DATA_DIR, "biosecurid_sonof")
 INHOUSE_DIR = os.path.join(DATA_DIR, "inhouse")      # XPPen campaign: <participant>/ + manifest.csv
-# In-house writer split (src/data/campaign.py): every forger is a test writer; each other volunteer
-# goes to test when a hash of SEED and their code falls under this fraction, so nobody changes
-# side as volunteers are added. The record lists participant codes only and is tracked in git.
+# In-house writer split (src/data/campaign.py): a volunteer goes to test when a hash of SEED and
+# their code falls under this fraction, so nobody changes side as volunteers are added. Forger
+# codes name separate people who signed no genuines, so they decide nothing. The record lists
+# participant codes only and is tracked in git.
 INHOUSE_TEST_FRACTION = 0.5
 # Sessions the owner dropped (P06, P16, P18 have no forgeries; P19 was never recorded).
 INHOUSE_EXCLUDED = ("P06", "P16", "P18", "P19")
@@ -344,7 +345,7 @@ VERIFICATION_SIGNINGS = 1
 # attempt (the worst case for false accepts), at most 30% asked twice: 11.4% of genuine signers
 # refused at 5.1% of forgeries passed, against 15.7% for one signing at 5%; 18% asked twice.
 # Kept off after the in-house campaign (F43): at one sitting it refused no genuine pair but passed
-# 2 of 16 forger pairs (12.5%), against 1 of 32 forgeries (3.12%) for one signing at
+# 2 of 18 forger pairs (11.1%), against 1 of 36 forgeries (2.78%) for one signing at
 # DECISION_THRESHOLD; STEP_UP_ACCEPT is below that threshold. Recalibrate on time-gap data first.
 VERIFICATION_STEP_UP = False
 STEP_UP_REJECT = 0.4229
@@ -353,15 +354,19 @@ STEP_UP_TWO = 0.7470
 
 # Decision threshold settings (S_final >= tau -> Genuine, else Forged).
 # Calibrated on validation set under enrollment protocol (K=5) at EER balance point (FAR = FRR).
-SPATIAL_DECISION_THRESHOLD = 0.7637     # Calibrated spatial branch threshold (EER on validation)
+# Paper-alone threshold, set by campaign rule D6 (issue #44 item 11): the EER point of the scan
+# score on 18 in-house writers, paper through the app's grey crop (ENG_REPORT F44). At 0.7637,
+# the EER point on the public validation writers, paper alone accepted about half of the forgeries.
+# No threshold meets 5% / 5% for paper alone on our scans or on faint photos; fusion does.
+SPATIAL_DECISION_THRESHOLD = 0.8387     # Measured paper-alone threshold (EER point on the campaign)
 # Pen-alone threshold. 0.7381 (the FAR 5% point on SONOF) was tried and reverted: AGENTS.md keeps FAR
 # low first, and at 0.7381 DeepSignDB MCYT and BiosecureDS2 accepted 11.6% and 12.0% of skilled
 # forgeries. No fixed pen-alone threshold meets FAR 5% on every new collection (their FAR 5% points
 # run from 0.72 to 0.83); the deployment's own writers set it.
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
 # Fused threshold, set by campaign rule D6 on our own XPPen tablet and scanner: the EER point
-# of 0.4*s + 0.6*t on 16 in-house writers at one sitting (FAR 3.12%, FRR 1.80%, 32 team
-# forgeries; ENG_REPORT F43). The SONOF value let 4 of 32 forgeries through there. On the
+# of 0.4*s + 0.6*t on 18 in-house writers at one sitting (FAR 2.78%, FRR 1.60%, 36 skilled
+# forgeries; ENG_REPORT F43). The SONOF value let 4 of 36 forgeries through there. On the
 # public paired sets it trades FRR for FAR: SONOF FAR 2.53%, FRR 10.17%; NFI 2.23%, 6.92%.
 DECISION_THRESHOLD = 0.7807             # Measured fused threshold (EER point on the in-house campaign)
 # The EER point on the 132 SONOF paired writers (F16); scripts/calibrate_fusion.py reproduces it.
