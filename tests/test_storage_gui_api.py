@@ -511,8 +511,8 @@ def test_resaving_without_new_pen_signatures_keeps_the_pen_set_and_its_added_sig
     t = storage.get_client("c")["temporal_set"]
     assert t["embeddings"] == pen() + [b64(128, 999)]
     assert t["stale"] is True                               # still labelled with the old version
-    assert storage.add_confirmed_reference("c", b64(128, 1000), "alice", modality="temporal")
-    assert len(storage.get_client("c")["dynamic_references"]) == 7     # kept, not trimmed away
+    assert storage.add_confirmed_reference("c", b64(128, 1000), "alice", modality="temporal") is False
+    assert len(storage.get_client("c")["dynamic_references"]) == 6     # a stale set takes no more rows
 
 
 def test_each_set_has_its_own_model_version_and_stale_flag(people, monkeypatch):
@@ -527,10 +527,10 @@ def test_each_set_has_its_own_model_version_and_stale_flag(people, monkeypatch):
     datetime.fromisoformat(sets["scan"]["enrolled_at"])
 
 
-def test_one_row_from_other_weights_makes_the_set_stale(people, monkeypatch):
+def test_one_row_from_other_weights_makes_the_set_stale(people):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
-    monkeypatch.setattr(storage, "MODEL_VERSION", "v-next")
-    assert storage.add_confirmed_reference("c", b64(512, 99), "alice")       # newest row is v-next
+    assert storage.add_confirmed_reference("c", b64(512, 99), "alice")
+    _set_last_row_version("v-next")
     assert storage.get_client("c")["spatial_sets"]["scan"]["stale"] is True
 
 
@@ -651,19 +651,19 @@ def test_confirmed_reference_insert_and_trim_are_one_transaction(people):
     db = storage._get_db()
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     for i in range(6):
-        db.add_confirmed_reference("c", "spatial", np.full(512, i, dtype=np.float32), "v", "scan", max_per_set=7)
+        db.add_confirmed_reference("c", "spatial", np.full(512, i, dtype=np.float32), storage.MODEL_VERSION, "scan", max_per_set=7)
     assert len(db.get_references("c", "spatial", "scan")) == 7      # 5 enrolled kept, oldest added dropped
     with sqlite3.connect(db.db_path) as conn:
         conn.execute("""CREATE TRIGGER boom BEFORE DELETE ON enrollments BEGIN
                         SELECT RAISE(ABORT, 'no trim'); END""")
     with pytest.raises(sqlite3.DatabaseError):
-        db.add_confirmed_reference("c", "spatial", np.full(512, 99, dtype=np.float32), "v", "scan", max_per_set=7)
+        db.add_confirmed_reference("c", "spatial", np.full(512, 99, dtype=np.float32), storage.MODEL_VERSION, "scan", max_per_set=7)
     assert len(db.get_references("c", "spatial", "scan")) == 7      # the insert was rolled back too
 
 
 def test_an_ownerless_row_is_started_clean_by_the_first_save(people):
     db = storage._get_db()
-    db.add_reference("orphan", "spatial", np.zeros(512, dtype=np.float32), "old", spatial_origin="render")
+    db._add_references("orphan", "spatial", [np.zeros(512, dtype=np.float32)], "old", spatial_origin="render")
     assert not storage.client_exists("orphan")                  # invisible while ownerless
     login("bob", PW_B)
     assert storage.save_client_enrollment("orphan", [], "bob", spatial_embeddings=spatial(1), spatial_origin="scan")[0]
@@ -676,11 +676,12 @@ def test_backup_and_restore(people, tmp_path):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     folder = tmp_path / "usb"
     folder.mkdir()
-    login("bob", PW_B)                                             # any employee backs up
-    ok, path = storage.backup_database(str(folder), "bob")
-    assert ok and os.path.dirname(path) == str(folder) and os.path.basename(path).endswith(".db")
-    assert storage.backup_database(str(tmp_path / "missing"), "bob")[0] is False
+    login("bob", PW_B)                                             # only the admin backs up
+    assert storage.backup_database(str(folder), "bob")[0] is False
     login("alice", PW_A)
+    ok, path = storage.backup_database(str(folder), "alice")
+    assert ok and os.path.dirname(path) == str(folder) and os.path.basename(path).endswith(".db")
+    assert storage.backup_database(str(tmp_path / "missing"), "alice")[0] is False
     assert storage.delete_client("C", "alice")
 
     login("bob", PW_B)
@@ -714,7 +715,7 @@ def test_backup_needs_a_login(people, tmp_path):
 
 def test_a_damaged_backup_is_refused_before_anything_is_replaced(people, tmp_path):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
-    backup = storage._get_db().backup_to(str(tmp_path / "b.db"))
+    backup = storage._get_db().backup_to(storage._session["id"], str(tmp_path / "b.db"))
     with sqlite3.connect(backup) as conn:   # an index that no longer matches its table
         conn.execute("CREATE INDEX damaged ON audit_log(event)")
         conn.execute("PRAGMA writable_schema = ON")
@@ -727,13 +728,51 @@ def test_a_damaged_backup_is_refused_before_anything_is_replaced(people, tmp_pat
     assert not ok and storage.client_exists("d")             # live database untouched
 
 
-def test_an_older_added_row_makes_a_current_set_stale(people, monkeypatch):
+def test_an_older_added_row_makes_a_current_set_stale(people):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")   # enrolled at MODEL_VERSION
-    monkeypatch.setattr(storage, "MODEL_VERSION", "v-older")
     assert storage.add_confirmed_reference("c", b64(512, 99), "alice")
-    monkeypatch.undo()
+    _set_last_row_version("v-older")
     found = storage.get_client("c")["spatial_sets"]["scan"]
     assert found["model_version"] == storage.MODEL_VERSION and found["stale"] is True
+
+
+def _set_last_row_version(version):
+    with sqlite3.connect(storage._get_db().db_path) as conn:
+        conn.execute("UPDATE enrollments SET model_version = ? WHERE id = (SELECT MAX(id) FROM enrollments)",
+                     (version,))
+
+
+def test_a_confirmed_signing_to_a_stale_set_is_refused_and_writes_nothing(people):
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
+    _set_last_row_version("v-older")
+    assert storage.add_confirmed_reference("c", b64(512, 99), "alice") is False
+    assert storage.get_client("c")["spatial_embeddings"] == spatial(5)
+
+
+def test_a_confirmed_signing_to_a_missing_set_is_refused_by_the_database(people):
+    db = storage._get_db()
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
+    with pytest.raises(LookupError):
+        db.add_confirmed_reference("c", "spatial", np.zeros(512, dtype=np.float32), storage.MODEL_VERSION, "render")
+    with pytest.raises(LookupError):
+        db.add_confirmed_reference("c", "temporal", np.zeros(128, dtype=np.float32), storage.MODEL_VERSION)
+    with pytest.raises(LookupError):
+        db.add_confirmed_reference("ghost", "spatial", np.zeros(512, dtype=np.float32), storage.MODEL_VERSION, "scan")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX only")
+def test_the_backup_file_is_private_to_its_owner(people, tmp_path):
+    ok, path = storage.backup_database(str(tmp_path), "alice")
+    assert ok and os.stat(path).st_mode & 0o777 == 0o600
+
+
+def test_a_pen_set_with_a_stored_device_needs_the_current_device(people):
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=None, spatial_origin="render",
+                                   capture_device=XPPEN)
+    (message,) = storage.check_references("c", None, use_pen=True, capture_device=None)
+    assert message == ("This pen signing did not say which tablet it came from; the pen references were "
+                       "signed on XPPen Deco 640 (Windows). Sign again on the tablet.")
+    assert storage.check_references("c", None, use_pen=True, capture_device=XPPEN) == []
 
 
 def test_a_confirmed_pen_signing_needs_a_pen_set(people):

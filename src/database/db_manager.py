@@ -398,6 +398,8 @@ class DatabaseManager:
             still_first = conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is None
             if still_first != first:
                 raise RuntimeError("Another account was created at the same time; try again")
+            if not first and not self._is_admin(conn, created_by):   # the creator may have lost admin meanwhile
+                raise PermissionError("Only the admin can add employees")
             try:
                 cur = conn.execute(
                     "INSERT INTO employees (username, full_name, is_admin) VALUES (?, ?, ?)",
@@ -494,6 +496,10 @@ class DatabaseManager:
             emp_id = row[0]
             if conn.execute("SELECT active FROM employees WHERE id = ?", (emp_id,)).fetchone() != (1,):
                 raise LookupError("Employee not found")
+            if slot is not None and conn.execute(
+                    "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE employee_id = ?",
+                    (emp_id,)).fetchone() != tuple(current):
+                raise ValueError("Your password was changed meanwhile. Try again.")
             clash = conn.execute(
                 "SELECT 1 FROM employees WHERE username = ? COLLATE NOCASE AND id != ?",
                 (new_username, emp_id),
@@ -769,11 +775,12 @@ class DatabaseManager:
             raise
 
     # ----------------------------------------------------------------- write
-    def add_references(self, user_id: str, modality: str, embeddings, model_version: str,
-                       spatial_origin: str = None, source: str = "enroll") -> int:
+    def _add_references(self, user_id: str, modality: str, embeddings, model_version: str,
+                        spatial_origin: str = None, source: str = "enroll") -> int:
         """
         Store several templates of one kind in ONE transaction (all or nothing).
         `embeddings` is the list from enroll_*() (bytes) or np.ndarray vectors.
+        Private: the public write paths are save_client() and add_confirmed_reference().
         A client created here has no owner; the first save_client() starts it clean.
         """
         self._check_user(user_id)
@@ -802,11 +809,6 @@ class DatabaseManager:
             )
         return len(rows)
 
-    def add_reference(self, user_id: str, modality: str, embedding, model_version: str,
-                      spatial_origin: str = None) -> None:
-        """Store one template (bytes from enroll_*() or float32 ndarray)."""
-        self.add_references(user_id, modality, [embedding], model_version, spatial_origin=spatial_origin)
-
     def add_confirmed_reference(self, user_id: str, modality: str, embedding, model_version: str,
                                 spatial_origin: str = None, max_per_set: int = MAX_REFERENCES) -> None:
         """
@@ -819,6 +821,8 @@ class DatabaseManager:
         Keeps at most `max_per_set` templates per (user, modality, origin) set by
         dropping the oldest *added* templates first; enrolled templates are never dropped.
         Insert and trim are one transaction: both or neither.
+        Raises LookupError when the client has no such set, and ValueError when any row of
+        the set was made by other weights than `model_version` (a stale set takes no rows).
         """
         self._check_user(user_id)
         self._check_modality(modality, spatial_origin)
@@ -827,8 +831,13 @@ class DatabaseManager:
         raw = self._to_raw_bytes(modality, embedding)
         ct, nonce = self.encrypt_embedding(user_id, modality, spatial_origin, raw)
         with self._transaction() as conn:
-            if conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone() is None:
-                raise ValueError(f"Unknown user {user_id!r}: enroll before adding confirmed signings")
+            versions = {r[0] for r in conn.execute(
+                "SELECT model_version FROM enrollments WHERE user_id = ? AND modality = ? AND spatial_origin IS ?",
+                (user_id, modality, spatial_origin))}
+            if not versions:
+                raise LookupError(f"Client {user_id!r} has no {modality} set to add to")
+            if versions != {model_version}:
+                raise ValueError("The references were made by another model version; re-enrol them first")
             conn.execute(
                 """INSERT INTO enrollments
                    (user_id, modality, spatial_origin, encrypted_embedding, nonce,
@@ -897,7 +906,9 @@ class DatabaseManager:
                                           probe_hashes)
                    VALUES ('verify', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (user_id, display_name, employee_id, employee_label, modality_state, score,
-                 decision, timestamp or _now_local(), routing,
+                 decision,
+                 datetime.fromisoformat(timestamp).isoformat(timespec="seconds") if timestamp else _now_local(),
+                 routing,
                  None if degraded is None else int(bool(degraded)),
                  None if reasons is None else json.dumps(list(reasons)), model_version, threshold,
                  json.dumps(list(probe_hashes)) if probe_hashes else None),
@@ -972,16 +983,24 @@ class DatabaseManager:
         return total, genuine
 
     # ------------------------------------------------------- backup / restore
-    def backup_to(self, dest_path: str) -> str:
+    def backup_to(self, actor_id: int, dest_path: str) -> str:
         """
         Copy the whole (encrypted) database to `dest_path`, consistently, through SQLite's
         backup API. The copy holds only what the database holds: wrapped key slots, never a
         password or an unwrapped key, so it opens with the same employee passwords.
+        Only an active admin (`actor_id`) may do it (PermissionError). The file is created
+        owner-only and never over an existing file (FileExistsError).
         """
-        if os.path.exists(dest_path):
-            raise FileExistsError(f"{dest_path} already exists")
-        with closing(self.get_connection()) as src, closing(sqlite3.connect(dest_path)) as dst:
-            src.backup(dst)
+        with closing(self.get_connection()) as conn:
+            if not self._is_admin(conn, actor_id):
+                raise PermissionError("Only the admin can back up the database")
+        os.close(os.open(dest_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        try:
+            with closing(self.get_connection()) as src, closing(sqlite3.connect(dest_path)) as dst:
+                src.backup(dst)
+        except BaseException:
+            os.unlink(dest_path)
+            raise
         return dest_path
 
     def restore_from(self, backup_path: str, username: str, password: str) -> dict:

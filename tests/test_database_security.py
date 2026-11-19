@@ -9,6 +9,7 @@ from cryptography.exceptions import InvalidTag
 from src.database import db_manager
 from src.database.db_manager import DatabaseLockedError, DatabaseManager, probe_fingerprint
 
+SHIPPED_KDF_N = DatabaseManager.KDF_N   # read at import, before the autouse fixture lowers it
 MODEL = "test-model-v1"
 PW_A = "alice-password-1"
 PW_B = "bob-password-22"
@@ -52,14 +53,14 @@ def slots(db_path):
 # ---------------------------------------------------------------- templates
 def test_embedding_saved_and_loaded_is_identical(db):
     original = vec(512, 1)
-    db.add_reference("c1", "spatial", original, MODEL, spatial_origin="scan")
+    db._add_references("c1", "spatial", [original], MODEL, spatial_origin="scan")
     (loaded,) = db.get_references("c1", "spatial", "scan")
     assert np.array_equal(loaded, original)
 
 
 def test_stored_bytes_are_not_the_plain_embedding(db, db_path):
     original = vec(512, 2)
-    db.add_reference("c1", "spatial", original, MODEL, spatial_origin="scan")
+    db._add_references("c1", "spatial", [original], MODEL, spatial_origin="scan")
     with sqlite3.connect(db_path) as conn:
         (stored,) = conn.execute("SELECT encrypted_embedding FROM enrollments").fetchone()
     plain = original.tobytes()
@@ -76,15 +77,15 @@ def test_wrong_passphrase_raises_and_keeps_the_original_key(db, db_path):
 
 
 def test_decrypting_with_the_wrong_data_key_raises(db):
-    db.add_reference("c1", "spatial", vec(512, 3), MODEL, spatial_origin="scan")
+    db._add_references("c1", "spatial", [vec(512, 3)], MODEL, spatial_origin="scan")
     db._dek = bytes(32)
     with pytest.raises(InvalidTag):
         db.get_references("c1", "spatial", "scan")
 
 
 def test_record_moved_to_another_user_raises(db, db_path):
-    db.add_reference("alice-client", "spatial", vec(512, 4), MODEL, spatial_origin="scan")
-    db.add_reference("bob-client", "temporal", vec(128, 5), MODEL)
+    db._add_references("alice-client", "spatial", [vec(512, 4)], MODEL, spatial_origin="scan")
+    db._add_references("bob-client", "temporal", [vec(128, 5)], MODEL)
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE enrollments SET user_id = 'bob-client' WHERE user_id = 'alice-client'")
     with pytest.raises(InvalidTag):
@@ -92,7 +93,7 @@ def test_record_moved_to_another_user_raises(db, db_path):
 
 
 def test_record_with_changed_origin_raises(db, db_path):
-    db.add_reference("c1", "spatial", vec(512, 6), MODEL, spatial_origin="scan")
+    db._add_references("c1", "spatial", [vec(512, 6)], MODEL, spatial_origin="scan")
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE enrollments SET spatial_origin = 'render'")
     with pytest.raises(InvalidTag):
@@ -100,7 +101,7 @@ def test_record_with_changed_origin_raises(db, db_path):
 
 
 def test_tampered_ciphertext_raises(db, db_path):
-    db.add_reference("c1", "temporal", vec(128, 7), MODEL)
+    db._add_references("c1", "temporal", [vec(128, 7)], MODEL)
     with sqlite3.connect(db_path) as conn:
         (ct,) = conn.execute("SELECT encrypted_embedding FROM enrollments").fetchone()
         flipped = bytes([ct[0] ^ 1]) + ct[1:]
@@ -178,8 +179,62 @@ def test_each_slot_records_its_scrypt_cost_and_the_default_is_2_17(db, db_path, 
     assert db.authenticate_employee("a", PW_A)[0] is not None   # ...still opens the old slot
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT kdf_n FROM key_slots WHERE kind = 'employee'").fetchone() == (2 ** 10,)
-    with open(db_manager.__file__, encoding="utf-8") as f:
-        assert "KDF_N = 2 ** 17" in f.read()                 # the shipped cost, lowered only in tests
+    assert SHIPPED_KDF_N == 2 ** 17                          # the shipped cost, lowered only in tests
+
+
+def _through_second_connection(db_path, sql, params=()):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(sql, params)
+
+
+def test_create_employee_rechecks_the_creator_inside_the_transaction(db, db_path, monkeypatch):
+    a, b = two_employees(db)                                 # bob is not admin; make him one, then demote
+    _through_second_connection(db_path, "UPDATE employees SET is_admin = 1 WHERE id = ?", (b,))
+    real_wrap = db._wrap
+
+    def wrap_then_demote(*args):
+        slot = real_wrap(*args)
+        _through_second_connection(db_path, "UPDATE employees SET is_admin = 0 WHERE id = ?", (b,))
+        return slot
+
+    monkeypatch.setattr(db, "_wrap", wrap_then_demote)
+    with pytest.raises(PermissionError):
+        db.create_employee("Carol", "carol", "carol-password-1", created_by=b)
+    assert [e["username"] for e in db.list_employees()] == ["alice", "bob"]
+
+
+def test_update_employee_refuses_when_the_slot_changed_meanwhile(db, db_path, monkeypatch):
+    a, _ = two_employees(db)
+    real_wrap = db._wrap
+
+    def wrap_then_change_slot(*args):
+        slot = real_wrap(*args)
+        _through_second_connection(db_path, "UPDATE key_slots SET salt = ? WHERE employee_id = ?",
+                                   (b"x" * 16, a))        # another session changed alice's slot
+        return slot
+
+    monkeypatch.setattr(db, "_wrap", wrap_then_change_slot)
+    with pytest.raises(ValueError, match="Your password was changed meanwhile. Try again."):
+        db.update_employee(a, "alice", "Alice", "alice", "new-password-33", current_password=PW_A)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT salt FROM key_slots WHERE employee_id = ?", (a,)).fetchone() == (b"x" * 16,)
+
+
+def test_only_an_active_admin_backs_up(db, tmp_path):
+    a, b = two_employees(db)
+    with pytest.raises(PermissionError):
+        db.backup_to(b, str(tmp_path / "b.db"))
+    assert not (tmp_path / "b.db").exists()
+    assert db.backup_to(a, str(tmp_path / "a.db")) == str(tmp_path / "a.db")
+
+
+def test_the_backup_is_created_private_and_never_over_a_file(db, tmp_path):
+    a, _ = two_employees(db)
+    target = tmp_path / "a.db"
+    target.write_bytes(b"mine")
+    with pytest.raises(FileExistsError):
+        db.backup_to(a, str(target))
+    assert target.read_bytes() == b"mine"
 
 
 def test_new_password_rewraps_the_slot(db, db_path):

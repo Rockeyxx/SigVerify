@@ -550,7 +550,11 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
                 f"({pen['model_version']}, this app runs {MODEL_VERSION}). "
                 f"Ask the admin to re-enrol the client's pen signatures.")
         stored = pen["capture_device"]
-        if stored and capture_device and not _same_device(stored, capture_device):
+        if stored and not capture_device:
+            problems.append(
+                f"This pen signing did not say which tablet it came from; the pen references were "
+                f"signed on {stored.get('device_model')} ({stored.get('os')}). Sign again on the tablet.")
+        elif stored and not _same_device(stored, capture_device):
             problems.append(
                 f"The pen references were signed on {stored.get('device_model')} "
                 f"({stored.get('os')}); this signing is on {capture_device.get('device_model')} "
@@ -593,12 +597,18 @@ def add_confirmed_reference(client_id: str, embedding_b64: str, employee_usernam
     if modality == "temporal":
         if not record["temporal"]:
             return False   # no pen set to add to: enrol the client on the tablet first
-        db.add_confirmed_reference(key, "temporal", raw, MODEL_VERSION, max_per_set=MAX_REFERENCES)
+        try:
+            db.add_confirmed_reference(key, "temporal", raw, MODEL_VERSION, max_per_set=MAX_REFERENCES)
+        except (LookupError, ValueError):
+            return False   # the set is gone or made by other weights
         return True
     if spatial_origin not in record["sets"]:
         return False   # no set of that origin: never put it in the other one
-    db.add_confirmed_reference(key, "spatial", raw, MODEL_VERSION,
-                               spatial_origin=spatial_origin, max_per_set=MAX_REFERENCES)
+    try:
+        db.add_confirmed_reference(key, "spatial", raw, MODEL_VERSION,
+                                   spatial_origin=spatial_origin, max_per_set=MAX_REFERENCES)
+    except (LookupError, ValueError):
+        return False
     return True
 
 
@@ -613,7 +623,7 @@ def backup_database(dest_folder: str, employee_username: str) -> tuple:
     if _employee_id(employee_username or "") is None:
         return False, "Employee not found"
     try:
-        _actor(employee_username)
+        actor = _actor(employee_username)
         db = _unlocked_db()
     except (PermissionError, StorageError) as e:
         return False, str(e)
@@ -621,8 +631,8 @@ def backup_database(dest_folder: str, employee_username: str) -> tuple:
         return False, f"No folder at {dest_folder}"
     name = f"signatures-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
     try:
-        return True, db.backup_to(os.path.join(dest_folder, name))
-    except OSError as e:
+        return True, db.backup_to(actor, os.path.join(dest_folder, name))
+    except (OSError, PermissionError) as e:
         return False, str(e)
 
 

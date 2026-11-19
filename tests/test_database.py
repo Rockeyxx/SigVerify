@@ -221,7 +221,7 @@ def test_verification_counts_and_lists_ignore_enrolment_events(db, staff):
 
 def test_an_ownerless_row_starts_clean_when_first_saved(db, staff):
     _, bob = staff
-    db.add_references("orphan", "spatial", scan(900), "older", spatial_origin="render")
+    db._add_references("orphan", "spatial", scan(900), "older", spatial_origin="render")
     db.save_client("orphan", "Orphan", bob, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     rec = db.get_client_record("orphan")
     assert rec["enrolled_by"] == "bob" and set(rec["sets"]) == {"scan"}   # nothing inherited
@@ -232,6 +232,27 @@ def test_a_new_client_with_nothing_to_save_is_refused(db, staff):
     with pytest.raises(ValueError, match="Nothing to save"):
         db.save_client("c1", "C1", staff[0], spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     assert not db.has_client("c1")
+
+
+def test_a_confirmed_signing_needs_an_existing_set_of_the_current_weights(db, staff, path):
+    admin, _ = staff
+    with pytest.raises(LookupError):
+        db.add_confirmed_reference("ghost", "spatial", vec(512, 1), V1, spatial_origin="scan")
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    with pytest.raises(LookupError):
+        db.add_confirmed_reference("c1", "temporal", vec(128, 1), V1)
+    with pytest.raises(ValueError):
+        db.add_confirmed_reference("c1", "spatial", vec(512, 1), "v-new", spatial_origin="scan")
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM enrollments").fetchone() == (5,)
+
+
+def test_a_given_log_timestamp_is_stored_in_seconds(db, staff):
+    db.log_verification("c1", "scan", 90.0, "Genuine", employee_id=staff[0],
+                        timestamp="2026-11-20 10:11:12.345678")
+    assert db.get_log_events()[-1]["timestamp"] == "2026-11-20T10:11:12"
+    with pytest.raises(ValueError):
+        db.log_verification("c1", "scan", 90.0, "Genuine", employee_id=staff[0], timestamp="yesterday")
 
 
 # ---------------------------------------------------- pen set kept on re-save
@@ -247,7 +268,7 @@ def test_resaving_with_no_new_pen_set_keeps_its_rows_exactly(db, staff, path):
         after = conn.execute("SELECT id, source, model_version FROM enrollments "
                              "WHERE modality = 'temporal' ORDER BY id").fetchall()
     assert after == before and [r[1] for r in after] == ["enroll"] * 5 + ["added"]
-    db.add_confirmed_reference("c1", "temporal", vec(128, 1000), "v-new")
+    db.add_confirmed_reference("c1", "temporal", vec(128, 1000), V1)
     assert len(db.get_references("c1", "temporal")) == 7 <= MAX_REFERENCES   # the next one is kept
 
 
@@ -268,10 +289,12 @@ def test_capture_device_is_stored_with_the_pen_set(db, staff):
     assert db.get_client_record("c1")["temporal_set"]["capture_device"] == device
 
 
-def test_a_set_lists_every_model_version_it_holds(db, staff):
+def test_a_set_lists_every_model_version_it_holds(db, staff, path):
     admin, _ = staff
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(0), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
-    db.add_confirmed_reference("c1", "spatial", vec(512, 77), "v-new", spatial_origin="scan")
+    db.add_confirmed_reference("c1", "spatial", vec(512, 77), V1, spatial_origin="scan")
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE enrollments SET model_version = 'v-new' WHERE id = (SELECT MAX(id) FROM enrollments)")
     found = db.get_client_record("c1")["sets"]["scan"]
     assert found["model_version"] == V1 and found["model_versions"] == ["v-new", V1]
 
@@ -324,20 +347,20 @@ def test_the_log_stores_the_hash_never_the_embedding(db, staff, path):
 # -------------------------------------------------- backup / restore (item 9)
 def test_backup_holds_no_key_or_password_and_opens_with_the_same_passwords(db, staff, path, tmp_path):
     db.save_client("c1", "C1", staff[0], spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
-    backup = db.backup_to(str(tmp_path / "backup.db"))
+    backup = db.backup_to(staff[0], str(tmp_path / "backup.db"))
     data = file_bytes(backup)
     assert db._dek not in data and PW_ADMIN.encode() not in data and PW_BOB.encode() not in data
     opened = DatabaseManager(backup)
     assert opened.authenticate_employee("bob", PW_BOB)[0] is not None
     assert np.array_equal(opened.get_client_record("c1")["spatial"][0], scan(3)[0])
     with pytest.raises(FileExistsError):
-        db.backup_to(backup)
+        db.backup_to(staff[0], backup)
 
 
 def test_restore_brings_the_backup_back(db, staff, path, tmp_path):
     admin, _ = staff
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
-    backup = db.backup_to(str(tmp_path / "backup.db"))
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.delete_client("c1", admin)
     emp = db.restore_from(backup, "admin", PW_ADMIN)
     assert emp["is_admin"] and np.array_equal(db.get_client_record("c1")["spatial"][0], scan(3)[0])
@@ -346,7 +369,7 @@ def test_restore_brings_the_backup_back(db, staff, path, tmp_path):
 def test_restore_checks_everything_before_replacing_anything(db, staff, path, tmp_path):
     admin, _ = staff
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
-    backup = db.backup_to(str(tmp_path / "backup.db"))
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)   # only in the live database
     with pytest.raises(PermissionError):
         db.restore_from(backup, "admin", "wrong-password-1")
