@@ -436,7 +436,7 @@ def test_enrolment_delete_refused_shows_why_and_keeps_the_form(app, alice_bob, m
     assert panel.dynamic_references == ["kept"] and storage.client_exists("c")
 
 
-def _enrol_panel(username, k=NUM_ENROLLMENT_REFERENCES):
+def _enrol_panel(username):
     panel = enrollment.EnrollmentPanel()
     panel.set_current_employee(username, is_admin=(username == "alice"))
     return panel
@@ -528,6 +528,43 @@ def test_enrolment_admin_replacing_paper_asks_and_keeps_the_pen_rows(app, alice_
     assert storage.get_client("c")["spatial_sets"]["scan"]["embeddings"] == new_scan
     assert pen_rows() == before
     assert storage.add_confirmed_reference("c", _b64(128, 100), "alice", modality="temporal") is True
+
+
+def _ask_log(monkeypatch):
+    asked = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        lambda *a: asked.append(a[2]) or QtWidgets.QMessageBox.Yes)
+    return asked
+
+
+def test_enrolment_confirmation_follows_the_id_being_saved_not_the_last_load(app, alice_bob, fake_workers, monkeypatch):
+    k = NUM_ENROLLMENT_REFERENCES
+    storage.save_client_enrollment("a", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(k)])
+    storage.save_client_enrollment("b", [], "alice", spatial_embeddings=[])
+    storage.save_client_enrollment("old", [], "alice", spatial_embeddings=[_b64(512, 50 + i) for i in range(k)])
+    asked = _ask_log(monkeypatch)
+    panel = _enrol_panel("alice")
+    _load(panel, "a")                              # (a) loaded A has paper, then B is typed
+    panel.clientIdInput.setText("b")
+    panel.image_references = ["x.png"] * k
+    panel.run_enrollment()
+    assert asked == [] and len(fake_workers) == 1
+    _load(panel, "brand-new")                      # (b) loaded a new ID, then an existing one is typed
+    panel.clientIdInput.setText("old")
+    panel.image_references = ["x.png"] * k
+    panel.run_enrollment()
+    assert asked == ["This replaces the client's paper references. Continue?"]
+
+
+def test_enrolment_editing_the_id_after_load_reapplies_permissions(app, alice_bob):
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(5)])
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _enrol_panel("bob")
+    _load(panel, "c")
+    assert not panel.selectImageButton.isEnabled()
+    panel.clientIdInput.setText("other")
+    assert panel.loaded_client is None and panel.selectImageButton.isEnabled()
 
 
 def test_enrolment_new_pen_passes_the_capture_device(app, db, fake_workers, monkeypatch):

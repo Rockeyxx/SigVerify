@@ -112,6 +112,7 @@ class EnrollmentPanel(QWidget):
         self.clientIdInput = QLineEdit()
         self.clientIdInput.setPlaceholderText("Client name / ID")
         client_row.addWidget(self.clientIdInput)
+        self.clientIdInput.textChanged.connect(self._client_id_edited)
 
         self.loadClientButton = QPushButton("Load / New")
         self.loadClientButton.clicked.connect(self.load_or_start_new_client)
@@ -194,6 +195,13 @@ class EnrollmentPanel(QWidget):
     def set_current_employee(self, username: str, is_admin: bool = False):
         self.current_employee_username = username
         self.is_admin = is_admin
+        self._apply_permissions()
+
+    def _client_id_edited(self):
+        """The loaded record belongs to the old ID: forget it until Load is pressed again."""
+        self.loaded_client = None
+        self.dynamic_references = []
+        self._update_counts()
         self._apply_permissions()
 
     def _apply_permissions(self):
@@ -364,9 +372,10 @@ class EnrollmentPanel(QWidget):
             )
             return
 
+        record = storage.get_client(client_id)   # the ID being saved, not the last one loaded
         replaced = [name for name, new, have in (
-            ("paper", n_images, self.loaded_client and self.loaded_client["spatial_sets"].get("scan")),
-            ("pen", n_pen, self.loaded_client and self.loaded_client["temporal_set"])) if new and have]
+            ("paper", n_images, record and record["spatial_sets"].get("scan")),
+            ("pen", n_pen, record and record["temporal_set"])) if new and have]
         if replaced and QMessageBox.question(
                 self, "Confirm Re-enrolment",
                 f"This replaces the client's {' and '.join(replaced)} references. Continue?",
@@ -411,19 +420,12 @@ class EnrollmentPanel(QWidget):
             self._set_status_error(message)
             return
 
+        self.pen_signatures = []    # the raw signatures are dropped once embedded
+        self.load_or_start_new_client()   # show the client as it is now (label, counts, controls)
         self._set_status_success(
             f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} image, "
             f"{len(pen_b64 or [])} pen embeddings)")
         self.client_list_changed.emit()
-
-        self.image_references = []
-        self.dynamic_references = []
-        self.loaded_client = None
-        self._capture_device = None
-        self.pen_signatures = []    # the raw signatures are dropped once embedded
-        self._apply_permissions()
-        self._refresh_image_list()
-        self._update_counts()
 
     def _on_enroll_failure(self, error_message: str):
         self._set_status_error(error_message)
