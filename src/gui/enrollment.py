@@ -95,6 +95,10 @@ class EnrollmentPanel(QWidget):
         # enrolment is saved, never written anywhere (ISO/IEC 24745).
         self.pen_signatures = []
         self._selected_new_image_path = None
+        # What run_enrollment() handed the worker; the save uses these, not the live fields.
+        self._pending_client_id = None
+        self._pending_new_pen = False
+        self._pending_capture_device = None
 
         layout = QVBoxLayout()
         layout.setContentsMargins(30, 24, 30, 24)
@@ -198,9 +202,13 @@ class EnrollmentPanel(QWidget):
         self._apply_permissions()
 
     def _client_id_edited(self):
-        """The loaded record belongs to the old ID: forget it until Load is pressed again."""
+        """The loaded record and this session's signings belong to the old ID: forget them."""
         self.loaded_client = None
         self.dynamic_references = []
+        self.pen_signatures = []
+        self._capture_device = None
+        self.image_references = []
+        self._refresh_image_list()
         self._update_counts()
         self._apply_permissions()
 
@@ -223,7 +231,9 @@ class EnrollmentPanel(QWidget):
         if not client_id:
             self.clientStatusLabel.setText("Please enter a client ID first")
             return
+        self._load_client(client_id)
 
+    def _load_client(self, client_id: str):
         self.pen_signatures = []   # never carry one client's signatures over to another
         self._capture_device = None
         self.image_references = []   # paths are not stored: only photos picked this session
@@ -388,7 +398,10 @@ class EnrollmentPanel(QWidget):
         self.statusLabel.setText("")
 
         self._pending_client_id = client_id
-        self._enroll_worker = EnrollWorker(self.image_references, self.pen_signatures)
+        self._pending_new_pen = bool(self.pen_signatures)
+        self._pending_capture_device = self._capture_device
+        # Copies: an edit or a capture while the worker runs must not change its input.
+        self._enroll_worker = EnrollWorker(list(self.image_references), list(self.pen_signatures))
         self._enroll_worker.finished.connect(self._on_enroll_success)
         self._enroll_worker.failed.connect(self._on_enroll_failure)
         self._enroll_worker.start()
@@ -402,7 +415,7 @@ class EnrollmentPanel(QWidget):
         embeddings_b64 = result["embeddings"]
         spatial_origin = result["spatial_origin"]
         # None keeps the stored pen set (and its added signings) untouched.
-        new_pen = bool(self.pen_signatures)
+        new_pen = self._pending_new_pen
         pen_b64 = result["dynamic_embeddings"] if new_pen else None
 
         success, message = storage.save_client_enrollment(
@@ -410,7 +423,7 @@ class EnrollmentPanel(QWidget):
             self.current_employee_username or "unknown",
             spatial_embeddings=embeddings_b64,
             spatial_origin=spatial_origin,
-            capture_device=self._capture_device if new_pen else None,
+            capture_device=self._pending_capture_device if new_pen else None,
         )
 
         self.enrollButton.setEnabled(True)
@@ -420,8 +433,10 @@ class EnrollmentPanel(QWidget):
             self._set_status_error(message)
             return
 
-        self.pen_signatures = []    # the raw signatures are dropped once embedded
-        self.load_or_start_new_client()   # show the client as it is now (label, counts, controls)
+        # Show the saved client as it is now, unless another ID was typed or loaded meanwhile.
+        # Loading drops the raw signatures, which are embedded now.
+        if self.clientIdInput.text().strip() == client_id:
+            self._load_client(client_id)
         self._set_status_success(
             f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} image, "
             f"{len(pen_b64 or [])} pen embeddings)")

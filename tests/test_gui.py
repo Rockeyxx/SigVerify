@@ -676,11 +676,67 @@ def test_enrolment_new_pen_passes_the_capture_device(app, db, fake_workers, monk
     panel = _enrol_panel("alice")
     _load(panel, "c")
     panel.capture_pen_signatures()
-    panel._pending_client_id = "c"
+    panel.run_enrollment()
     panel._on_enroll_success({"embeddings": [], "spatial_origin": "scan",
                               "dynamic_embeddings": [_b64(128, i) for i in range(k)]})
     device = storage.get_client("c")["temporal_set"]["capture_device"]
     assert device == {"os": "Windows", "device_model": "XPPen", "qt_platform": "windows"}
+
+
+def _pen_result(worker, k):
+    """What EnrollWorker would return for the inputs it was given."""
+    images, pens = worker.args
+    return {"embeddings": [_b64(512, i) for i in range(len(images))], "spatial_origin": "scan",
+            "dynamic_embeddings": [_b64(128, i) for i in range(len(pens))]}
+
+
+def test_enrolment_editing_the_id_drops_the_previous_clients_signings(app, db, fake_workers, monkeypatch):
+    k = NUM_ENROLLMENT_REFERENCES
+    import src.capture.collect as collect
+    monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: {
+        "signatures": [_trajectory(i) for i in range(k)], "os": "Windows",
+        "device_model": "XPPen", "qt_platform": "windows"})
+    panel = _enrol_panel("alice")
+    _load(panel, "a")
+    panel.capture_pen_signatures()
+    panel.image_references = ["a.png"] * k
+    panel.clientIdInput.setText("b")            # A's signings and photos must not go to B
+    assert panel.pen_signatures == [] and panel.image_references == []
+    assert panel._capture_device is None and panel.imageList.count() == 0
+    assert panel.dynamicCountLabel.text() == f"0/{k} pen signatures"
+    panel.image_references = ["b.png"] * k
+    panel.run_enrollment()
+    worker, = fake_workers
+    panel._on_enroll_success(_pen_result(worker, k))
+    assert storage.get_client("b")["temporal_set"] is None
+
+
+def test_enrolment_save_uses_what_was_captured_when_save_was_pressed(app, db, fake_workers, monkeypatch):
+    k = NUM_ENROLLMENT_REFERENCES
+    import src.capture.collect as collect
+    devices = iter(["XPPen", "Wacom One"])
+    monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: {
+        "signatures": [_trajectory(i) for i in range(k)], "os": "Windows",
+        "device_model": next(devices), "qt_platform": "windows"})
+    panel = _enrol_panel("alice")
+    _load(panel, "c")
+    panel.capture_pen_signatures()
+    panel.run_enrollment()
+    panel.capture_pen_signatures()               # a new capture while the worker runs
+    panel._on_enroll_success(_pen_result(fake_workers[0], k))
+    assert storage.get_client("c")["temporal_set"]["capture_device"]["device_model"] == "XPPen"
+
+    _load(panel, "d")
+    monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: {
+        "signatures": [_trajectory(i) for i in range(k)], "os": "Linux",
+        "device_model": "XPPen", "qt_platform": "xcb"})
+    panel.capture_pen_signatures()
+    panel.run_enrollment()
+    _load(panel, "other")                        # Load while the worker runs
+    panel._on_enroll_success(_pen_result(fake_workers[1], k))
+    rec = storage.get_client("d")
+    assert len(rec["dynamic_references"]) == k and rec["temporal_set"]["capture_device"]["os"] == "Linux"
+    assert panel.clientIdInput.text() == "other" and panel.loaded_client is None
 
 
 def test_enrolment_storage_refusal_is_shown_not_a_success(app, alice_bob, monkeypatch):
