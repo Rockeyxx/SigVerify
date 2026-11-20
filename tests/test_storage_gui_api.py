@@ -907,6 +907,14 @@ def test_company_names_are_checked_and_unique(isolated_storage):
     assert storage.current_company() == "Acme Inc." and storage.current_employee()["username"] == "alice"
 
 
+def test_marks_stay_inside_a_word_of_a_company_name():
+    # Arabic diacritics and Devanagari vowel signs are part of the word, not separators.
+    assert storage._slug("مُحَمَّد") == "مُحَمَّد"
+    assert storage._slug("हिन्दी") == "हिन्दी"
+    assert storage._slug("Acme  Bank / Riyadh") == "acme-bank-riyadh"
+    assert storage._slug("../..") == ""
+
+
 def test_company_names_in_any_script_get_their_own_folder(isolated_storage):
     for name in ("شركة النور", "Café", "Cafe"):                    # é is not e: two companies
         ok, msg = storage.create_company(name, "Alice A", "alice", PW_A)

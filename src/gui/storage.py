@@ -118,9 +118,12 @@ _WINDOWS_DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"{p}{i}" for p in ("com"
 
 
 def _slug(name: str) -> str:
-    """Letters and digits of any script, case-folded; every other run is one "-" (so no
-    "/", "." or ".." survives: the folder stays inside companies/)."""
-    return re.sub(r"[\W_]+", "-", unicodedata.normalize("NFKC", name.strip()).casefold()).strip("-")
+    """Letters, marks and digits of any script (Unicode categories L, M, N), case-folded;
+    every other run is one "-" (so no "/", "." or ".." survives: the folder stays inside
+    companies/). Marks are kept so diacritics and vowel signs stay inside their word."""
+    text = unicodedata.normalize("NFKC", name.strip()).casefold()
+    kept = "".join(c if unicodedata.category(c)[0] in "LMN" else "-" for c in text)
+    return re.sub(r"-+", "-", kept).strip("-")
 
 
 def _companies_dir() -> str:
