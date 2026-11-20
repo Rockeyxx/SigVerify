@@ -5,6 +5,7 @@ The service is replaced by a fake that records its calls, so these tests need no
 """
 import base64
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -523,6 +524,19 @@ def test_unexpected_error_shows_a_dialog_and_prints_the_traceback(app, dialogs, 
         app_module.show_unexpected_error(type(e), e, e.__traceback__)
     assert dialogs[-1][2] == "Something went wrong: boom. The action was not completed."
     assert "RuntimeError: boom" in capsys.readouterr().err
+
+
+def test_main_installs_the_error_dialog(monkeypatch):
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)   # restored after the test
+    app_module.install_error_dialog()
+    assert sys.excepthook is app_module.show_unexpected_error
+
+
+def test_later_starts_open_on_login(db, make_window):
+    storage.logout()
+    window = make_window()
+    assert window.auth_stack.currentWidget() is window.login_screen
+    assert window.auth_stack.count() == 1
 
 
 def test_logout_locks_the_signature_data(db, make_window):
