@@ -840,6 +840,7 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     labels = [label.text() for label in screen.findChildren(QtWidgets.QLabel)]
     assert "Register a new company" in labels and storage.ADMIN_WARNING in labels
     assert "Create Company" in _buttons(screen) and "Restore a company from a backup" in _buttons(screen)
+    assert "Back to login" not in _buttons(screen)            # nothing to go back to on a first run
 
     _register(screen, "", "Alice A", "alice", "alice-password-1")
     assert screen.messageLabel.text() == "⚠ Please fill in all fields" and storage.is_first_run()
@@ -847,6 +848,50 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     assert window.current_employee == {"full_name": "Alice A", "username": "alice", "is_admin": True}
     assert window.content_stack.currentWidget() is window.dashboard_screen
     assert storage.list_companies() == ["Acme"] and storage.current_company() == "Acme"
+    assert window.sidebar.companyLabel.text() == "Acme"
+
+    window.sidebar.go_logout.emit()
+    assert window.auth_stack.currentWidget() is window.login_screen
+    assert _companies(window) == ["Acme"] and window.login_screen.companyInput.currentText() == "Acme"
+    assert "Register a new company" in _buttons(window.login_screen)
+    storage._reset()                                          # the app starts again
+    later = make_window()
+    assert isinstance(later.auth_stack.currentWidget(), app_module.WelcomeScreen)
+    _login(later, "alice", "alice-password-1")
+    assert later.current_employee["username"] == "alice" and storage.current_company() == "Acme"
+
+
+def _companies(window):
+    combo = window.login_screen.companyInput
+    return [combo.itemText(i) for i in range(combo.count())]
+
+
+def test_a_company_registered_from_login_sees_none_of_the_other_companys_clients(db, make_window):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.logout()
+    window = make_window()
+    window.auth_stack.setCurrentWidget(window.login_screen)
+    window.login_screen.registerButton.click()
+    screen = window.register_screen
+    assert window.auth_stack.currentWidget() is screen
+    screen.backButton.click()
+    assert window.auth_stack.currentWidget() is window.login_screen
+    window.login_screen.registerButton.click()
+    _register(screen, "Beta", "Zed Z", "zed", "zed-password-12")
+    assert window.current_employee == {"full_name": "Zed Z", "username": "zed", "is_admin": True}
+    assert window.sidebar.companyLabel.text() == "Beta" and window.clients_page.table.rowCount() == 0
+
+    window.sidebar.go_logout.emit()
+    assert _companies(window) == ["Beta", "Test Co"] and window.login_screen.companyInput.currentText() == "Beta"
+    _login(window, "zed", "zed-password-12")
+    assert storage.list_clients() == [] and window.clients_page.table.rowCount() == 0
+    window.sidebar.go_logout.emit()
+    _login(window, "alice", "alice-password-1")                # Beta's login screen still says Beta
+    assert window.current_employee is None
+    window.login_screen.companyInput.setCurrentText("Test Co")
+    _login(window, "alice", "alice-password-1")
+    assert storage.current_company() == "Test Co" and window.sidebar.companyLabel.text() == "Test Co"
+    assert window.clients_page.table.rowCount() == 1
 
 
 def test_startup_storage_error_shows_it_and_quits(app, empty_db, make_window, dialogs, monkeypatch):

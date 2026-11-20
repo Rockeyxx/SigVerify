@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QMessageBox,
-    QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QLineEdit
+    QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QLineEdit, QComboBox
 )
 
 from src.gui.enrollment import EnrollmentPanel
@@ -105,7 +105,7 @@ class WelcomeScreen(QWidget):
 
 
 class LoginScreen(QWidget):
-    def __init__(self, on_login_success):
+    def __init__(self, on_login_success, go_register):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(14)
@@ -116,6 +116,12 @@ class LoginScreen(QWidget):
         title.setAlignment(Qt.AlignHCenter)
         content.addWidget(title)
         content.addSpacing(10)
+
+        self.companyInput = QComboBox()            # the last company used is preselected
+        self.companyInput.addItems(storage.list_companies())
+        self.companyInput.setCurrentText(storage.current_company() or "")
+        self.companyInput.setFixedWidth(260)
+        content.addWidget(self.companyInput, alignment=Qt.AlignHCenter)
 
         self.usernameInput = QLineEdit()
         self.usernameInput.setPlaceholderText("User ID")
@@ -129,6 +135,8 @@ class LoginScreen(QWidget):
         content.addWidget(self.passwordInput, alignment=Qt.AlignHCenter)
 
         self.errorLabel = QLabel("")
+        self.errorLabel.setWordWrap(True)
+        self.errorLabel.setFixedWidth(420)
         self.errorLabel.setProperty("role", "status-error")
         self.errorLabel.setAlignment(Qt.AlignHCenter)
         content.addWidget(self.errorLabel)
@@ -140,6 +148,11 @@ class LoginScreen(QWidget):
         login_button.clicked.connect(self._handle_login)
         content.addWidget(login_button, alignment=Qt.AlignHCenter)
 
+        self.registerButton = QPushButton("Register a new company")
+        self.registerButton.setProperty("role", "ghost")
+        self.registerButton.clicked.connect(go_register)
+        content.addWidget(self.registerButton, alignment=Qt.AlignHCenter)
+
         self.on_login_success = on_login_success
         self.setLayout(centered(content))
 
@@ -148,6 +161,7 @@ class LoginScreen(QWidget):
         password = self.passwordInput.text()
 
         try:
+            storage.open_company(self.companyInput.currentText())
             success, employee, message = storage.authenticate_employee(username, password)
         except storage.StorageError as e:
             QMessageBox.critical(self, STORAGE_ERROR_TITLE, str(e))
@@ -174,7 +188,7 @@ class RegisterScreen(QWidget):
     """Registers a new company (its own encrypted data; the person registering is its admin),
     or makes one from a backup."""
 
-    def __init__(self, on_register_success, on_restored):
+    def __init__(self, on_register_success, on_restored, go_back=None):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(14)
@@ -237,6 +251,12 @@ class RegisterScreen(QWidget):
         self.restoreButton.setProperty("role", "ghost")
         self.restoreButton.clicked.connect(self._handle_restore)
         content.addWidget(self.restoreButton, alignment=Qt.AlignHCenter)
+
+        if go_back is not None:                    # not on a first run: there is no login yet
+            self.backButton = QPushButton("Back to login")
+            self.backButton.setProperty("role", "ghost")
+            self.backButton.clicked.connect(go_back)
+            content.addWidget(self.backButton, alignment=Qt.AlignHCenter)
 
         self.on_register_success = on_register_success
         self.on_restored = on_restored
@@ -317,19 +337,25 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _build_auth_stack(self, first_run=False):
-        """First run: only the admin-account screen. Afterwards: Welcome and Login, no Register."""
+        """First run (no company yet): Register a new company. Afterwards: Welcome, then Login,
+        which also leads to Register a new company."""
         self.auth_stack = QStackedWidget()
-        self.login_screen = LoginScreen(on_login_success=self._handle_login_success)
-        if first_run:
-            start = RegisterScreen(
-                on_register_success=lambda: self._handle_login_success(storage.current_employee()),
-                on_restored=self._handle_restored,
-            )
-        else:
-            start = WelcomeScreen(go_to_login=lambda: self.auth_stack.setCurrentWidget(self.login_screen))
-        self.auth_stack.addWidget(start)
-        self.auth_stack.addWidget(self.login_screen)
-        self.auth_stack.setCurrentWidget(start)
+        show_login = lambda: self.auth_stack.setCurrentWidget(self.login_screen)  # noqa: E731
+        self.login_screen = LoginScreen(
+            on_login_success=self._handle_login_success,
+            go_register=lambda: self.auth_stack.setCurrentWidget(self.register_screen),
+        )
+        self.register_screen = RegisterScreen(
+            on_register_success=lambda: self._handle_login_success(storage.current_employee()),
+            on_restored=self._handle_restored,
+            go_back=None if first_run else show_login,
+        )
+        screens = [self.register_screen, self.login_screen]
+        if not first_run:
+            screens.insert(0, WelcomeScreen(go_to_login=show_login))
+        for screen in screens:
+            self.auth_stack.addWidget(screen)
+        self.auth_stack.setCurrentWidget(screens[0])
         self.setCentralWidget(self.auth_stack)
 
     def _show_login(self, notice=""):
@@ -384,6 +410,7 @@ class MainWindow(QMainWindow):
         self.current_employee = employee
         self._build_app_stack()
         self.sidebar.set_employee(employee["full_name"], employee["username"])
+        self.sidebar.set_company(storage.current_company() or "")
         self.sidebar.set_admin(employee["is_admin"])
         self.dashboard_screen.set_employee_name(employee["full_name"])
         self.enrollment_panel.set_current_employee(employee["username"], employee["is_admin"])

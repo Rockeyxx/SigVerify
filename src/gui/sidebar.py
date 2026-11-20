@@ -49,6 +49,11 @@ class Sidebar(QWidget):
         self.employeeUsernameLabel.setProperty("role", "muted")
         self.main_layout.addWidget(self.employeeUsernameLabel)
 
+        self.companyLabel = QLabel("")
+        self.companyLabel.setProperty("role", "muted")
+        self.companyLabel.setWordWrap(True)
+        self.main_layout.addWidget(self.companyLabel)
+
         self.main_layout.addSpacing(16)
 
         self.nav_buttons = []
@@ -72,7 +77,7 @@ class Sidebar(QWidget):
 
         # كل العناصر اللي تختفي وقت الطي (ما عدا زر التوجل نفسه)
         self.collapsible_widgets = [
-            self.employeeNameLabel, self.employeeUsernameLabel,
+            self.employeeNameLabel, self.employeeUsernameLabel, self.companyLabel,
             self.logoutButton
         ] + self.nav_buttons
 
@@ -104,3 +109,6 @@ class Sidebar(QWidget):
     def set_employee(self, full_name: str, username: str):
         self.employeeNameLabel.setText(full_name)
         self.employeeUsernameLabel.setText(f"@{username}")
+
+    def set_company(self, name: str):
+        self.companyLabel.setText(name)
