@@ -171,7 +171,8 @@ class LoginScreen(QWidget):
 
 
 class RegisterScreen(QWidget):
-    """First run only: creates the admin account (the first account), or restores a backup."""
+    """Registers a new company (its own encrypted data; the person registering is its admin),
+    or makes one from a backup."""
 
     def __init__(self, on_register_success, on_restored):
         super().__init__()
@@ -179,7 +180,7 @@ class RegisterScreen(QWidget):
         content.setSpacing(14)
         content.setAlignment(Qt.AlignHCenter)
 
-        title = QLabel("Create the admin account")
+        title = QLabel("Register a new company")
         title.setProperty("role", "hero-title")
         title.setAlignment(Qt.AlignHCenter)
         content.addWidget(title)
@@ -191,6 +192,11 @@ class RegisterScreen(QWidget):
         warning.setAlignment(Qt.AlignHCenter)
         content.addWidget(warning, alignment=Qt.AlignHCenter)
         content.addSpacing(10)
+
+        self.companyInput = QLineEdit()
+        self.companyInput.setPlaceholderText("Company name")
+        self.companyInput.setFixedWidth(260)
+        content.addWidget(self.companyInput, alignment=Qt.AlignHCenter)
 
         self.fullNameInput = QLineEdit()
         self.fullNameInput.setPlaceholderText("Full Name")
@@ -220,14 +226,14 @@ class RegisterScreen(QWidget):
         self.messageLabel.setFixedWidth(420)
         content.addWidget(self.messageLabel, alignment=Qt.AlignHCenter)
 
-        self.createButton = QPushButton("Create Admin Account")
+        self.createButton = QPushButton("Create Company")
         self.createButton.setProperty("role", "primary")
         self.createButton.setFixedWidth(260)
         self.createButton.setFixedHeight(44)
         self.createButton.clicked.connect(self._handle_register)
         content.addWidget(self.createButton, alignment=Qt.AlignHCenter)
 
-        self.restoreButton = QPushButton("Restore from backup")
+        self.restoreButton = QPushButton("Restore a company from a backup")
         self.restoreButton.setProperty("role", "ghost")
         self.restoreButton.clicked.connect(self._handle_restore)
         content.addWidget(self.restoreButton, alignment=Qt.AlignHCenter)
@@ -237,7 +243,7 @@ class RegisterScreen(QWidget):
         self.setLayout(centered(content))
 
     def _handle_restore(self):
-        outcome = restore_from_backup(self)
+        outcome = restore_from_backup(self, new_company=True)
         if outcome is None:
             return
         ok, message = outcome
@@ -247,23 +253,25 @@ class RegisterScreen(QWidget):
         self.on_restored()
 
     def _handle_register(self):
+        company = self.companyInput.text().strip()
         full_name = self.fullNameInput.text().strip()
         username = self.usernameInput.text().strip()
         password = self.passwordInput.text()
         confirm = self.confirmPasswordInput.text()
 
-        if not full_name or not username or not password:
+        if not company or not full_name or not username or not password:
             self._set_error("Please fill in all fields")
             return
         if password != confirm:
             self._set_error("Passwords do not match")
             return
 
-        success, message = storage.register_employee(full_name, username, password)
+        success, message = storage.create_company(company, full_name, username, password)
         if not success:
             self._set_error(message)
             return
 
+        self.companyInput.clear()
         self.fullNameInput.clear()
         self.usernameInput.clear()
         self.passwordInput.clear()

@@ -24,6 +24,7 @@ LOG_KEYS = {"client_key", "client_display_name", "decision", "confidence",
 PW_A = "alice-password-1"
 PW_B = "bob-password-123"
 XPPEN = {"device_model": "XPPen Deco 640", "os": "Windows", "qt_platform": "windows"}
+COMPANY = "Test Co"
 
 
 @pytest.fixture(autouse=True)
@@ -48,30 +49,35 @@ def pen(n=5, base=300):
     return [b64(128, base + i) for i in range(n)]
 
 
+def company_dir(home, slug="test-co"):
+    return home / "companies" / slug
+
+
 def db_bytes(home):
-    with open(home / "signatures.db", "rb") as f:
+    with open(company_dir(home) / "signatures.db", "rb") as f:
         return f.read()
 
 
 @pytest.fixture
 def people():
-    """Alice is the first account (the admin, logged in); she adds Bob."""
-    assert storage.register_employee("Alice A", "alice", PW_A)[0]
+    """Alice registers the company Test Co (its admin, logged in); she adds Bob."""
+    assert storage.create_company(COMPANY, "Alice A", "alice", PW_A)[0]
     assert storage.register_employee("Bob B", "bob", PW_B)[0]
 
 
 def login(username, password):
-    storage.logout()
+    storage.open_company(COMPANY)
     assert storage.authenticate_employee(username, password)[0]
 
 
 # ---------------------------------------------------------------- employees
-def test_first_account_is_the_admin_and_is_told_passwords_cannot_be_recovered():
-    assert storage.is_first_run() and storage.current_employee() is None
-    ok, msg = storage.register_employee("Alice A", "alice", PW_A)
+def test_registering_a_company_makes_its_admin_who_is_told_passwords_cannot_be_recovered():
+    assert storage.is_first_run() and storage.current_employee() is None and storage.current_company() is None
+    ok, msg = storage.create_company(COMPANY, "Alice A", "alice", PW_A)
     assert ok and msg.startswith("Admin account created") and storage.ADMIN_WARNING in msg
     assert storage.current_employee() == {"full_name": "Alice A", "username": "alice", "is_admin": True}
     assert "cannot be recovered" in storage.ADMIN_WARNING and not storage.is_first_run()
+    assert storage.current_company() == COMPANY
     assert storage.find_employee("alice")["is_admin"] is True
     assert storage.register_employee("Bob B", "bob", PW_B) == (True, "Account created successfully")
     assert storage.find_employee("bob")["is_admin"] is False
@@ -349,7 +355,7 @@ def test_log_events_and_stats(people):
     assert storage.get_verification_stats("ghost") == {"total": 0, "genuine": 0, "genuine_rate": 0.0}
 
 
-def test_empty_log_stats():
+def test_empty_log_stats(people):
     assert storage.get_verification_stats() == {"total": 0, "genuine": 0, "genuine_rate": 0.0}
     assert storage.get_verification_log() == []
 
@@ -416,7 +422,8 @@ def test_no_key_file_is_ever_written_and_the_cwd_stays_clean(people, tmp_path, m
     login("alice", PW_A)
     assert storage.get_client("persist", "alice") is not None
     assert sorted(os.listdir(elsewhere)) == []                     # nothing created in the cwd
-    assert sorted(os.listdir(isolated_storage)) == ["signatures.db"]   # no db.key
+    assert sorted(os.listdir(isolated_storage)) == ["companies"]
+    assert sorted(os.listdir(company_dir(isolated_storage))) == ["company.txt", "signatures.db"]   # no db.key
 
 
 def test_nothing_decrypts_before_login_or_after_logout(people):
@@ -438,6 +445,7 @@ def test_a_copied_data_folder_cannot_be_opened(people, isolated_storage, tmp_pat
     shutil.copytree(isolated_storage, stolen)
     monkeypatch.setenv(storage.HOME_ENV_VAR, str(stolen))
     storage._reset()
+    storage.open_company(COMPANY)
     with pytest.raises(storage.StorageLockedError):
         storage.get_client("c")
     assert storage.authenticate_employee("alice", "guess-guess-1")[0] is False
@@ -446,30 +454,36 @@ def test_a_copied_data_folder_cannot_be_opened(people, isolated_storage, tmp_pat
 def test_passphrase_env_var_unlocks_for_tests_and_ci_without_a_file(isolated_storage, monkeypatch):
     monkeypatch.setenv(PASSPHRASE_ENV_VAR, "from-environment")
     storage._reset()
-    assert storage.register_employee("E", "env", "env-password-1")[0]
+    assert storage.create_company(COMPANY, "E", "env", "env-password-1")[0]
     storage.save_client_enrollment("C", [], "env", spatial_embeddings=spatial(1), spatial_origin="scan")
     storage._reset()
+    storage.open_company(COMPANY)
     assert storage.get_client("c") is not None                      # no login needed
     storage.logout()
     assert storage.get_client("c") is not None                      # and logout does not lock it
-    assert sorted(os.listdir(isolated_storage)) == ["signatures.db"]
+    assert sorted(os.listdir(company_dir(isolated_storage))) == ["company.txt", "signatures.db"]
     monkeypatch.setenv(PASSPHRASE_ENV_VAR, "a-different-one")
     storage._reset()
+    storage.open_company(COMPANY)
     with pytest.raises(storage.StorageKeyError):
         storage.get_client("c")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
 def test_data_folder_is_private(people, isolated_storage):
-    assert (os.stat(isolated_storage).st_mode & 0o777) == 0o700
+    for folder in (isolated_storage, isolated_storage / "companies", company_dir(isolated_storage)):
+        assert (os.stat(folder).st_mode & 0o777) == 0o700
 
 
 def test_an_old_database_is_refused_with_the_folder_to_move(isolated_storage):
-    isolated_storage.mkdir(parents=True)
-    _make_v4(str(isolated_storage / "signatures.db"))
+    folder = company_dir(isolated_storage)
+    folder.mkdir(parents=True)
+    (folder / "company.txt").write_text(COMPANY)
+    _make_v4(str(folder / "signatures.db"))
+    storage.open_company(COMPANY)
     with pytest.raises(storage.StorageError, match="older version") as e:
         storage.authenticate_employee("bob", OLD_B)
-    assert str(isolated_storage) in str(e.value)
+    assert str(folder) in str(e.value)
 
 
 # ------------------------------------------------- several sets (issue #33, item 3)
@@ -721,9 +735,10 @@ def test_a_backup_can_be_restored_on_a_new_install(people, tmp_path, monkeypatch
     monkeypatch.setenv(storage.HOME_ENV_VAR, str(tmp_path / "new-pc"))
     storage._reset()
     assert storage.is_first_run()
-    assert storage.restore_database(path, "alice", PW_A) == (True, "Backup restored")
+    assert storage.restore_company(COMPANY, path, "alice", PW_A) == (True, "Backup restored")
     assert storage.get_client("c")["spatial_embeddings"] == spatial(2)
     storage._reset()
+    storage.open_company(COMPANY)
     assert storage.authenticate_employee("bob", PW_B)[0]           # same passwords as before
 
 
@@ -853,3 +868,85 @@ def test_a_confirmed_pen_signing_needs_a_pen_set(people):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
     assert storage.add_confirmed_reference("c", b64(128, 5), "alice", modality="temporal") is False
     assert storage.get_client("c")["temporal_set"] is None
+
+
+# ------------------------------------------------- companies: one encrypted folder each
+PW_BETA = "beta-admin-pass-1"
+
+
+def test_two_companies_cannot_see_each_others_clients(people, isolated_storage):
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
+    ok, _ = storage.create_company("Beta Ltd", "Alice Beta", "alice", PW_BETA)   # same User ID, other company
+    assert ok and storage.current_company() == "Beta Ltd"
+    assert storage.current_employee() == {"full_name": "Alice Beta", "username": "alice", "is_admin": True}
+    assert storage.list_clients() == [] and storage.get_client("c") is None and not storage.client_exists("c")
+    assert storage.get_reference_embeddings("c") == ([], "scan")
+    assert storage.list_companies() == ["Beta Ltd", COMPANY]
+    storage.logout()
+    assert storage.authenticate_employee("alice", PW_A) == (False, None, "Incorrect password")
+    assert storage.authenticate_employee("bob", PW_B) == (False, None, "User ID not found")
+    a_file = DatabaseManager(str(company_dir(isolated_storage) / "signatures.db"))
+    assert a_file.authenticate_employee("alice", PW_BETA)[0] is None             # B's password opens nothing in A
+    storage.open_company("test co")                                              # any case
+    assert storage.current_company() == COMPANY and storage.current_employee() is None
+    assert storage.authenticate_employee("alice", PW_A)[0]
+    assert storage.get_client("c") is not None
+
+
+def test_company_names_are_checked_and_unique(isolated_storage):
+    for bad in ("", "   ", "A", "x" * 41, "!!", " - "):
+        ok, msg = storage.create_company(bad, "Alice A", "alice", PW_A)
+        assert not ok and "2 to 40 characters" in msg
+    assert storage.is_first_run() and storage.list_companies() == []
+    assert storage.create_company("  Acme Inc.  ", "Alice A", "alice", PW_A)[0]
+    assert storage.list_companies() == ["Acme Inc."]
+    assert (company_dir(isolated_storage, "acme-inc") / "company.txt").read_text() == "Acme Inc."
+    assert storage.create_company("ACME inc", "Bob B", "bob", PW_B) == (
+        False, "A company with this name already exists")
+    assert storage.current_company() == "Acme Inc." and storage.current_employee()["username"] == "alice"
+
+
+def test_a_failed_registration_leaves_no_company_folder(isolated_storage):
+    ok, msg = storage.create_company("Acme", "Alice A", "alice", "short")
+    assert not ok and "12 characters" in msg
+    assert storage.is_first_run() and storage.current_company() is None
+    assert not company_dir(isolated_storage, "acme").exists()
+    assert storage.create_company("Acme", "Alice A", "alice", PW_A)[0]           # the name is free again
+
+
+def test_unknown_company_and_no_company_chosen(people):
+    with pytest.raises(storage.StorageError, match="No company named 'Nope'"):
+        storage.open_company("Nope")
+    assert storage.current_company() == COMPANY                                  # still selected
+    storage._reset()
+    assert storage.current_company() is None and not storage.is_first_run()
+    for call in (storage.list_clients, lambda: storage.authenticate_employee("alice", PW_A),
+                 storage.list_employees):
+        with pytest.raises(storage.StorageLockedError, match="Choose a company first"):
+            call()
+
+
+def test_logout_keeps_the_company_selected(people):
+    storage.logout()
+    assert storage.current_company() == COMPANY and storage.current_employee() is None
+    assert storage.authenticate_employee("bob", PW_B)[0]
+
+
+def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, isolated_storage):
+    path = _backup_of_c(tmp_path)
+    new = company_dir(isolated_storage, "branch-two")
+    for user, password in (("bob", PW_B), ("alice", "wrong-password-1")):        # not an admin / wrong password
+        ok, msg = storage.restore_company("Branch Two", path, user, password)
+        assert not ok and msg and not new.exists() and storage.current_company() == COMPANY
+    assert storage.restore_company("Branch Two", str(tmp_path / "missing.db"), "alice", PW_A)[0] is False
+    assert not new.exists()
+    assert storage.restore_company(COMPANY, path, "alice", PW_A) == (
+        False, "A company with this name already exists")
+    assert storage.restore_company("Branch Two", path, "alice", PW_A) == (True, "Backup restored")
+    assert storage.current_company() == "Branch Two" and storage.current_employee()["username"] == "alice"
+    assert storage.get_client("c")["spatial_embeddings"] == spatial(5)
+    assert sorted(os.listdir(new)) == ["company.txt", "signatures.db"]
+    login("alice", PW_A)                                                         # Test Co is untouched
+    assert storage.current_company() == COMPANY and storage.get_client("c") is not None
+    storage.open_company("Branch Two")
+    assert storage.authenticate_employee("bob", PW_B)[0]                         # the backup's passwords

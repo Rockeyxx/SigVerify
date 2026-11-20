@@ -251,7 +251,8 @@ def empty_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def db(empty_db):
-    assert storage.register_employee("Alice A", "alice", "alice-password-1")[0]
+    """Alice registered the company Test Co: its admin, logged in."""
+    assert storage.create_company("Test Co", "Alice A", "alice", "alice-password-1")[0]
 
 
 @pytest.fixture
@@ -823,26 +824,29 @@ def _login(window, username, password):
     window.login_screen._handle_login()
 
 
-def test_first_run_creates_the_admin_and_register_is_gone_afterwards(empty_db, make_window):
+def _register(screen, company, full_name, username, password):
+    screen.companyInput.setText(company)
+    screen.fullNameInput.setText(full_name)
+    screen.usernameInput.setText(username)
+    screen.passwordInput.setText(password)
+    screen.confirmPasswordInput.setText(password)
+    screen.createButton.click()
+
+
+def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, make_window):
     window = make_window()
     screen = window.auth_stack.currentWidget()
     assert isinstance(screen, app_module.RegisterScreen)
     labels = [label.text() for label in screen.findChildren(QtWidgets.QLabel)]
-    assert "Create the admin account" in labels and storage.ADMIN_WARNING in labels
-    assert "Restore from backup" in _buttons(screen)
+    assert "Register a new company" in labels and storage.ADMIN_WARNING in labels
+    assert "Create Company" in _buttons(screen) and "Restore a company from a backup" in _buttons(screen)
 
-    screen.fullNameInput.setText("Alice A")
-    screen.usernameInput.setText("alice")
-    screen.passwordInput.setText("alice-password-1")
-    screen.confirmPasswordInput.setText("alice-password-1")
-    screen.createButton.click()
+    _register(screen, "", "Alice A", "alice", "alice-password-1")
+    assert screen.messageLabel.text() == "⚠ Please fill in all fields" and storage.is_first_run()
+    _register(screen, "Acme", "Alice A", "alice", "alice-password-1")
     assert window.current_employee == {"full_name": "Alice A", "username": "alice", "is_admin": True}
     assert window.content_stack.currentWidget() is window.dashboard_screen
-
-    window.sidebar.go_logout.emit()
-    for w in (window, make_window()):
-        assert not w.centralWidget().findChildren(app_module.RegisterScreen)
-        assert not any("Register" in text for text in _buttons(w.centralWidget()))
+    assert storage.list_companies() == ["Acme"] and storage.current_company() == "Acme"
 
 
 def test_startup_storage_error_shows_it_and_quits(app, empty_db, make_window, dialogs, monkeypatch):
@@ -965,9 +969,9 @@ def test_employees_page_add_reset_remove_change_only_that_account(app, alice_bob
     assert storage.authenticate_employee("alice", "alice-password-1")[0]
 
 
-def _answer_restore(monkeypatch, path, username, password):
+def _answer_restore(monkeypatch, path, username, password, company=None):
     monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
-    answers = iter([(username, True), (password, True)])
+    answers = iter(([(company, True)] if company else []) + [(username, True), (password, True)])
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: next(answers))
 
 
@@ -1004,12 +1008,15 @@ def test_first_run_restore_returns_to_login(db, make_window, tmp_path, monkeypat
     window = make_window()
     screen = window.auth_stack.currentWidget()
     assert isinstance(screen, app_module.RegisterScreen)
-    _answer_restore(monkeypatch, backup, "alice", "alice-password-1")
+    _answer_restore(monkeypatch, backup, "alice", "wrong-password-1", company="Restored Co")
+    screen.restoreButton.click()
+    assert screen.messageLabel.text().startswith("⚠ ") and storage.list_companies() == []
+    _answer_restore(monkeypatch, backup, "alice", "alice-password-1", company="Restored Co")
     screen.restoreButton.click()
     assert window.auth_stack.currentWidget() is window.login_screen
     assert window.login_screen.errorLabel.text() == "Backup restored. Log in again."
     _login(window, "alice", "alice-password-1")
-    assert window.current_employee["username"] == "alice"
+    assert window.current_employee["username"] == "alice" and storage.current_company() == "Restored Co"
 
 
 def test_profile_password_change_needs_the_current_password(app, db):

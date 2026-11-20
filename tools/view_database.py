@@ -1,12 +1,12 @@
 """
 view_database.py
 =================
-Read-only inspection script for the app's signatures.db (debugging only).
+Read-only inspection script for one company's signatures.db (debugging only).
 Prints every client with the shape of their decrypted references, and the audit log.
 
 The data key is wrapped by employee passwords, so the script asks for a User ID and
-password (SIGVER_DB_PASSPHRASE unlocks a test database instead). SIGVER_HOME picks
-the folder, as in the app.
+password (SIGVER_DB_PASSPHRASE unlocks a test database instead), after the company.
+SIGVER_HOME picks the folder, as in the app.
 
 Run from the repository root:
     python -m tools.view_database
@@ -17,7 +17,7 @@ import os
 import sys
 
 from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager
-from src.gui.storage import DB_FILENAME, _data_dir
+from src.gui.storage import DB_FILENAME, _company_folder, list_companies
 
 
 def print_section(title):
@@ -27,7 +27,10 @@ def print_section(title):
 
 
 def main():
-    path = os.path.join(_data_dir(), DB_FILENAME)
+    companies = list_companies()
+    if not companies:
+        sys.exit("No company yet. Run the app first, or set SIGVER_HOME.")
+    path = os.path.join(_company_folder(input(f"Company ({', '.join(companies)}): ")), DB_FILENAME)
     if not os.path.exists(path):
         sys.exit(f"No database at {path}. Run the app first, or set SIGVER_HOME.")
     passphrase = os.environ.get(PASSPHRASE_ENV_VAR)

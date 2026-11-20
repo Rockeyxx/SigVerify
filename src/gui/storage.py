@@ -1,8 +1,16 @@
 """
 storage.py - persistent data layer for the GUI (SQLite + AES-256-GCM).
 
-All reads/writes to persistent data go through this file ONLY. Underneath, everything
-lives in one SQLite database managed by src.database.db_manager.DatabaseManager:
+All reads/writes to persistent data go through this file ONLY.
+
+Companies: Register creates a COMPANY, with its own folder, encrypted database, data key,
+admin (the person registering), employees and clients. Companies cannot read each other's
+data. Pick one with open_company() (or create_company() / restore_company()); every other
+function works on that current company. With no company chosen they raise
+StorageLockedError("Choose a company first."). logout() keeps the company chosen.
+
+Inside a company, everything lives in one SQLite database managed by
+src.database.db_manager.DatabaseManager:
 
   * login: an employee's password unwraps their own copy of the data key (one key slot
     per employee). Nothing that opens the data is on disk: no key file, no password, no
@@ -11,17 +19,20 @@ lives in one SQLite database managed by src.database.db_manager.DatabaseManager:
     owning client with associated data
   * every save is one SQLite transaction (no half-written or wiped files)
 
-Clients belong to the company. Any logged-in employee finds, enrols and verifies any
-client. On a lookup, `employee_username` only narrows the list to the clients that
-employee enrolled ("my clients"); pass None for the whole list. A write is always done,
-and logged, as the LOGGED-IN employee: the username a write is given must be theirs, or
-it is refused. Only the admin (the first account) adds employees, resets a password,
-removes an employee, deletes a client, replaces a set a client already holds, or changes
-a client's name; a refused attempt is logged too. Each employee edits only their own
+Clients belong to their company. Any logged-in employee of it finds, enrols and verifies
+any of its clients. On a lookup, `employee_username` only narrows the list to the clients
+that employee enrolled ("my clients"); pass None for the whole list. A write is always
+done, and logged, as the LOGGED-IN employee: the username a write is given must be
+theirs, or it is refused. Only the admin (who registered the company) adds employees,
+resets a password, removes an employee, deletes a client, replaces a set a client already
+holds, or changes a client's name; a refused attempt is logged too. Each employee edits only their own
 profile, and a new password needs the current one.
 
 Where the data lives (never relative to the working directory):
-  ~/.sigverify/signatures.db   (override the folder with SIGVER_HOME)
+  ~/.sigverify/companies/<slug>/signatures.db   (override ~/.sigverify with SIGVER_HOME)
+  ~/.sigverify/companies/<slug>/company.txt     the company name as typed (not secret: the
+                                                login screen lists it)
+<slug> is the name lowercased, every run of other characters than a-z0-9 made one "-".
 SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A database made
 before per-employee passwords (schema v4 or older) is refused; clients enrol again.
 
@@ -32,6 +43,8 @@ View button works only for photos picked in the current session.
 import base64
 import binascii
 import os
+import re
+import shutil
 import sqlite3
 import threading
 from datetime import datetime
@@ -51,6 +64,8 @@ MODEL_VERSION = _settings.MODEL_VERSION
 MAX_REFERENCES = _settings.MAX_REFERENCES
 
 DB_FILENAME = "signatures.db"
+COMPANIES_DIRNAME = "companies"
+COMPANY_NAME_FILE = "company.txt"
 HOME_ENV_VAR = "SIGVER_HOME"
 
 # The third decision of step-up verification (src.verification.SIGN_AGAIN).
@@ -77,6 +92,7 @@ class StorageLockedError(StorageError):
     """Nobody is logged in, so the templates cannot be decrypted."""
 
 
+_company = None                 # the chosen company's name (as in its company.txt)
 _db = None
 _session = None                 # the logged-in employee: {"id", "username", "full_name", "is_admin"}
 _unlocked_by_passphrase = False
@@ -93,14 +109,38 @@ def _data_dir() -> str:
     return os.path.abspath(os.path.expanduser(base))
 
 
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+
+
+def _companies_dir() -> str:
+    return os.path.join(_data_dir(), COMPANIES_DIRNAME)
+
+
+def _company_folder(name: str) -> str:
+    return os.path.join(_companies_dir(), _slug(name))
+
+
+def _read_company_name(slug: str):
+    """The name in companies/<slug>/company.txt, or None (no such company)."""
+    if not slug:
+        return None
+    try:
+        with open(os.path.join(_companies_dir(), slug, COMPANY_NAME_FILE), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
 def _get_db() -> DatabaseManager:
     global _db, _unlocked_by_passphrase
     if _db is not None:
         return _db
     with _db_lock:
         if _db is None:
-            data_dir = _data_dir()
-            os.makedirs(data_dir, mode=0o700, exist_ok=True)
+            if _company is None:
+                raise StorageLockedError("Choose a company first.")
+            data_dir = _company_folder(_company)
             db_path = os.path.join(data_dir, DB_FILENAME)
             try:
                 db = DatabaseManager(db_path)        # opens locked; a login unlocks it
@@ -131,12 +171,19 @@ def _unlocked_db() -> DatabaseManager:
     return db
 
 
-def _reset():
-    """Forget the open database handle and the session (tests, or after SIGVER_HOME changes)."""
-    global _db, _session
+def _reset(company=None):
+    """Forget the open database handle, the session and the chosen company, as a fresh start
+    does (tests, or after SIGVER_HOME changes); `company` is chosen instead, unchecked."""
+    global _db, _session, _company
     with _db_lock:
         _db = None
         _session = None
+        _company = company
+
+
+def _select(company) -> None:
+    logout()                      # lock the old data key before dropping its handle
+    _reset(company)
 
 
 def logout() -> None:
@@ -188,12 +235,82 @@ def _b64(arr) -> str:
 
 
 # ============================================================
+# COMPANIES (one folder, database and data key each)
+# ============================================================
+
+def list_companies() -> list:
+    """The company names, sorted without regard to case."""
+    try:
+        slugs = os.listdir(_companies_dir())
+    except FileNotFoundError:
+        return []
+    names = [_read_company_name(slug) for slug in slugs]
+    return sorted((n for n in names if n), key=str.casefold)
+
+
+def current_company():
+    return _company
+
+
+def open_company(company_name: str) -> None:
+    """Choose the company later calls work on; nobody is logged in afterwards.
+    Raises StorageError for an unknown name (the chosen company stays as it was)."""
+    name = _read_company_name(_slug(company_name or ""))
+    if name is None:
+        raise StorageError(f"No company named '{(company_name or '').strip()}'.")
+    _select(name)
+
+
+def _new_company(company_name: str, fill) -> tuple:
+    """Make the company's folder, choose it and run fill() -> (ok, message) inside it.
+    On any failure the folder is removed and the company chosen before is chosen again
+    (logged out)."""
+    name = (company_name or "").strip()
+    if not 2 <= len(name) <= 40 or not _slug(name):
+        return False, "The company name must have 2 to 40 characters, at least one a letter or a digit."
+    folder = _company_folder(name)
+    try:
+        os.makedirs(_data_dir(), mode=0o700, exist_ok=True)
+        os.makedirs(_companies_dir(), mode=0o700, exist_ok=True)
+        os.mkdir(folder, 0o700)
+    except FileExistsError:
+        return False, "A company with this name already exists"
+    except OSError as e:
+        return False, f"The company folder could not be made: {e}"
+    previous, ok, message = _company, False, "The company could not be created."
+    try:
+        with open(os.path.join(folder, COMPANY_NAME_FILE), "w", encoding="utf-8") as f:
+            f.write(name)
+        _select(name)
+        ok, message = fill()
+    except (OSError, StorageError) as e:
+        message = str(e)
+    finally:
+        if not ok:
+            _select(previous)     # drop the handle before removing its file
+            shutil.rmtree(folder, ignore_errors=True)
+    return ok, message
+
+
+def create_company(company_name: str, full_name: str, username: str, password: str) -> tuple:
+    """Register a new company: its folder, database and data key, and its first employee,
+    the admin, who is logged in. Returns (success, message)."""
+    return _new_company(company_name, lambda: register_employee(full_name, username, password))
+
+
+def restore_company(company_name: str, backup_path: str, username: str, password: str) -> tuple:
+    """A new company made from a backup, with the checks of restore_database (`username` /
+    `password` must be an admin of the BACKUP, who is logged in). Returns (success, message)."""
+    return _new_company(company_name, lambda: restore_database(backup_path, username, password))
+
+
+# ============================================================
 # EMPLOYEES
 # ============================================================
 
 def is_first_run() -> bool:
-    """True before any account exists: the next registration creates the admin."""
-    return not _get_db().has_employees()
+    """True before any company exists: the start screen is Register a new company."""
+    return not list_companies()
 
 
 def current_employee():
@@ -211,8 +328,8 @@ def list_employees() -> list:
 
 
 def register_employee(full_name: str, username: str, password: str) -> tuple:
-    """The first account on a new install is the admin (and is logged in). After that only
-    a logged-in admin adds employees. Returns (success, message)."""
+    """The first account of a company is its admin (and is logged in); create_company makes
+    it. After that only a logged-in admin adds employees. Returns (success, message)."""
     global _session
     db = _get_db()
     first = not db.has_employees()
@@ -659,8 +776,8 @@ def backup_database(dest_folder: str, employee_username: str) -> tuple:
 
 def restore_database(backup_path: str, username: str, password: str) -> tuple:
     """
-    Replace the database with a backup. Allowed on a new install (no accounts yet) or for
-    the logged-in admin. The backup is checked before anything is replaced: it must be a
+    Replace the current company's database with a backup. Allowed for the logged-in admin
+    (or on a database with no accounts yet, as restore_company makes). The backup is checked before anything is replaced: it must be a
     sound backup of this app, and `username` / `password` must be an admin of the BACKUP.
     The database layer checks the admin again, keeps a copy of the live database beside it
     and logs the restore. That admin is logged in afterwards. Returns (success, message).

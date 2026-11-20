@@ -11,9 +11,15 @@ from PyQt5.QtWidgets import (
 import src.gui.storage as storage
 
 
-def restore_from_backup(parent):
-    """Ask for a backup file and an admin of that backup, then restore it.
+def restore_from_backup(parent, new_company=False):
+    """Ask for a backup file and an admin of that backup, then restore it over the current
+    company, or as a new company (new_company: its name is asked first).
     Returns None when the employee cancels, otherwise storage's (success, message)."""
+    company = None
+    if new_company:
+        company, ok = QInputDialog.getText(parent, "Restore a company", "Name of the new company:")
+        if not ok or not company.strip():
+            return None
     path, _ = QFileDialog.getOpenFileName(parent, "Choose a backup", "", "Backup (*.db);;All files (*)")
     if not path:
         return None
@@ -24,6 +30,8 @@ def restore_from_backup(parent):
                                         QLineEdit.Password)
     if not ok:
         return None
+    if new_company:
+        return storage.restore_company(company, path, username.strip(), password)
     return storage.restore_database(path, username.strip(), password)
 
 
