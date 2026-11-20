@@ -103,7 +103,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 - **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts (admin-managed), client enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per employee, each wrapped with a key derived (scrypt) from that employee's login password, so logging in is what unlocks the data. No key file and no password is kept on disk, and a copied database cannot be opened without a password. The first account is the admin: only the admin adds employees, resets a forgotten password, deletes a client or replaces a client's references. Only embeddings are stored. The audit log records every verification, enrolment, re-enrolment, deletion, refused attempt, account change and backup, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the admin and every employee forget their passwords, the enrolled signatures cannot be recovered and every client must enrol again.**
+- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/companies/<company>/`, one encrypted database per company. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per employee, each wrapped with a key derived (scrypt) from that employee's login password, so logging in is what unlocks the data. No key file and no password is kept on disk, and a copied database cannot be opened without a password. Register creates a company, and the person registering is its admin: only the admin adds employees, resets a forgotten password, deletes a client or replaces a client's references. Only embeddings are stored. The audit log records every verification, enrolment, re-enrolment, deletion, refused attempt, account change and backup, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the admin and every employee forget their passwords, the enrolled signatures cannot be recovered and every client must enrol again.**
 
 ---
 
@@ -210,12 +210,16 @@ employee-facing interface for enrollment and verification.
 
 **Employee workflow:**
 
-1. **First start and login** — On a new database the first screen creates the
-   admin account (full name, User ID, password), or restores a backup. There is
-   no public Register: after that, a Welcome screen with a Login button opens
-   the app, and only the admin adds employees. Logging out locks the signature
-   data again. A database made by an older version of the app is refused at
-   start with a message; move `~/.sigverify` away and enrol again.
+1. **First start, companies and login** — On the first start the screen is
+   Register a new company: company name, then the admin's full name, User ID and
+   password, or restore a company from a backup. Each company has its own
+   encrypted database, admin, employees and clients, and cannot see another
+   company's data. After that a Welcome screen leads to Login, where the employee
+   picks the company, then enters User ID and password; Register a new company
+   stays on the login screen. Inside a company only the admin adds employees.
+   Logging out locks the signature data again. A database made by an older
+   version of the app is refused with a message; move that company's folder away
+   and enrol again.
 2. **Enrollment** — Enter a client ID. The page looks the client up across the
    company and shows which sets exist (scan N, pen N). A new client is enrolled
    with 5 reference photos of their signature (blue pen on white paper), 5

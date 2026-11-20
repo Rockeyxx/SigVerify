@@ -640,6 +640,15 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   tablet), every account change (`employee added`, `password reset`,
   `employee removed`, `profile changed`, never the password itself) and every `backup` are
   logged too, each with its employee. Only `verify` rows count as verifications.
+- **One encrypted folder per company.** Register creates a company: its own folder
+  (`<SIGVER_HOME or ~/.sigverify>/companies/<slug>/`, mode 0700), its own database and
+  data key, and its own admin (the person registering), employees and clients. A company
+  cannot list, read, verify or decrypt another company's clients: no employee, password
+  or key slot is shared, and the same User ID in two companies is two accounts. The
+  company name is plain text in `company.txt` (the login screen lists it); it is not a
+  secret. Every `src/gui/storage.py` call works on the current company
+  (`open_company`, `create_company`, `restore_company`) and raises `StorageLockedError`
+  when none is chosen. Inside a company the rules below hold unchanged.
 - **The login password unlocks the data (one key slot per employee).** The random data
   key is stored only wrapped, once per employee, by a key derived with scrypt
   (`DatabaseManager.KDF_N = 2**17`) from that employee's password. Unwrapping is the
@@ -653,9 +662,9 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 - **A write is done by whoever is logged in.** `src/gui/storage.py` takes the acting
   employee from the session, never from a name a page passes; a different name is
   refused, so nobody acts, or is logged, as the admin.
-- **Clients belong to the company, not to one employee.** Any employee enrols a new
-  client, adds a set the client lacks, and verifies any client. Only the admin (the
-  first account on a new database) adds employees, resets a password, removes an
+- **Clients belong to their company, not to one employee.** Any employee of the company
+  enrols a new client, adds a set the client lacks, and verifies any of its clients. Only
+  the admin (who registered the company) adds employees, resets a password, removes an
   employee, deletes a client, replaces or removes a set a client already holds, or
   changes a client's name.
   `enrolled_by` is recorded and never used to block. Every enrolment, re-enrolment and
@@ -682,8 +691,9 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 - **Backup and restore.** Only the admin backs up, and a backup is a consistent copy of
   the encrypted database, created owner-only (mode 0600 on Linux and macOS; Windows ignores
   the mode) and never over an existing file.
-  It opens with the same passwords. Only the admin restores (anyone on a new install with
-  no employees), and `DatabaseManager.restore_from` checks this itself. A restore is
+  It opens with the same passwords. Only the admin restores over the current company
+  (`restore_company` on the register screen makes a new company from a backup instead,
+  and removes its folder again on any failure), and `DatabaseManager.restore_from` checks this itself. A restore is
   checked on a scratch copy first: a backup holding a trigger, a view or a table this app
   never creates is refused, and it must be a sound database of a readable schema, opened
   by an admin of the backup. Then the live database is copied, owner-only, to
@@ -692,7 +702,8 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   log. Nothing is replaced until all of that passes.
 - **Old databases are refused, not upgraded.** A v3 or v4 database is refused at start
   (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
-  and the owner moves `~/.sigverify` away and enrols again. No key file is read.
+  and the owner moves that company's folder away and enrols again. A
+  `signatures.db` directly in the base folder (made before companies) is ignored. No key file is read.
 - **Two known limits, documented instead of built.** Removing an employee does not change
   the data key, so a copy of the database taken before the removal still opens with their
   old password (key rotation would be a separate, manual step, as in Bitwarden
