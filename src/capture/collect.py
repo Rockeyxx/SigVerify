@@ -6,6 +6,8 @@ with the operating system and the tablet name read from the system.
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QHBoxLayout, QInputDialog, QLabel, QPushButton, QVBoxLayout
 
+from config.settings import CAPTURE_NO_DRIVER
+from src.capture import tablet
 from src.capture.tablet import SignatureCaptureWidget
 from src.gui.styles import ACCENT, ACCENT_DARK, PRIMARY_LIGHT, STYLE
 
@@ -167,5 +169,8 @@ def collect_signatures(count=5, parent=None, lang="en"):
     """
     dialog = CollectDialog(count, parent, lang)
     if dialog.choose_tablet() and dialog.exec_() == QDialog.Accepted:
-        return {"signatures": list(dialog.signatures), **dialog.capture.capture_info()}
+        info = dialog.capture.capture_info()
+        if info["device_model"] == CAPTURE_NO_DRIVER:     # plugged in after the window opened (G16)
+            info["device_model"] = (tablet.tablet_names() or [CAPTURE_NO_DRIVER])[0]
+        return {"signatures": list(dialog.signatures), **info}
     return None
