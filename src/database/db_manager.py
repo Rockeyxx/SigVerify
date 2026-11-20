@@ -1035,12 +1035,13 @@ class DatabaseManager:
         with closing(self.get_connection()) as conn:
             if not self._is_admin(conn, actor_id):
                 raise PermissionError("Only the admin can back up the database")
-        os.close(os.open(dest_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        os.close(os.open(dest_path, flags, 0o600))  # skylos: ignore[SKY-D215,SKY-D324] the admin picks the backup folder; O_EXCL never follows a link or overwrites a file
         try:
             with closing(self.get_connection()) as src, closing(sqlite3.connect(dest_path)) as dst:
                 src.backup(dst)
         except BaseException:
-            os.unlink(dest_path)
+            os.unlink(dest_path)  # skylos: ignore[SKY-D215] removes only the file this call just created
             raise
         with self._transaction() as conn:
             self._log_event(conn, EVENT_BACKUP, None, None, actor_id, [os.path.basename(dest_path)])
