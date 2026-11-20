@@ -646,7 +646,15 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   cannot list, read, verify or decrypt another company's clients: no employee, password
   or key slot is shared, and the same User ID in two companies is two accounts. The
   company name is plain text in `company.txt` (the login screen lists it); it is not a
-  secret. Every `src/gui/storage.py` call works on the current company
+  secret. A company name has 2 to 40 characters, at least one a letter or digit of any
+  script; its folder `<slug>` is the case-folded name with every other run of characters
+  made one `-`, so it never leaves `companies/`. A name whose slug is a Windows device name
+  (`con`, `prn`, `aux`, `nul`, `com1` to `com9`, `lpt1` to `lpt9`) is refused. A company is
+  listed only after its admin exists. The name is also recorded inside the company's
+  database (`company_info`), so a backup carries it: a restore over a company refuses a
+  backup of another company, and `restore_company` refuses a name other than the one the
+  backup records (a backup with no name recorded is allowed). Every `src/gui/storage.py`
+  call works on the current company
   (`open_company`, `create_company`, `restore_company`) and raises `StorageLockedError`
   when none is chosen. Inside a company the rules below hold unchanged.
 - **The login password unlocks the data (one key slot per employee).** The random data
@@ -700,12 +708,14 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside it (`-2`, `-3` on a clash), and
   a `restore` row naming who restored and from which file goes into the backup's audit
   log. Nothing is replaced until all of that passes. A restore never rolls the audit log
-  back: every live audit row newer than the backup's newest row is carried into the
-  restored database first (with the employee's username as `employee_label`), and the
-  `restore` row says how many were carried. The Employees page shows the last backup and
+  back: every live audit row the backup does not hold is carried into the restored
+  database first, in live order (with the employee's username as `employee_label`), and
+  the `restore` row says how many were carried. Rows are matched by content, never by
+  timestamp, so a row written in the backup's last second or after the clock stepped back
+  is kept. The Employees page shows the last backup and
   the last client deletion, each with when and by whom, read from the audit log.
-- **Old databases are refused, not upgraded.** A v3 or v4 database is refused at start
-  (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
+- **Old databases are refused, not upgraded.** A v3 or v4 database is refused when its
+  company is opened at login (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
   and the owner moves that company's folder away and enrols again. A
   `signatures.db` directly in the base folder (made before companies) is ignored. No key file is read.
 - **Two known limits, documented instead of built.** Removing an employee does not change
