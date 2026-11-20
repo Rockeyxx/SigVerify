@@ -402,7 +402,7 @@ def test_error_inside_the_transaction_rolls_everything_back(db, db_path):
     rec = db.get_client_record("c1", a)
     assert len(rec["spatial"]) == 5
     assert np.array_equal(rec["spatial"][2], first[2])
-    assert [e["event"] for e in db.get_log_events(event=None)] == ["enrol"]   # the log rolled back too
+    assert [e["event"] for e in db.get_log_events(event=None) if e["client_key"]] == ["enrol"]   # the log rolled back too
 
 
 def test_reenrolment_replaces_old_templates_and_keeps_enrolled_at(db, db_path):

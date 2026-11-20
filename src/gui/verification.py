@@ -304,6 +304,7 @@ class VerificationPanel(QWidget):
             client_id, spatial_origin if use_image else None, use_pen,
             self._pen_capture_device if use_pen else None)
         if problems:
+            storage.log_verify_refused(client_id, self.current_employee_username or "unknown", problems)
             self._show_idle_message("\n".join(problems))
             return
 

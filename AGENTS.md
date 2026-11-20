@@ -636,7 +636,9 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 - Audit log: record every verification event — `User ID, Timestamp,
   Modality State, Similarity Score, Decision`, plus `routing`, `degraded`, `reasons`,
   `model_version` and `threshold` — plaintext and queryable. Enrolments, re-enrolments,
-  deletions and every refused attempt are logged too, each with its employee.
+  deletions, every refused attempt, every account change (`employee added`, `password reset`,
+  `employee removed`, `profile changed`, never the password itself) and every `backup` are
+  logged too, each with its employee. Only `verify` rows count as verifications.
 - **The login password unlocks the data (one key slot per employee).** The random data
   key is stored only wrapped, once per employee, by a key derived with scrypt
   (`DatabaseManager.KDF_N = 2**17`) from that employee's password. Unwrapping is the
@@ -674,9 +676,11 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 - **Stale sets and the tablet.** A reference set holding any row whose `model_version`
   differs from `MODEL_VERSION` is stale and must be re-enrolled, not scored against. The
   pen set stores the tablet model and operating system it was signed on, and a signing
-  from another model or system is refused.
+  from another model or system is refused. Both refusals are logged as a `verify refused`
+  event with the reasons shown, and are not counted.
 - **Backup and restore.** Only the admin backs up, and a backup is a consistent copy of
-  the encrypted database, created owner-only (mode 0600) and never over an existing file.
+  the encrypted database, created owner-only (mode 0600 on Linux and macOS; Windows ignores
+  the mode) and never over an existing file.
   It opens with the same passwords. Only the admin restores (anyone on a new install with
   no employees), and `DatabaseManager.restore_from` checks this itself. A restore is
   checked on a scratch copy first: a backup holding a trigger, a view or a table this app

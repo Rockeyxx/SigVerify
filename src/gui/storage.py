@@ -476,6 +476,13 @@ def log_replay_refused(client_id: str, employee_username: str, probe_fingerprint
     _get_db().log_replay_refused(_norm(client_id), client_id.strip(), emp_id, probe_fingerprints)
 
 
+def log_verify_refused(client_id: str, employee_username: str, reasons: list) -> None:
+    """Log a verification refused before it ran (stale set, other tablet), with the reasons
+    shown; not a verdict, not counted. Logged as the logged-in employee, like log_replay_refused."""
+    emp_id = _actor(employee_username)
+    _get_db().log_verify_refused(_norm(client_id), client_id.strip(), emp_id, reasons)
+
+
 def get_verification_log(employee_username: str = None) -> list:
     ok, emp_id = _narrowing_id(employee_username)
     if not ok:

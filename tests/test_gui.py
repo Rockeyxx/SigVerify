@@ -437,6 +437,10 @@ def test_stale_set_is_refused_with_the_message_and_verify_is_not_started(app, db
     assert fake_workers == []
     text = panel.resultDisplay.text()
     assert "re-enrol" in text and "\n" in text and panel.verifyButton.isEnabled()
+    row = storage.get_audit_log()[-1]            # every refused attempt is logged
+    assert (row["event"], row["client_key"], row["employee"]) == ("verify refused", "c", "alice")
+    assert row["reasons"] == text.split("\n")
+    assert storage.get_verification_stats()["total"] == 0
 
 
 def test_pen_probe_from_another_tablet_is_refused(app, db, fake_workers, monkeypatch):
@@ -451,6 +455,9 @@ def test_pen_probe_from_another_tablet_is_refused(app, db, fake_workers, monkeyp
     panel.capture_pen_probe()
     panel.run_verification()
     assert fake_workers == [] and "Wacom One" in panel.resultDisplay.text()
+    row = storage.get_audit_log()[-1]
+    assert (row["event"], row["employee"]) == ("verify refused", "alice")
+    assert row["reasons"] == panel.resultDisplay.text().split("\n")
     same = {**other, "os": "Windows", "device_model": "XPPen Deco 640", "qt_platform": "windows"}
     monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: same)
     panel.capture_pen_probe()

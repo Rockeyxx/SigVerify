@@ -57,7 +57,8 @@ PASSPHRASE_ENV_VAR = "SIGVER_DB_PASSPHRASE"   # tests and CI only
 SCHEMA_VERSION = 5
 WRAP_AAD = b"sigverify-dek-v2"
 
-# Audit events. "verify" rows carry a decision; the others record who changed a client.
+# Audit events. "verify" rows carry a decision; the others record who changed a client or
+# an account, or who was refused. Only "verify" rows are counted as verifications.
 EVENT_VERIFY = "verify"
 EVENT_ENROL = "enrol"
 EVENT_REENROL = "re-enrol"
@@ -66,6 +67,12 @@ EVENT_REENROL_REFUSED = "re-enrol refused"
 EVENT_DELETE_REFUSED = "delete refused"
 EVENT_RESTORE = "restore"
 EVENT_REPLAY_REFUSED = "replay refused"
+EVENT_VERIFY_REFUSED = "verify refused"
+EVENT_EMPLOYEE_ADDED = "employee added"
+EVENT_PASSWORD_RESET = "password reset"
+EVENT_EMPLOYEE_REMOVED = "employee removed"
+EVENT_PROFILE_CHANGED = "profile changed"
+EVENT_BACKUP = "backup"
 
 
 class DatabaseLockedError(RuntimeError):
@@ -413,6 +420,9 @@ class DatabaseManager:
                 "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
                 "VALUES ('employee', ?, ?, ?, ?, ?)", (cur.lastrowid,) + slot)
             emp_id = cur.lastrowid
+            # The first account (the admin) is logged as added by itself.
+            self._log_event(conn, EVENT_EMPLOYEE_ADDED, None, None, emp_id if first else created_by,
+                            [f"{username} (admin)" if first else username])
         self._dek = dek
         return emp_id
 
@@ -475,7 +485,8 @@ class DatabaseManager:
         dek = self._require_key()
         with closing(self.get_connection()) as conn:
             row = conn.execute(
-                "SELECT id, is_admin FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
+                "SELECT id, is_admin, username, full_name FROM employees "
+                "WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((old_username or "").strip(),),
             ).fetchone()
             if row is None:
@@ -514,6 +525,12 @@ class DatabaseManager:
                 (new_full_name, new_username, emp_id))
             if slot is not None:
                 self._replace_slot(conn, emp_id, slot)
+            changes = [text for changed, text in (
+                (new_full_name != row[3], "name changed"),
+                (new_username != row[2], f"username {row[2]} -> {new_username}"),
+                (slot is not None, "password changed")) if changed]   # never the password itself
+            if changes:
+                self._log_event(conn, EVENT_PROFILE_CHANGED, None, None, emp_id, changes)
         return {"id": emp_id, "username": new_username, "full_name": new_full_name, "is_admin": bool(row[1])}
 
     @staticmethod
@@ -530,7 +547,7 @@ class DatabaseManager:
             if not self._is_admin(conn, admin_id):
                 raise PermissionError("Only the admin can reset a password")
             row = conn.execute(
-                "SELECT id FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
+                "SELECT id, username FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((username or "").strip(),)).fetchone()
             if row is None:
                 raise LookupError("Employee not found")
@@ -538,6 +555,7 @@ class DatabaseManager:
                 # Otherwise anyone at an unlocked admin session could take the account over.
                 raise ValueError("Change your own password in your profile, with your current password")
             self._replace_slot(conn, row[0], slot)
+            self._log_event(conn, EVENT_PASSWORD_RESET, None, None, admin_id, [row[1]])
 
     def remove_employee(self, admin_id: int, username: str) -> None:
         """The admin removes an employee: their key slot is deleted and they cannot log in.
@@ -546,7 +564,7 @@ class DatabaseManager:
             if not self._is_admin(conn, admin_id):
                 raise PermissionError("Only the admin can remove an employee")
             row = conn.execute(
-                "SELECT id FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
+                "SELECT id, username FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((username or "").strip(),)).fetchone()
             if row is None:
                 raise LookupError("Employee not found")
@@ -554,6 +572,7 @@ class DatabaseManager:
                 raise ValueError("The admin cannot remove their own account")
             conn.execute("DELETE FROM key_slots WHERE employee_id = ?", (row[0],))
             conn.execute("UPDATE employees SET active = 0 WHERE id = ?", (row[0],))
+            self._log_event(conn, EVENT_EMPLOYEE_REMOVED, None, None, admin_id, [row[1]])
 
     # --------------------------------------------------------------- clients
     @staticmethod
@@ -928,6 +947,13 @@ class DatabaseManager:
                 (EVENT_REPLAY_REFUSED, user_id, display_name, employee_id, _now_local(),
                  json.dumps(list(probe_hashes)) if probe_hashes else None))
 
+    def log_verify_refused(self, user_id: str, display_name: str, employee_id: int, reasons) -> None:
+        """A verification refused before verify() ran (a stale reference set, a pen probe
+        from another tablet), with the reasons shown. Not a verdict: it is not counted and
+        not listed with the verifications (get_log_events' default)."""
+        with self._transaction() as conn:
+            self._log_event(conn, EVENT_VERIFY_REFUSED, user_id, display_name, employee_id, reasons)
+
     def is_replayed_probe(self, user_id: str, probe_hashes, window_days: float = REPLAY_WINDOW_DAYS,
                           now: datetime = None) -> bool:
         """
@@ -964,7 +990,8 @@ class DatabaseManager:
 
     def get_log_events(self, employee_id: int = None, user_id: str = None,
                        newest_first: bool = False, limit: int = None, event: str = EVENT_VERIFY) -> list:
-        """Audit rows, oldest first. event=None returns every kind (verify, enrol, re-enrol, delete, refusals)."""
+        """Audit rows, oldest first. event=None returns every kind (verify, enrol, re-enrol, delete,
+        refusals, account changes, backup, restore)."""
         sql = """SELECT a.user_id, a.client_display_name, a.decision, a.similarity_score,
                         a.modality_state, COALESCE(e.username, a.employee_label, ''), a.timestamp,
                         a.routing, a.degraded, a.reasons, a.model_version, a.threshold, a.event
@@ -1015,6 +1042,8 @@ class DatabaseManager:
         except BaseException:
             os.unlink(dest_path)
             raise
+        with self._transaction() as conn:
+            self._log_event(conn, EVENT_BACKUP, None, None, actor_id, [os.path.basename(dest_path)])
         return dest_path
 
     def restore_from(self, actor_id, backup_path: str, username: str, password: str) -> dict:

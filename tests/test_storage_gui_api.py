@@ -166,7 +166,7 @@ def test_writes_run_as_the_logged_in_employee_never_a_name_passed_in(people, tmp
         storage.append_verification_log("C", "Genuine", 90.0, "scan", "alice")
     assert storage.get_client("c")["spatial_embeddings"] == spatial()
     assert storage.authenticate_employee("alice", PW_A)[0]
-    assert [(e["event"], e["employee"]) for e in storage.get_audit_log()] == [("enrol", "alice")]
+    assert [(e["event"], e["employee"]) for e in storage.get_audit_log() if e["client_key"]] == [("enrol", "alice")]
 
 
 def test_writes_need_a_login(people):
@@ -243,7 +243,7 @@ def test_a_non_admin_cannot_replace_a_clients_references(people):
     # adding a set the client does not have yet is an enrolment, open to everyone
     assert storage.save_client_enrollment("shared", pen(), "bob", spatial_embeddings=None, spatial_origin="scan")[0]
     events = storage.get_audit_log()
-    assert [(e["event"], e["employee"]) for e in events] == [
+    assert [(e["event"], e["employee"]) for e in events if e["client_key"]] == [
         ("enrol", "alice"), ("re-enrol refused", "bob"), ("enrol", "bob")]
 
 
@@ -312,7 +312,8 @@ def test_only_the_admin_deletes_and_the_log_is_kept(people):
     assert storage.get_client("gone") is None and not storage.client_exists("gone")
     assert storage.get_last_verification_for_client("gone", "bob") is not None
     assert storage.delete_client("never existed", "alice") == (False, "No client 'never existed'")
-    assert [e["event"] for e in storage.get_audit_log()] == ["enrol", "verify", "delete refused", "delete"]
+    assert [e["event"] for e in storage.get_audit_log() if e["client_key"]] == [
+        "enrol", "verify", "delete refused", "delete"]
 
 
 def test_count_clients_enrolled_this_month(people):
@@ -382,7 +383,8 @@ def test_audit_log_keeps_routing_degraded_reasons_model_version_threshold(people
     assert first["model_version"] == "v0.10.0" and first["threshold"] == 0.7564
     assert second["routing"] is None and second["degraded"] is None and second["reasons"] is None
     rows = sqlite3.connect(storage._get_db().db_path).execute(
-        "SELECT routing, degraded, model_version, threshold FROM audit_log ORDER BY id").fetchall()
+        "SELECT routing, degraded, model_version, threshold FROM audit_log WHERE event = 'verify' ORDER BY id"
+    ).fetchall()
     assert rows[0] == ("fused", 1, "v0.10.0", 0.7564)       # plaintext and queryable
 
 

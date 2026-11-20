@@ -74,7 +74,9 @@ def file_bytes(p):
 
 
 def events(db, **kw):
-    return [(e["event"], e["client_key"], e["employee"]) for e in db.get_log_events(event=None, **kw)]
+    """Client rows only: account rows (employee added, ...) have no client."""
+    return [(e["event"], e["client_key"], e["employee"]) for e in db.get_log_events(event=None, **kw)
+            if e["client_key"] is not None]
 
 
 # ------------------------------------------------------------ key slots (item 6)
@@ -345,7 +347,57 @@ def test_a_refused_replay_is_logged_with_its_hashes_and_not_counted(db, staff, p
     assert events(db) == [("replay refused", "c1", "admin")]
     assert db.get_log_events() == [] and db.count_log_events() == (0, 0)
     with closing(sqlite3.connect(path)) as conn:
-        assert json.loads(conn.execute("SELECT probe_hashes FROM audit_log").fetchone()[0]) == [probe]
+        assert json.loads(conn.execute(
+            "SELECT probe_hashes FROM audit_log WHERE event = 'replay refused'").fetchone()[0]) == [probe]
+
+
+def test_a_refused_verification_is_logged_with_its_reasons_and_not_counted(db, staff):
+    _, bob = staff
+    db.log_verify_refused("c1", "C1", bob, ["The paper set is stale: re-enrol"])
+    row = db.get_log_events(event=None)[-1]
+    assert (row["event"], row["client_key"], row["employee"]) == ("verify refused", "c1", "bob")
+    assert row["reasons"] == ["The paper set is stale: re-enrol"] and row["decision"] is None
+    assert db.get_log_events() == [] and db.count_log_events() == (0, 0)
+
+
+# ------------------------------------------- account changes (#23 item 19)
+def account_rows(db):
+    return [(e["event"], e["employee"], e["reasons"]) for e in db.get_log_events(event=None)
+            if e["client_key"] is None]
+
+
+def test_adding_employees_is_logged_with_who_added_them(db, staff):
+    assert account_rows(db) == [("employee added", "admin", ["admin (admin)"]),
+                                ("employee added", "admin", ["bob"])]
+    assert db.count_log_events() == (0, 0)
+
+
+def test_a_password_reset_and_a_removal_are_logged_by_the_admin(db, staff):
+    admin, _ = staff
+    db.reset_password(admin, "bob", "bob-new-password-1")
+    db.remove_employee(admin, "bob")
+    assert account_rows(db)[-2:] == [("password reset", "admin", ["bob"]),
+                                     ("employee removed", "admin", ["bob"])]
+    assert db.count_log_events() == (0, 0)
+
+
+def test_a_profile_change_is_logged_without_the_password(db, staff, path):
+    _, bob = staff
+    db.update_employee(bob, "bob", "Robert", "rob", "bob-new-password-1", current_password=PW_BOB)
+    assert account_rows(db)[-1] == ("profile changed", "rob",
+                                    ["name changed", "username bob -> rob", "password changed"])
+    n = len(account_rows(db))
+    db.update_employee(bob, "rob", "Robert", "rob")             # nothing changed: no row
+    assert len(account_rows(db)) == n
+    assert b"bob-new-password-1" not in file_bytes(path)
+    assert db.count_log_events() == (0, 0)
+
+
+def test_a_backup_is_logged_by_the_admin(db, staff, tmp_path):
+    admin, _ = staff
+    db.backup_to(admin, str(tmp_path / "copy.db"))
+    assert account_rows(db)[-1] == ("backup", "admin", ["copy.db"])
+    assert db.count_log_events() == (0, 0)
 
 
 def test_the_log_stores_the_hash_never_the_embedding(db, staff, path):
