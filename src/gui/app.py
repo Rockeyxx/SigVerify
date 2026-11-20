@@ -6,9 +6,11 @@ Main Application — Signature Verification System
 import torch  # noqa: F401 (imported here only to force early DLL init)
 import cv2    # noqa: F401
 
+import os
 import sys
 import traceback
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QMessageBox,
     QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QLineEdit
@@ -25,6 +27,8 @@ from src.gui.styles import STYLE
 from src.gui.workers import WarmUpWorker, wait_for_workers
 import src.gui.storage as storage
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_PATH = os.path.join(BASE_DIR, "assets", "signature_icon.png")
 STORAGE_ERROR_TITLE = "Cannot open the signature data"
 RESTORED_NOTICE = "Backup restored. Log in again."
 
@@ -40,6 +44,20 @@ def install_error_dialog():
     sys.excepthook = show_unexpected_error
 
 
+def create_icon_label(size=160):
+    icon_label = QLabel()
+    pixmap = QPixmap(ICON_PATH)
+    if pixmap.isNull():
+        icon_label.setText("✎")
+        icon_label.setStyleSheet("font-size: 48px; color: #3d7dfc;")
+        print(f"[WARNING] Icon not found at: {ICON_PATH}")
+    else:
+        scaled = pixmap.scaledToWidth(size, Qt.SmoothTransformation)
+        icon_label.setPixmap(scaled)
+    icon_label.setAlignment(Qt.AlignHCenter)
+    return icon_label
+
+
 def centered(content_layout):
     outer = QVBoxLayout()
     outer.addStretch(1)
@@ -50,6 +68,40 @@ def centered(content_layout):
     outer.addLayout(row)
     outer.addStretch(1)
     return outer
+
+
+class WelcomeScreen(QWidget):
+    def __init__(self, go_to_login):
+        super().__init__()
+        content = QVBoxLayout()
+        content.setSpacing(10)
+        content.setAlignment(Qt.AlignHCenter)
+
+        content.addWidget(create_icon_label())
+        content.addSpacing(8)
+
+        title = QLabel("Signature Verification System")
+        title.setProperty("role", "hero-title")
+        title.setAlignment(Qt.AlignHCenter)
+        content.addWidget(title)
+
+        subtitle = QLabel("TEAM 06  •  EE 499 SENIOR DESIGN PROJECT")
+        subtitle.setProperty("role", "hero-subtitle")
+        subtitle.setAlignment(Qt.AlignHCenter)
+        content.addWidget(subtitle)
+
+        content.addSpacing(30)
+
+        buttons_row = QHBoxLayout()
+        login_button = QPushButton("Login")
+        login_button.setProperty("role", "primary")
+        login_button.setFixedWidth(180)
+        login_button.setFixedHeight(46)
+        login_button.clicked.connect(go_to_login)
+        buttons_row.addWidget(login_button)
+
+        content.addLayout(buttons_row)
+        self.setLayout(centered(content))
 
 
 class LoginScreen(QWidget):
@@ -257,16 +309,19 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _build_auth_stack(self, first_run=False):
-        """First run: the admin-account screen first. Afterwards: Login only, no Register."""
+        """First run: only the admin-account screen. Afterwards: Welcome and Login, no Register."""
         self.auth_stack = QStackedWidget()
         self.login_screen = LoginScreen(on_login_success=self._handle_login_success)
         if first_run:
-            self.auth_stack.addWidget(RegisterScreen(
+            start = RegisterScreen(
                 on_register_success=lambda: self._handle_login_success(storage.current_employee()),
                 on_restored=self._handle_restored,
-            ))
+            )
+        else:
+            start = WelcomeScreen(go_to_login=lambda: self.auth_stack.setCurrentWidget(self.login_screen))
+        self.auth_stack.addWidget(start)
         self.auth_stack.addWidget(self.login_screen)
-        self.auth_stack.setCurrentIndex(0)
+        self.auth_stack.setCurrentWidget(start)
         self.setCentralWidget(self.auth_stack)
 
     def _show_login(self, notice=""):

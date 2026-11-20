@@ -532,13 +532,6 @@ def test_main_installs_the_error_dialog(monkeypatch):
     assert sys.excepthook is app_module.show_unexpected_error
 
 
-def test_later_starts_open_on_login(db, make_window):
-    storage.logout()
-    window = make_window()
-    assert window.auth_stack.currentWidget() is window.login_screen
-    assert window.auth_stack.count() == 1
-
-
 def test_logout_locks_the_signature_data(db, make_window):
     storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512)])
     storage.logout()
