@@ -397,6 +397,36 @@ def test_replay_audit_row_stores_the_hashes_and_a_first_round_sign_again_is_refu
     assert events[-1][1] == [h for e, h in events if e == "verify"][0]
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_the_visit_is_logged_before_it_is_shown_and_a_log_error_frees_the_button(app, db, fake_workers,
+                                                                              monkeypatch, replay):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    panel = _panel()
+    panel._pending_client_id = "c"
+    panel._pending_images, panel._pending_trajectories = "probe.png", _trajectory()
+    if replay:
+        panel._on_verify_success(dict(RESULT))
+    panel.resultDisplay.setText("Processing…")
+
+    def broken(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(storage, "log_replay_refused" if replay else "append_verification_log", broken)
+    panel.verifyButton.setEnabled(False)
+    panel.verifyButton.setText("Verifying…")
+    with pytest.raises(RuntimeError):
+        panel._on_verify_success(dict(RESULT))
+    assert panel.verifyButton.isEnabled() and panel.verifyButton.text() == "Verify"
+    assert panel.resultDisplay.text() == "Processing…"      # nothing shown that was not logged
+
+
+def test_a_refused_confirm_says_nothing_was_added(app, db):
+    panel = _panel()
+    panel._last_accepted_client, panel._last_accepted_origin = "gone", "scan"
+    panel._last_accepted_signings = ["x"]
+    panel._on_confirmed([{"spatial": _b64(512), "temporal": _b64(128)}])
+    assert panel.modalityStateLabel.text() == "Nothing was added to the client's references."
+
+
 def test_replay_check_fails_loudly_when_the_model_returns_no_probe_embeddings(app, db, fake_workers):
     storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     panel = _panel()
