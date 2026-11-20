@@ -364,7 +364,7 @@ SPATIAL_DECISION_THRESHOLD = 0.8387     # Measured paper-alone threshold (EER po
 # forgeries. No fixed pen-alone threshold meets FAR 5% on every new collection (their FAR 5% points
 # run from 0.72 to 0.83); the deployment's own writers set it.
 TEMPORAL_DECISION_THRESHOLD = 0.7900    # Calibrated temporal branch threshold (EER on validation)
-# Fused threshold, set by campaign rule D6 on our own XPPen tablet and phone-scanner-app paper: the EER point
+# Fused threshold, set by campaign rule D6 on our own XPPen tablet and paper (phone app and flatbed): the EER point
 # of 0.4*s + 0.6*t on 18 in-house writers at one sitting (FAR 2.78%, FRR 1.60%, 36 skilled
 # forgeries; ENG_REPORT F43). The SONOF value let 4 of 36 forgeries through there. On the
 # public paired sets it trades FRR for FAR: SONOF FAR 2.53%, FRR 10.17%; NFI 2.23%, 6.92%.
