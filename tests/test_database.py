@@ -1,6 +1,7 @@
 """Issue #33 at the database level: key slots per employee, the admin role, company-wide
 clients with an audit trail, the pen set kept on re-save, stale sets, the replay check,
 backup / restore, and the migration of v3 / v4 databases. Temporary databases only."""
+import itertools
 import json
 import os
 import shutil
@@ -534,23 +535,39 @@ def test_restore_stops_if_the_live_copy_cannot_be_made(db, staff, path, tmp_path
     assert file_bytes(path) == live
 
 
-def test_the_restored_database_logs_the_restore(db, staff, path, tmp_path):
+def _set_clock(monkeypatch, start, step=1):
+    """Every audit row written from now on is `step` seconds after the one before."""
+    import src.database.db_manager as dbm
+    ticks = itertools.count()
+    monkeypatch.setattr(dbm, "_now_local",
+                        lambda: (start + timedelta(seconds=step * next(ticks))).isoformat(timespec="seconds"))
+
+
+def audit_events(p):
+    with closing(sqlite3.connect(p)) as conn:
+        return [e for (e,) in conn.execute("SELECT event FROM audit_log ORDER BY id")]
+
+
+def test_the_restored_database_logs_the_restore(db, staff, path, tmp_path, monkeypatch):
     admin, _ = staff
+    _set_clock(monkeypatch, datetime(2030, 1, 1, 9, 0, 0))       # one second per row: never the same second
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.restore_from(admin, backup, "admin", PW_ADMIN)
     rows = [e for e in db.get_log_events(event=None) if e["event"] == "restore"]
     assert len(rows) == 1 and rows[0]["employee"] == "admin"
-    assert rows[0]["reasons"] == ["restored by admin from backup.db"]
+    # The backup's own "backup" row and the before-restore copy's are not in the backup.
+    assert rows[0]["reasons"] == ["restored by admin from backup.db", "2 audit rows not in the backup carried over"]
+    assert audit_events(path) == audit_events(backup) + ["backup", "backup", "restore"]
     assert not [e for e in DatabaseManager(backup).get_log_events(event=None) if e["event"] == "restore"]
 
 
-def test_a_restore_on_a_new_install_logs_new_install(db, staff, tmp_path):
+def test_a_restore_on_a_new_install_logs_who_restored_it(db, staff, tmp_path):
     backup = db.backup_to(staff[0], str(tmp_path / "backup.db"))
     (tmp_path / "new").mkdir()
     fresh = DatabaseManager(str(tmp_path / "new" / "signatures.db"))
     fresh.restore_from(None, backup, "admin", PW_ADMIN)
     rows = [e for e in fresh.get_log_events(event=None) if e["event"] == "restore"]
-    assert rows[0]["reasons"] == ["restored by new install from backup.db"]
+    assert rows[0]["reasons"] == ["restored by admin into a new database from backup.db"]
     assert not [f for f in os.listdir(tmp_path / "new") if ".before-restore-" in f]   # nothing to keep
 
 
@@ -692,20 +709,61 @@ def test_restore_preserves_audit_rows_newer_than_the_backup(db, staff, path, tmp
 
     restore_rows = [e for e in all_events if e["event"] == "restore"]
     assert len(restore_rows) == 1
-    assert any("2" in r for r in restore_rows[0]["reasons"])
+    assert restore_rows[0]["reasons"][1] == "4 audit rows not in the backup carried over"   # backup, delete, verify, backup
 
 
-def test_restore_carries_nothing_over_when_backup_is_newer_than_live_rows(db, staff, path, tmp_path):
+def test_restore_carries_a_live_row_written_in_the_same_second_as_the_backups_newest(db, staff, path, tmp_path,
+                                                                                     monkeypatch):
+    admin, _ = staff
+    _set_clock(monkeypatch, datetime(2030, 1, 1, 9, 0, 0), step=0)     # every row in the same second
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.delete_client("c1", admin)
+    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    assert audit_events(path) == audit_events(backup) + ["backup", "delete", "backup", "restore"]
+
+
+def test_restore_carries_a_live_row_written_after_the_clock_stepped_back(db, staff, path, tmp_path, monkeypatch):
     admin, _ = staff
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
-    with closing(sqlite3.connect(backup)) as conn:
-        conn.execute("UPDATE audit_log SET timestamp = '2099-01-01T00:00:00'")
-        conn.commit()
-
-    # No actions after backup. Restore immediately.
+    _set_clock(monkeypatch, datetime(2000, 1, 1, 9, 0, 0))             # older than every row in the backup
+    db.delete_client("c1", admin)
     db.restore_from(admin, backup, "admin", PW_ADMIN)
-    restore_rows = [e for e in db.get_log_events(event=None) if e["event"] == "restore"]
-    assert len(restore_rows) == 1
-    assert not any("audit rows carried over" in r for r in restore_rows[0]["reasons"])
+    assert audit_events(path) == audit_events(backup) + ["backup", "delete", "backup", "restore"]
+    assert [e["employee"] for e in db.get_log_events(event="delete")] == ["admin"]
 
+
+def test_restore_does_not_copy_rows_the_backup_already_holds(db, staff, path, tmp_path):
+    admin, _ = staff
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    db.log_verification("c1", "spatial", 85.0, "Genuine", employee_id=admin, display_name="C1", probe_hashes=["ab" * 32])
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    db.restore_from(admin, backup, "admin", PW_ADMIN)                  # again: nothing carried twice
+    assert audit_events(path) == audit_events(backup) + ["backup", "backup", "restore", "backup", "restore"]
+
+
+def test_a_restore_that_fails_after_the_carry_over_leaves_the_live_database_as_it_was(db, staff, path, tmp_path,
+                                                                                    monkeypatch):
+    admin, _ = staff
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    db.delete_client("c1", admin)                                     # newer live rows to carry
+    with closing(sqlite3.connect(path)) as conn:
+        before = conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+    real = DatabaseManager._log_event
+
+    def restore_row_fails(conn, event, *args):
+        if event == "restore":                                        # after the carry-over ran
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(conn, event, *args)
+    monkeypatch.setattr(db, "_log_event", restore_row_fails)
+    with pytest.raises(sqlite3.OperationalError):
+        db.restore_from(admin, backup, "admin", PW_ADMIN)
+    with closing(sqlite3.connect(path)) as conn:
+        after = conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+    assert after[:-1] == before and after[-1][14] == "backup"         # only the before-restore copy's row
+    assert not db.has_client("c1") and db.has_client("c2")
+    assert np.array_equal(db.get_client_record("c2")["spatial"][0], scan(9)[0])   # still unlocked, live key

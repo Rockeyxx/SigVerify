@@ -29,6 +29,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from collections import Counter
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta
 
@@ -73,6 +74,12 @@ EVENT_PASSWORD_RESET = "password reset"
 EVENT_EMPLOYEE_REMOVED = "employee removed"
 EVENT_PROFILE_CHANGED = "profile changed"
 EVENT_BACKUP = "backup"
+
+
+# The audit columns that say what happened: two rows equal in all of them are the same
+# event. restore_from carries a live row into the restored database unless the backup holds it.
+_AUDIT_IDENTITY = ("a.timestamp, a.event, a.user_id, a.client_display_name, a.decision, a.similarity_score, "
+                   "a.reasons, a.probe_hashes, a.modality_state, a.routing, a.threshold, a.model_version")
 
 
 class DatabaseLockedError(RuntimeError):
@@ -1057,14 +1064,18 @@ class DatabaseManager:
         is a sound SQLite database of the schema this code reads (an older one is refused),
         and `username` / `password` is an ADMIN of the backup whose key slot opens it. Then
         the live database is copied to `<name>.before-restore-<YYYYmmdd-HHMMSS>` beside it
-        (owner-only), a "restore" row is written into the scratch copy, and only then is the
-        live database replaced. A failure before the replacement leaves the live data as it
-        was (the owner-only copy adds one "backup" audit row to the live file). Afterwards the store is unlocked with the backup's key. Returns that admin's
-        employee dict.
+        (owner-only). Every live audit row the backup does not hold (compared by content, not
+        by time, so a row from the backup's last second or after the clock stepped back is
+        kept; the copy's own "backup" row is one of them) is added to the scratch copy in
+        live order, with employee_id NULL and the employee's username as employee_label, so a
+        restore never erases the log. Then a "restore" row (who, which file, how many rows
+        were carried) is written into the scratch copy, and only then is the live database
+        replaced. A failure before the replacement leaves the live data as it was (the
+        owner-only copy adds one "backup" audit row to the live file). Afterwards the store
+        is unlocked with the backup's key. Returns that admin's employee dict.
         Raises ValueError (not a usable backup), PermissionError (not an admin, wrong password).
         """
         live_admin = None
-        max_live_id = None
         if self.has_employees():
             with closing(self.get_connection()) as conn:
                 try:
@@ -1074,8 +1085,6 @@ class DatabaseManager:
                 if not is_admin:
                     raise PermissionError("Only the admin can restore a backup")
                 live_admin = conn.execute("SELECT username FROM employees WHERE id = ?", (actor_id,)).fetchone()[0]
-                row = conn.execute("SELECT MAX(id) FROM audit_log").fetchone()
-                max_live_id = row[0] if row else None
         if not os.path.isfile(backup_path):
             raise ValueError(f"No backup file at {backup_path}")
         scratch_dir = tempfile.mkdtemp(prefix="sigverify-restore-")
@@ -1121,53 +1130,37 @@ class DatabaseManager:
                     except FileExistsError:
                         n += 1
                         dest = f"{base}-{n}"
-            with closing(candidate.get_connection()) as conn:
-                row = conn.execute("SELECT MAX(timestamp) FROM audit_log").fetchone()
-                newest_backup_ts = row[0] if row else None
-            carried = 0
-            if max_live_id is not None:
-                with closing(self.get_connection()) as live_conn:
-                    if newest_backup_ts is not None:
-                        query = """
-                            SELECT a.user_id, a.client_display_name, NULL,
-                                   COALESCE(a.employee_label, e.username, ''),
-                                   a.modality_state, a.similarity_score, a.decision, a.timestamp,
-                                   a.routing, a.degraded, a.reasons, a.model_version, a.threshold,
-                                   a.event, a.probe_hashes
-                            FROM audit_log a
-                            LEFT JOIN employees e ON e.id = a.employee_id
-                            WHERE a.timestamp > ? AND a.id <= ?
-                            ORDER BY a.id ASC
-                        """
-                        params = (newest_backup_ts, max_live_id)
-                    else:
-                        query = """
-                            SELECT a.user_id, a.client_display_name, NULL,
-                                   COALESCE(a.employee_label, e.username, ''),
-                                   a.modality_state, a.similarity_score, a.decision, a.timestamp,
-                                   a.routing, a.degraded, a.reasons, a.model_version, a.threshold,
-                                   a.event, a.probe_hashes
-                            FROM audit_log a
-                            LEFT JOIN employees e ON e.id = a.employee_id
-                            WHERE a.id <= ?
-                            ORDER BY a.id ASC
-                        """
-                        params = (max_live_id,)
-                    newer_rows = live_conn.execute(query, params).fetchall()
-                if newer_rows:
-                    carried = len(newer_rows)
+            carried = []
+            if live_admin is not None:
+                # A row is carried unless the backup holds an identical one (by content, not by
+                # time: clocks repeat a second and step back). Counted, so a repeated row is too.
+                with closing(candidate.get_connection()) as conn:
+                    in_backup = Counter(conn.execute(f"SELECT {_AUDIT_IDENTITY} FROM audit_log a"))  # skylos: ignore[SKY-D211] module constant column list, no user input
+                with closing(self.get_connection()) as conn:
+                    for row in conn.execute(
+                            f"""SELECT {_AUDIT_IDENTITY}, a.employee_id, COALESCE(a.employee_label, e.username, ''),
+                                       a.degraded
+                                FROM audit_log a LEFT JOIN employees e ON e.id = a.employee_id
+                                ORDER BY a.id ASC"""):  # skylos: ignore[SKY-D211] module constant column list, no user input
+                        key = row[:12]
+                        if in_backup[key]:
+                            in_backup[key] -= 1
+                        else:
+                            carried.append(row)
+                if carried:
                     with candidate._transaction() as conn:
                         conn.executemany(
-                            """INSERT INTO audit_log (user_id, client_display_name, employee_id, employee_label,
-                                                     modality_state, similarity_score, decision, timestamp,
-                                                     routing, degraded, reasons, model_version, threshold,
-                                                     event, probe_hashes)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            newer_rows
-                        )
-            details = [f"restored by {live_admin or 'new install'} from {os.path.basename(backup_path)}"]
+                            """INSERT INTO audit_log (timestamp, event, user_id, client_display_name, decision,
+                                                     similarity_score, reasons, probe_hashes, modality_state,
+                                                     routing, threshold, model_version, employee_id,
+                                                     employee_label, degraded)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                            [r[:12] + r[13:] for r in carried])
+            source = os.path.basename(backup_path)
+            details = [f"restored by {live_admin} from {source}" if live_admin is not None
+                       else f"restored by {employee['username']} into a new database from {source}"]
             if carried:
-                details.append(f"{carried} newer audit rows carried over")
+                details.append(f"{len(carried)} audit rows not in the backup carried over")
             with candidate._transaction() as conn:
                 self._log_event(conn, EVENT_RESTORE, None, None, employee["id"], details)
             with closing(sqlite3.connect(scratch)) as src, closing(sqlite3.connect(self.db_path)) as dst:
