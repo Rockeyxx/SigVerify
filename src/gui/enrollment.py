@@ -125,6 +125,7 @@ class EnrollmentPanel(QWidget):
 
         self.clientStatusLabel = QLabel("Enter a client ID and click 'Load / New' to begin")
         self.clientStatusLabel.setProperty("role", "muted")
+        self.clientStatusLabel.setWordWrap(True)   # long messages must not widen the window
         layout.addWidget(self.clientStatusLabel)
 
         section2 = QLabel(f"IMAGE REFERENCES ({REQUIRED_IMAGE_REFERENCES} photos, "
@@ -188,6 +189,7 @@ class EnrollmentPanel(QWidget):
         layout.addWidget(self.deleteClientButton)
 
         self.statusLabel = QLabel("")
+        self.statusLabel.setWordWrap(True)
         layout.addWidget(self.statusLabel)
 
         layout.addStretch()
