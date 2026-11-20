@@ -1085,3 +1085,31 @@ def test_last_event_for_backup_and_delete_and_survives_restore(people, tmp_path)
     assert ev_del_after["employee"] == "alice"
     assert ev_del_after["client"] == "c"
 
+
+
+def test_a_restore_records_the_vault_name_when_the_backup_has_none(people, tmp_path, isolated_storage):
+    # An older backup with no recorded name: restoring it over a vault must leave that vault named.
+    folder = tmp_path / "bak"; folder.mkdir()
+    ok, path = storage.backup_database(str(folder), "alice")
+    assert ok
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("DELETE FROM company_info"); conn.commit()
+    assert DatabaseManager(path).company_name() is None
+    assert storage.restore_database(path, "alice", PW_A)[0]
+    assert storage._get_db().company_name() == storage.current_company()
+
+
+def test_a_folder_left_by_a_crash_does_not_block_the_vault_name(isolated_storage):
+    # A crash during registration (after mkdir, before company.txt) leaves an unlisted folder.
+    os.makedirs(os.path.join(storage._companies_dir(), "acme"))
+    with open(os.path.join(storage._companies_dir(), "acme", "signatures.db"), "wb") as f:
+        f.write(b"half-made")
+    assert storage.list_companies() == []
+    ok, msg = storage.create_company("Acme", "Ann Owner", "ann", "ann-password-1")
+    assert ok, msg
+    assert storage.list_companies() == ["Acme"]
+
+
+def test_a_listed_vault_still_blocks_its_name(people):
+    ok, msg = storage.create_company(storage.current_company(), "X Y", "xy", "xy-password-1")
+    assert not ok and "already exists" in msg

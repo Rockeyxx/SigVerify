@@ -653,7 +653,11 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   listed only after its owner exists. The name is also recorded inside the vault's
   database (`company_info`), so a backup carries it: a restore over a vault refuses a
   backup of another vault, and `restore_company` refuses a name other than the one the
-  backup records (a backup with no name recorded is allowed). Every `src/gui/storage.py`
+  backup records (a backup with no name recorded is allowed, and the vault's own name is
+  recorded after the restore). This check stops mistakes, not an attacker: the name is a plain
+  column that anyone with the file can edit, and opening the backup still needs its owner's
+  password. A folder with no `company.txt` (left by a crash during registration) is cleared
+  when that name is registered again. Every `src/gui/storage.py`
   call works on the current vault
   (`open_company`, `create_company`, `restore_company`) and raises `StorageLockedError`
   when none is chosen. Inside a vault the rules below hold unchanged.

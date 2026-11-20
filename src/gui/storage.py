@@ -288,6 +288,9 @@ def _new_company(company_name: str, fill) -> tuple:
     if _slug(name) in _WINDOWS_DEVICE_NAMES:
         return False, f"'{name}' is a name Windows keeps for a device. Choose another vault name."
     folder = _company_folder(name)
+    if os.path.isdir(folder) and not os.path.exists(os.path.join(folder, COMPANY_NAME_FILE)):
+        # Left by a crash during registration: unlisted, nobody can log into it.
+        shutil.rmtree(folder, ignore_errors=True)
     try:
         os.makedirs(_data_dir(), mode=0o700, exist_ok=True)
         os.makedirs(_companies_dir(), mode=0o700, exist_ok=True)
@@ -829,4 +832,6 @@ def restore_database(backup_path: str, username: str, password: str) -> tuple:
     except (OSError, sqlite3.Error) as e:   # disk full, unreadable file, locked database
         return False, f"The backup could not be restored: {e}"
     _session = emp
+    if _company:      # a backup made before names were recorded: the vault keeps its name
+        db.set_company_name(_company)
     return True, "Backup restored"
