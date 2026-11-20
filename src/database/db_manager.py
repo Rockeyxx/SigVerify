@@ -80,6 +80,9 @@ EVENT_BACKUP = "backup"
 # event. restore_from carries a live row into the restored database unless the backup holds it.
 _AUDIT_IDENTITY = ("a.timestamp, a.event, a.user_id, a.client_display_name, a.decision, a.similarity_score, "
                    "a.reasons, a.probe_hashes, a.modality_state, a.routing, a.threshold, a.model_version")
+_BACKUP_AUDIT_SQL = "SELECT " + _AUDIT_IDENTITY + " FROM audit_log a"
+_LIVE_AUDIT_SQL = ("SELECT " + _AUDIT_IDENTITY + ", a.employee_id, COALESCE(a.employee_label, e.username, ''), "
+                   "a.degraded FROM audit_log a LEFT JOIN employees e ON e.id = a.employee_id ORDER BY a.id ASC")
 
 
 class DatabaseLockedError(RuntimeError):
@@ -1160,13 +1163,9 @@ class DatabaseManager:
                 # A row is carried unless the backup holds an identical one (by content, not by
                 # time: clocks repeat a second and step back). Counted, so a repeated row is too.
                 with closing(candidate.get_connection()) as conn:
-                    in_backup = Counter(conn.execute(f"SELECT {_AUDIT_IDENTITY} FROM audit_log a"))  # skylos: ignore[SKY-D211] module constant column list, no user input
+                    in_backup = Counter(conn.execute(_BACKUP_AUDIT_SQL))  # skylos: ignore[SKY-D211] module constant query, no user input
                 with closing(self.get_connection()) as conn:
-                    for row in conn.execute(
-                            f"""SELECT {_AUDIT_IDENTITY}, a.employee_id, COALESCE(a.employee_label, e.username, ''),
-                                       a.degraded
-                                FROM audit_log a LEFT JOIN employees e ON e.id = a.employee_id
-                                ORDER BY a.id ASC"""):  # skylos: ignore[SKY-D211] module constant column list, no user input
+                    for row in conn.execute(_LIVE_AUDIT_SQL):  # skylos: ignore[SKY-D211] module constant query, no user input
                         key = row[:12]
                         if in_backup[key]:
                             in_backup[key] -= 1
