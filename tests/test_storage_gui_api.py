@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime
 
 import numpy as np
@@ -950,3 +951,48 @@ def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, iso
     assert storage.current_company() == COMPANY and storage.get_client("c") is not None
     storage.open_company("Branch Two")
     assert storage.authenticate_employee("bob", PW_B)[0]                         # the backup's passwords
+
+
+def test_last_event_for_backup_and_delete_and_survives_restore(people, tmp_path):
+    assert storage.last_event(DatabaseManager.EVENT_BACKUP) is None
+    assert storage.last_event(DatabaseManager.EVENT_DELETE) is None
+
+    storage.save_client_enrollment("c", pen(), "alice", spatial_embeddings=spatial(5))
+
+    # Perform a backup
+    folder = tmp_path / "bak"
+    folder.mkdir()
+    ok, path = storage.backup_database(str(folder), "alice")
+    assert ok
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("UPDATE audit_log SET timestamp = '2026-01-01T00:00:00'")
+        conn.commit()
+    with closing(sqlite3.connect(storage._get_db().db_path)) as conn:
+        conn.execute("UPDATE audit_log SET timestamp = '2026-01-01T00:00:00'")
+        conn.commit()
+
+    ev_bak = storage.last_event(DatabaseManager.EVENT_BACKUP)
+    assert ev_bak is not None
+    assert ev_bak["employee"] == "alice"
+    assert ev_bak["timestamp"]
+    assert ev_bak["client"] is None
+
+    # Delete client c
+    ok, _ = storage.delete_client("c")
+    assert ok
+    ev_del = storage.last_event(DatabaseManager.EVENT_DELETE)
+    assert ev_del is not None
+    assert ev_del["employee"] == "alice"
+    assert ev_del["client"] == "c"
+    assert ev_del["timestamp"]
+
+    # Restore the backup
+    ok, msg = storage.restore_database(path, "alice", PW_A)
+    assert ok
+
+    # After restore, last_event(delete) still returns the pre-restore delete with the right username
+    ev_del_after = storage.last_event(DatabaseManager.EVENT_DELETE)
+    assert ev_del_after is not None
+    assert ev_del_after["employee"] == "alice"
+    assert ev_del_after["client"] == "c"
+

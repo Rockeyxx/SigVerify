@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
 )
 
 import src.gui.storage as storage
+from src.database.db_manager import EVENT_BACKUP, EVENT_DELETE
 
 
 def restore_from_backup(parent, new_company=False):
@@ -109,6 +110,13 @@ class EmployeesPage(QWidget):
         backup_row.addStretch()
         layout.addLayout(backup_row)
 
+        self.lastBackupLabel = QLabel("Last backup: never")
+        self.lastBackupLabel.setWordWrap(True)
+        self.lastDeleteLabel = QLabel("Last client deletion: none")
+        self.lastDeleteLabel.setWordWrap(True)
+        layout.addWidget(self.lastBackupLabel)
+        layout.addWidget(self.lastDeleteLabel)
+
         self.statusLabel = QLabel("")
         self.statusLabel.setWordWrap(True)
         layout.addWidget(self.statusLabel)
@@ -131,6 +139,23 @@ class EmployeesPage(QWidget):
             self.table.setItem(row, 0, QTableWidgetItem(emp["full_name"]))
             self.table.setItem(row, 1, QTableWidgetItem(emp["username"]))
             self.table.setItem(row, 2, QTableWidgetItem("Yes" if emp["is_admin"] else "No"))
+        self._refresh_evidence()
+
+    def _refresh_evidence(self):
+        ev_bak = storage.last_event(EVENT_BACKUP)
+        if ev_bak and ev_bak.get("timestamp"):
+            by = ev_bak.get("employee") or "unknown"
+            self.lastBackupLabel.setText(f"Last backup: {ev_bak['timestamp']} by {by}")
+        else:
+            self.lastBackupLabel.setText("Last backup: never")
+
+        ev_del = storage.last_event(EVENT_DELETE)
+        if ev_del and ev_del.get("timestamp"):
+            by = ev_del.get("employee") or "unknown"
+            client = ev_del.get("client") or "unknown"
+            self.lastDeleteLabel.setText(f"Last client deletion: {client} at {ev_del['timestamp']} by {by}")
+        else:
+            self.lastDeleteLabel.setText("Last client deletion: none")
 
     def _selected_username(self):
         row = self.table.currentRow()
@@ -205,6 +230,7 @@ class EmployeesPage(QWidget):
         if not ok:
             self._set_error(result)
             return
+        self.refresh()
         self._set_success(f"Backup saved to {result}")
 
     def _handle_restore(self):
@@ -215,6 +241,7 @@ class EmployeesPage(QWidget):
         if not ok:
             self._set_error(message)
             return
+        self.refresh()
         self.restored.emit()
 
     def _set_error(self, text):

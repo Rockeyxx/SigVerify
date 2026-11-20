@@ -644,3 +644,68 @@ def test_an_unknown_schema_version_is_refused(path):
         conn.execute("PRAGMA user_version = 2")
     with pytest.raises(RuntimeError, match="schema v2 is older than v5"):
         DatabaseManager(path)
+
+
+def test_restore_preserves_audit_rows_newer_than_the_backup(db, staff, path, tmp_path):
+    admin, _ = staff
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    with closing(db.get_connection()) as conn:
+        conn.execute("UPDATE audit_log SET timestamp = '2026-01-01T00:00:00'")
+        conn.commit()
+    with closing(sqlite3.connect(backup)) as conn:
+        conn.execute("UPDATE audit_log SET timestamp = '2026-01-01T00:00:00'")
+        conn.commit()
+
+    # Actions performed after backup:
+    # 1. Delete client c1
+    db.delete_client("c1", admin)
+    # 2. Run a verification for c1
+    v_hashes = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+    db.log_verification("c1", "spatial", 85.0, "Genuine", employee_id=admin, display_name="C1", probe_hashes=v_hashes)
+
+    # Restore from backup
+    emp = db.restore_from(admin, backup, "admin", PW_ADMIN)
+    assert emp["is_admin"]
+
+    # Client c1 is back from the backup
+    assert db.has_client("c1")
+
+    # The restored audit log must contain:
+    # - the delete row (with employee_label = "admin", employee_id is None)
+    # - the verification row (with employee_label = "admin", employee_id is None, probe_hashes preserved)
+    # - the restore row (which records how many newer rows carried over)
+    all_events = db.get_log_events(event=None)
+    delete_rows = [e for e in all_events if e["event"] == "delete"]
+    assert len(delete_rows) == 1
+    assert delete_rows[0]["client_display_name"] == "C1"
+    assert delete_rows[0]["employee"] == "admin"
+
+    verify_rows = [e for e in all_events if e["event"] == "verify"]
+    assert len(verify_rows) == 1
+    assert verify_rows[0]["employee"] == "admin"
+
+    # Check probe_hashes was preserved in audit_log
+    with closing(db.get_connection()) as conn:
+        hashes = conn.execute("SELECT probe_hashes FROM audit_log WHERE event = 'verify'").fetchone()[0]
+        assert json.loads(hashes) == v_hashes
+
+    restore_rows = [e for e in all_events if e["event"] == "restore"]
+    assert len(restore_rows) == 1
+    assert any("2" in r for r in restore_rows[0]["reasons"])
+
+
+def test_restore_carries_nothing_over_when_backup_is_newer_than_live_rows(db, staff, path, tmp_path):
+    admin, _ = staff
+    db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    with closing(sqlite3.connect(backup)) as conn:
+        conn.execute("UPDATE audit_log SET timestamp = '2099-01-01T00:00:00'")
+        conn.commit()
+
+    # No actions after backup. Restore immediately.
+    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    restore_rows = [e for e in db.get_log_events(event=None) if e["event"] == "restore"]
+    assert len(restore_rows) == 1
+    assert not any("audit rows carried over" in r for r in restore_rows[0]["reasons"])
+

@@ -699,7 +699,11 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   by an admin of the backup. Then the live database is copied, owner-only, to
   `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside it (`-2`, `-3` on a clash), and
   a `restore` row naming who restored and from which file goes into the backup's audit
-  log. Nothing is replaced until all of that passes.
+  log. Nothing is replaced until all of that passes. A restore never rolls the audit log
+  back: every live audit row newer than the backup's newest row is carried into the
+  restored database first (with the employee's username as `employee_label`), and the
+  `restore` row says how many were carried. The Employees page shows the last backup and
+  the last client deletion, each with when and by whom, read from the audit log.
 - **Old databases are refused, not upgraded.** A v3 or v4 database is refused at start
   (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
   and the owner moves that company's folder away and enrols again. A

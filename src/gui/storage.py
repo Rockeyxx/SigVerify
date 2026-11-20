@@ -53,6 +53,8 @@ from cryptography.exceptions import InvalidTag
 
 from config import settings as _settings
 from src.database.db_manager import (
+    EVENT_BACKUP,
+    EVENT_DELETE,
     FINAL_DECISIONS,
     PASSPHRASE_ENV_VAR,
     DatabaseLockedError,
@@ -623,6 +625,20 @@ def get_last_verification_for_client(client_id: str, employee_username: str = No
     events = _get_db().get_log_events(
         employee_id=emp_id, user_id=_norm(client_id), newest_first=True, limit=1)
     return events[0] if events else None
+
+
+def last_event(event: str) -> dict | None:
+    """Return the newest audit row for `event` in the current company, or None."""
+    events = _get_db().get_log_events(event=event, newest_first=True, limit=1)
+    if not events:
+        return None
+    e = events[0]
+    return {
+        "timestamp": e["timestamp"],
+        "employee": e["employee"],
+        "client": e["client_display_name"],
+        "details": e["reasons"],
+    }
 
 
 def get_verification_stats(employee_username: str = None) -> dict:

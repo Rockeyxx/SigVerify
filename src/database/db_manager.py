@@ -124,6 +124,8 @@ _ONE_SHARED_SLOT_SQL = (
 
 class DatabaseManager:
     KDF_N = 2 ** 17  # scrypt cost for every key slot; tests lower it for speed
+    EVENT_BACKUP = EVENT_BACKUP
+    EVENT_DELETE = EVENT_DELETE
 
     def __init__(self, db_path="signatures.db", passphrase=None):
         """
@@ -1062,6 +1064,7 @@ class DatabaseManager:
         Raises ValueError (not a usable backup), PermissionError (not an admin, wrong password).
         """
         live_admin = None
+        max_live_id = None
         if self.has_employees():
             with closing(self.get_connection()) as conn:
                 try:
@@ -1071,6 +1074,8 @@ class DatabaseManager:
                 if not is_admin:
                     raise PermissionError("Only the admin can restore a backup")
                 live_admin = conn.execute("SELECT username FROM employees WHERE id = ?", (actor_id,)).fetchone()[0]
+                row = conn.execute("SELECT MAX(id) FROM audit_log").fetchone()
+                max_live_id = row[0] if row else None
         if not os.path.isfile(backup_path):
             raise ValueError(f"No backup file at {backup_path}")
         scratch_dir = tempfile.mkdtemp(prefix="sigverify-restore-")
@@ -1116,9 +1121,55 @@ class DatabaseManager:
                     except FileExistsError:
                         n += 1
                         dest = f"{base}-{n}"
+            with closing(candidate.get_connection()) as conn:
+                row = conn.execute("SELECT MAX(timestamp) FROM audit_log").fetchone()
+                newest_backup_ts = row[0] if row else None
+            carried = 0
+            if max_live_id is not None:
+                with closing(self.get_connection()) as live_conn:
+                    if newest_backup_ts is not None:
+                        query = """
+                            SELECT a.user_id, a.client_display_name, NULL,
+                                   COALESCE(a.employee_label, e.username, ''),
+                                   a.modality_state, a.similarity_score, a.decision, a.timestamp,
+                                   a.routing, a.degraded, a.reasons, a.model_version, a.threshold,
+                                   a.event, a.probe_hashes
+                            FROM audit_log a
+                            LEFT JOIN employees e ON e.id = a.employee_id
+                            WHERE a.timestamp > ? AND a.id <= ?
+                            ORDER BY a.id ASC
+                        """
+                        params = (newest_backup_ts, max_live_id)
+                    else:
+                        query = """
+                            SELECT a.user_id, a.client_display_name, NULL,
+                                   COALESCE(a.employee_label, e.username, ''),
+                                   a.modality_state, a.similarity_score, a.decision, a.timestamp,
+                                   a.routing, a.degraded, a.reasons, a.model_version, a.threshold,
+                                   a.event, a.probe_hashes
+                            FROM audit_log a
+                            LEFT JOIN employees e ON e.id = a.employee_id
+                            WHERE a.id <= ?
+                            ORDER BY a.id ASC
+                        """
+                        params = (max_live_id,)
+                    newer_rows = live_conn.execute(query, params).fetchall()
+                if newer_rows:
+                    carried = len(newer_rows)
+                    with candidate._transaction() as conn:
+                        conn.executemany(
+                            """INSERT INTO audit_log (user_id, client_display_name, employee_id, employee_label,
+                                                     modality_state, similarity_score, decision, timestamp,
+                                                     routing, degraded, reasons, model_version, threshold,
+                                                     event, probe_hashes)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            newer_rows
+                        )
+            details = [f"restored by {live_admin or 'new install'} from {os.path.basename(backup_path)}"]
+            if carried:
+                details.append(f"{carried} newer audit rows carried over")
             with candidate._transaction() as conn:
-                self._log_event(conn, EVENT_RESTORE, None, None, employee["id"], [
-                    f"restored by {live_admin or 'new install'} from {os.path.basename(backup_path)}"])
+                self._log_event(conn, EVENT_RESTORE, None, None, employee["id"], details)
             with closing(sqlite3.connect(scratch)) as src, closing(sqlite3.connect(self.db_path)) as dst:
                 src.backup(dst)
             self._dek = candidate._dek

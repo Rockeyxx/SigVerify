@@ -1145,3 +1145,27 @@ def test_dashboard_recent_activity_is_company_wide_and_names_the_employee(app, a
     screen.refresh("bob")
     texts = [w.text() for w in screen.recentTile.findChildren(QtWidgets.QLabel)]
     assert any("alice" in t for t in texts) and any("bob" in t for t in texts)
+
+
+def test_employees_page_shows_last_backup_and_last_delete(app, alice_bob, tmp_path, monkeypatch):
+    page = employees_page.EmployeesPage()
+    page.set_current_employee("alice")
+    page.refresh()
+    assert page.lastBackupLabel.text() == "Last backup: never"
+    assert page.lastDeleteLabel.text() == "Last client deletion: none"
+
+    # Back up
+    bak_dir = tmp_path / "backups"
+    bak_dir.mkdir()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(bak_dir))
+    page.backupButton.click()
+    assert "Last backup: " in page.lastBackupLabel.text()
+    assert "by alice" in page.lastBackupLabel.text()
+
+    # Delete a client
+    storage.save_client_enrollment("client_x", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.delete_client("client_x")
+    page.refresh()
+    assert "Last client deletion: client_x at " in page.lastDeleteLabel.text()
+    assert "by alice" in page.lastDeleteLabel.text()
+
