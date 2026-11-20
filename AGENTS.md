@@ -685,6 +685,9 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside it (`-2`, `-3` on a clash), and
   a `restore` row naming who restored and from which file goes into the backup's audit
   log. Nothing is replaced until all of that passes.
+- **Old databases are refused, not upgraded.** A v3 or v4 database is refused at start
+  (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
+  and the owner moves `~/.sigverify` away and enrols again. No key file is read.
 - **Two known limits, documented instead of built.** Removing an employee does not change
   the data key, so a copy of the database taken before the removal still opens with their
   old password (key rotation would be a separate, manual step, as in Bitwarden

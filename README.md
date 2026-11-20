@@ -99,9 +99,9 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 **Application Layer:**
 
-`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database.py`, `tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
+`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database.py`, `tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`: first run, login and logout, the Employees page, backup and restore, enrolment permissions, company-wide verification, stale, tablet and replay refusals, the dashboard and clients page). That file runs the screens offscreen with a fake model, so nothing yet tests the whole system, real model included, from enrolment to a logged decision. For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
 
-- **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts, client enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
+- **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts (admin-managed), client enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
 - **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per employee, each wrapped with a key derived (scrypt) from that employee's login password, so logging in is what unlocks the data. No key file and no password is kept on disk, and a copied database cannot be opened without a password. The first account is the admin: only the admin adds employees, resets a forgotten password, deletes a client or replaces a client's references. Only embeddings are stored. The audit log records every verification, enrolment, re-enrolment and deletion, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the admin and every employee forget their passwords, the enrolled signatures cannot be recovered and every client must enrol again.**
 
@@ -210,26 +210,43 @@ employee-facing interface for enrollment and verification.
 
 **Employee workflow:**
 
-1. **Register / Login** — Each employee has their own account (full name,
-   User ID, password). Enrolled clients are scoped per employee: an
-   employee only sees the clients they personally registered.
-2. **Enrollment** — Register a new client by ID with 5 reference photos of
-   their signature (blue pen on white paper), 5 signings on the tablet, or
-   both. Photos can be previewed, replaced, or removed before saving, and
-   the client can be reopened for editing at any time afterward.
-3. **Verification** — Enter a claimed client ID, choose paper + pen, paper
-   only, or pen only, give the photo and/or sign on the tablet, and receive
-   the decision with its match score drawn against the decision threshold.
-   The match score is a similarity, not a probability. When the result is
-   Genuine from paper and pen together, the employee can confirm the
-   person's identity to add that visit to the client's references.
-4. **Dashboard** — Landing screen after login showing per-employee stats:
-   clients enrolled this month, total enrolled clients, total
+1. **First start and login** — On a new database the first screen creates the
+   admin account (full name, User ID, password), or restores a backup. There is
+   no public Register: after that, a Welcome screen with a Login button opens
+   the app, and only the admin adds employees. Logging out locks the signature
+   data again. A database made by an older version of the app is refused at
+   start with a message; move `~/.sigverify` away and enrol again.
+2. **Enrollment** — Enter a client ID. The page looks the client up across the
+   company and shows which sets exist (scan N, pen N). A new client is enrolled
+   with 5 reference photos of their signature (blue pen on white paper), 5
+   signings on the tablet, or both. Only embeddings are stored, so View works
+   only for photos picked in the current session. Any employee can add a set the
+   client lacks. Only the admin can replace a set the client already has, after
+   a confirmation that picking 5 photos again is a re-enrolment.
+3. **Verification** — Enter a claimed client ID (any client in the company),
+   choose paper + pen, paper only, or pen only, give the photo and/or sign on
+   the tablet, and receive the decision with its match score drawn against the
+   decision threshold. The match score is a similarity, not a probability. The
+   page refuses, with the reason, a client whose references were made by older
+   weights, a pen signing from another tablet or operating system than the
+   enrolled one, and a replayed signing (one already used). A refused replay is
+   logged and is not a verdict. When the result is Genuine from paper and pen
+   together, the employee can confirm the person's identity to add that visit to
+   the client's references.
+4. **Dashboard** — Landing screen after login with a "Mine" row (your own
+   numbers), a "Company" row, and the recent company activity with the employee
+   named: clients enrolled this month, total enrolled clients, total
    verifications run, and a live genuine-rate indicator.
-5. **Clients** — A table of the employee's enrolled clients (enrollment
-   date, reference count, most recent verification), used to reopen an
-   existing client for editing.
-6. **Profile** — Employee account settings (name, User ID, password).
+5. **Clients** — A table of every client in the company (enrollment date,
+   references as "scan N · pen N", most recent verification). Double-click a row
+   to open the client on the enrollment page.
+6. **Profile** — Your own name and password. A new password needs the current one.
+7. **Employees (admin only)** — Add an employee, reset a forgotten password,
+   remove an employee, back up the encrypted database, and restore a backup
+   (after which you log in again). A restore keeps a copy of the live database
+   beside it first.
+
+An error no page catches opens a dialog instead of closing the app.
 
 **Integration:** the GUI reaches the model only through `src/gui/interfaces.py`,
 which wraps one `SignatureService` (`src/verification.py`) running on CPU, and
@@ -240,7 +257,7 @@ database (`src/database/db_manager.py`).
 
 |                             Login                                  |                           Dashboard                                  |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-|         ![Login screen](assets/screenshots/login.png)                | ![Dashboard with per-employee stats](assets/screenshots/dashboard.png) |
+|         ![Login screen](assets/screenshots/login.png)                | ![Dashboard with own and company stats](assets/screenshots/dashboard.png) |
 
 
 |                           Enrollment                               |                            Verification                              |
