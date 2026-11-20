@@ -1,5 +1,5 @@
 """
-clients_page.py — Table view of clients enrolled by the current employee
+clients_page.py — Table view of every client of the company, whoever enrolled them
 """
 
 from PyQt5.QtCore import pyqtSignal
@@ -22,7 +22,7 @@ class ClientsPage(QWidget):
         layout.setContentsMargins(30, 24, 30, 24)
         layout.setSpacing(10)
 
-        title = QLabel("My Enrolled Clients")
+        title = QLabel("Clients")
         title.setProperty("role", "title")
         layout.addWidget(title)
 

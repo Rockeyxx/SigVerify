@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from src.database import db_manager
 from src.database.db_manager import DatabaseLockedError, DatabaseManager, probe_fingerprint
 
 SHIPPED_KDF_N = DatabaseManager.KDF_N   # read at import, before the autouse fixture lowers it

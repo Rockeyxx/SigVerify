@@ -7,8 +7,8 @@ lives in one SQLite database managed by src.database.db_manager.DatabaseManager:
   * login: an employee's password unwraps their own copy of the data key (one key slot
     per employee). Nothing that opens the data is on disk: no key file, no password, no
     password hash. A copied database folder cannot be opened without a password.
-  * signature embeddings (spatial 512-d, temporal 128-d) and the image-reference
-    list: AES-256-GCM, bound to the owning client with associated data
+  * signature embeddings (spatial 512-d, temporal 128-d): AES-256-GCM, bound to the
+    owning client with associated data
   * every save is one SQLite transaction (no half-written or wiped files)
 
 Clients belong to the company. Any logged-in employee finds, enrols and verifies any
@@ -16,8 +16,8 @@ client. On a lookup, `employee_username` only narrows the list to the clients th
 employee enrolled ("my clients"); pass None for the whole list. A write is always done,
 and logged, as the LOGGED-IN employee: the username a write is given must be theirs, or
 it is refused. Only the admin (the first account) adds employees, resets a password,
-removes an employee, deletes a client, or replaces a client's existing references, image
-references or name; a refused attempt is logged too. Each employee edits only their own
+removes an employee, deletes a client, replaces a set a client already holds, or changes
+a client's name; a refused attempt is logged too. Each employee edits only their own
 profile, and a new password needs the current one.
 
 Where the data lives (never relative to the working directory):

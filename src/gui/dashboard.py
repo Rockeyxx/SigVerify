@@ -189,7 +189,7 @@ class DashboardScreen(QWidget):
         self.welcomeLabel.setProperty("role", "hero-title")
         layout.addWidget(self.welcomeLabel)
 
-        subtitle = QLabel("Here's a snapshot of your signature verification activity")
+        subtitle = QLabel("Here's a snapshot of your own and the company's verification activity")
         subtitle.setProperty("role", "muted")
         layout.addWidget(subtitle)
 

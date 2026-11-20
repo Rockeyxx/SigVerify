@@ -1064,11 +1064,15 @@ def _alice_client_and_one_bob_verification():
 
 
 def test_bobs_clients_page_lists_alices_client_and_the_last_verification(app, alice_bob):
-    _alice_client_and_one_bob_verification()
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.append_verification_log("c", "Genuine", 90.0, "multimodal", "alice")   # only Alice verifies
+    alices = storage.get_last_verification_for_client("c")["timestamp"]
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
     page = ClientsPage()
     page.refresh("bob")
     assert page.table.rowCount() == 1 and page.table.item(0, 0).text() == "c"
-    assert page.table.item(0, 3).text() != "Never"
+    assert page.table.item(0, 3).text() == alices != "Never"
 
 
 def test_dashboard_mine_and_company_counts_differ(app, alice_bob):
