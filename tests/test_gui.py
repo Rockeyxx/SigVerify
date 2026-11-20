@@ -373,6 +373,106 @@ def test_panel_refuses_a_replayed_probe_and_logs_it(app, db, fake_workers):
     assert len(storage.get_verification_log("alice")) == 1
 
 
+def _audit_hashes():
+    import sqlite3, json
+    rows = sqlite3.connect(storage._get_db().db_path).execute(
+        "SELECT event, probe_hashes FROM audit_log ORDER BY id").fetchall()
+    return [(e, json.loads(h) if h else None) for e, h in rows]
+
+
+def test_replay_audit_row_stores_the_hashes_and_a_first_round_sign_again_is_refused(app, db, fake_workers):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    panel = _panel()
+    panel._pending_client_id = "c"
+    panel._pending_images, panel._pending_trajectories = "probe.png", _trajectory()
+    panel._on_verify_success(dict(RESULT))
+    panel.degradedModeIndicator.setText("shown")
+    panel._last_accepted_signings, panel._last_accepted_client = ["x"], "c"
+    panel._on_verify_success({**RESULT, "decision": "Sign again"})   # first round (_awaiting_second False)
+    assert panel.resultDisplay.text() == "Refused: this signing was already used (replay)"
+    assert panel.degradedModeIndicator.text() == ""
+    assert panel._last_accepted_signings is None and panel._last_accepted_client is None
+    events = _audit_hashes()
+    assert events[-1][0] == "replay refused" and len(events[-1][1]) == 2
+    assert events[-1][1] == [h for e, h in events if e == "verify"][0]
+
+
+def test_replay_check_fails_loudly_when_the_model_returns_no_probe_embeddings(app, db, fake_workers):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    panel = _panel()
+    panel._pending_client_id = "c"
+    broken = {k: v for k, v in RESULT.items() if k != "probe_embeddings"}
+    with pytest.raises(KeyError):
+        panel._on_verify_success(broken)
+
+
+def test_bob_verifies_alices_client_and_the_log_row_has_bob_and_the_details(app, alice_bob, fake_workers):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _panel("bob")
+    panel.clientIdInput.setText("c")
+    panel.selected_image_path = "probe.png"
+    panel.selected_trajectory = _trajectory()
+    panel.run_verification()
+    worker, = fake_workers
+    assert len(worker.args[0]) == 1 and "under your account" not in panel.resultDisplay.text()
+    panel._on_verify_success(dict(RESULT))
+    row = storage.get_last_verification_for_client("c")
+    assert row["employee"] == "bob" and row["routing"] == "multimodal" and row["degraded"] is False
+    assert row["reasons"] == [] and row["threshold"] == 0.76
+    assert row["model_version"] == storage.MODEL_VERSION
+    verify_hashes = [h for e, h in _audit_hashes() if e == "verify"]
+    assert len(verify_hashes[-1]) == 2
+
+
+def test_stale_set_is_refused_with_the_message_and_verify_is_not_started(app, db, fake_workers, monkeypatch):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    monkeypatch.setattr(storage, "MODEL_VERSION", "v-next")
+    panel = _panel()
+    panel.clientIdInput.setText("c")
+    panel.selected_image_path = "probe.png"
+    panel.selected_trajectory = _trajectory()
+    panel.run_verification()
+    assert fake_workers == []
+    text = panel.resultDisplay.text()
+    assert "re-enrol" in text and "\n" in text and panel.verifyButton.isEnabled()
+
+
+def test_pen_probe_from_another_tablet_is_refused(app, db, fake_workers, monkeypatch):
+    import src.capture.collect as collect
+    xppen = {"device_model": "XPPen Deco 640", "os": "Windows", "qt_platform": "windows"}
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=None, capture_device=xppen)
+    other = {"signatures": [_trajectory()], "os": "Linux", "device_model": "Wacom One", "qt_platform": "xcb"}
+    monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: other)
+    panel = _panel()
+    panel.modalitySelector.setCurrentIndex(2)
+    panel.clientIdInput.setText("c")
+    panel.capture_pen_probe()
+    panel.run_verification()
+    assert fake_workers == [] and "Wacom One" in panel.resultDisplay.text()
+    same = {**other, "os": "Windows", "device_model": "XPPen Deco 640", "qt_platform": "windows"}
+    monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: same)
+    panel.capture_pen_probe()
+    panel.run_verification()
+    assert len(fake_workers) == 1
+
+
+def test_confirm_passes_the_origin_of_the_set_used(app, db, fake_workers, monkeypatch):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    panel = _panel()
+    panel.clientIdInput.setText("c")
+    panel.selected_image_path = "probe.png"
+    panel.selected_trajectory = _trajectory()
+    panel.run_verification()
+    panel._on_verify_success(dict(RESULT))
+    seen = []
+    monkeypatch.setattr(storage, "add_confirmed_reference",
+                        lambda *a, **k: seen.append(k) or True)
+    panel._on_confirmed([{"spatial": _b64(512, 9), "temporal": _b64(128, 9)}])
+    assert seen[0]["spatial_origin"] == "scan" and "spatial_origin" not in seen[1]
+
+
 def test_confirmed_visit_adds_paper_and_pen(app, db):
     storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     panel = _panel()
