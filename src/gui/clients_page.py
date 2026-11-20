@@ -45,7 +45,7 @@ class ClientsPage(QWidget):
 
     def refresh(self, employee_username: str):
         self.employee_username = employee_username
-        clients = storage.list_clients(employee_username)
+        clients = storage.list_clients(None)
         self.table.setRowCount(len(clients))
 
         for row, client in enumerate(clients):
@@ -54,7 +54,7 @@ class ClientsPage(QWidget):
             n_scan = len(client["spatial_sets"].get("scan", {}).get("embeddings", []))
             n_pen = len((client["temporal_set"] or {}).get("embeddings", []))
 
-            last_event = storage.get_last_verification_for_client(display_name, employee_username)
+            last_event = storage.get_last_verification_for_client(display_name, None)
             last_verification = last_event.get("timestamp", "—") if last_event else "Never"
 
             self.table.setItem(row, 0, QTableWidgetItem(display_name))

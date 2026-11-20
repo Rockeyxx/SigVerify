@@ -698,6 +698,8 @@ def test_enrolment_storage_refusal_is_shown_not_a_success(app, alice_bob, monkey
 # ------------------------------------------------------------------ app shell, accounts, backup
 from PyQt5.QtCore import QTimer  # noqa: E402
 from src.gui import app as app_module, employees_page, profile_page, sidebar  # noqa: E402
+from src.gui.clients_page import ClientsPage  # noqa: E402
+from src.gui.dashboard import DashboardScreen  # noqa: E402
 
 
 @pytest.fixture
@@ -931,3 +933,39 @@ def test_profile_password_change_needs_the_current_password(app, db):
     assert page.statusLabel.text() == "✔ Profile updated successfully"
     storage.logout()
     assert storage.authenticate_employee("alice", "alice-new-pass-1")[0]
+
+
+def _alice_client_and_one_bob_verification():
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    storage.append_verification_log("c", "Genuine", 90.0, "multimodal", "alice")
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    storage.append_verification_log("c", "Forged", 20.0, "multimodal", "bob")
+
+
+def test_bobs_clients_page_lists_alices_client_and_the_last_verification(app, alice_bob):
+    _alice_client_and_one_bob_verification()
+    page = ClientsPage()
+    page.refresh("bob")
+    assert page.table.rowCount() == 1 and page.table.item(0, 0).text() == "c"
+    assert page.table.item(0, 3).text() != "Never"
+
+
+def test_dashboard_mine_and_company_counts_differ(app, alice_bob):
+    _alice_client_and_one_bob_verification()
+    screen = DashboardScreen()
+    screen.refresh("bob")
+    assert screen.mine.totalClientsTile.valueLabel.text() == "0"
+    assert screen.mine.totalVerificationsTile.valueLabel.text() == "1"
+    assert screen.company.totalClientsTile.valueLabel.text() == "1"
+    assert screen.company.totalVerificationsTile.valueLabel.text() == "2"
+    assert screen.mine.newClientsTile.valueLabel.text() == "0"
+    assert screen.company.newClientsTile.valueLabel.text() == "1"
+
+
+def test_dashboard_recent_activity_is_company_wide_and_names_the_employee(app, alice_bob):
+    _alice_client_and_one_bob_verification()
+    screen = DashboardScreen()
+    screen.refresh("bob")
+    texts = [w.text() for w in screen.recentTile.findChildren(QtWidgets.QLabel)]
+    assert any("alice" in t for t in texts) and any("bob" in t for t in texts)
