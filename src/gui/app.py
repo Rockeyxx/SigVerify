@@ -8,10 +8,11 @@ import cv2    # noqa: F401
 
 import os
 import sys
-from PyQt5.QtCore import Qt
+import traceback
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
+    QApplication, QMainWindow, QWidget, QMessageBox,
     QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QLineEdit
 )
 
@@ -20,6 +21,7 @@ from src.gui.verification import VerificationPanel
 from src.gui.sidebar import Sidebar
 from src.gui.dashboard import DashboardScreen
 from src.gui.clients_page import ClientsPage
+from src.gui.employees_page import EmployeesPage, restore_from_backup
 from src.gui.profile_page import ProfilePage
 from src.gui.styles import STYLE
 from src.gui.workers import WarmUpWorker, wait_for_workers
@@ -27,6 +29,15 @@ import src.gui.storage as storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "signature_icon.png")
+STORAGE_ERROR_TITLE = "Cannot open the signature data"
+RESTORED_NOTICE = "Backup restored. Log in again."
+
+
+def show_unexpected_error(exc_type, exc, tb):
+    """sys.excepthook: an error no page caught is printed and shown, instead of PyQt5 aborting."""
+    traceback.print_exception(exc_type, exc, tb)
+    QMessageBox.critical(None, "Unexpected error",
+                         f"Something went wrong: {exc}. The action was not completed.")
 
 
 def create_icon_label(size=160):
@@ -56,7 +67,7 @@ def centered(content_layout):
 
 
 class WelcomeScreen(QWidget):
-    def __init__(self, go_to_login, go_to_register):
+    def __init__(self, go_to_login):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(10)
@@ -82,25 +93,15 @@ class WelcomeScreen(QWidget):
         login_button.setProperty("role", "primary")
         login_button.setFixedWidth(180)
         login_button.setFixedHeight(46)
-
-        register_button = QPushButton("Register")
-        register_button.setProperty("role", "primary")
-        register_button.setFixedWidth(180)
-        register_button.setFixedHeight(46)
-
         login_button.clicked.connect(go_to_login)
-        register_button.clicked.connect(go_to_register)
-
         buttons_row.addWidget(login_button)
-        buttons_row.addSpacing(16)
-        buttons_row.addWidget(register_button)
 
         content.addLayout(buttons_row)
         self.setLayout(centered(content))
 
 
 class LoginScreen(QWidget):
-    def __init__(self, on_login_success, go_to_register):
+    def __init__(self, on_login_success):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(14)
@@ -135,11 +136,6 @@ class LoginScreen(QWidget):
         login_button.clicked.connect(self._handle_login)
         content.addWidget(login_button, alignment=Qt.AlignHCenter)
 
-        register_link = QPushButton("Don't have an account? Register")
-        register_link.setProperty("role", "ghost")
-        register_link.clicked.connect(go_to_register)
-        content.addWidget(register_link, alignment=Qt.AlignHCenter)
-
         self.on_login_success = on_login_success
         self.setLayout(centered(content))
 
@@ -147,27 +143,49 @@ class LoginScreen(QWidget):
         username = self.usernameInput.text().strip()
         password = self.passwordInput.text()
 
-        success, employee, message = storage.authenticate_employee(username, password)
+        try:
+            success, employee, message = storage.authenticate_employee(username, password)
+        except storage.StorageError as e:
+            QMessageBox.critical(self, STORAGE_ERROR_TITLE, str(e))
+            return
         if not success:
-            self.errorLabel.setText(f"⚠ {message}")
+            self._set_label("status-error", f"⚠ {message}")
             return
 
         self.errorLabel.setText("")
         self.passwordInput.clear()
         self.on_login_success(employee)
 
+    def show_notice(self, text):
+        self._set_label("status-success", text)
+
+    def _set_label(self, role, text):
+        self.errorLabel.setProperty("role", role)
+        self.errorLabel.setText(text)
+        self.errorLabel.style().unpolish(self.errorLabel)
+        self.errorLabel.style().polish(self.errorLabel)
+
 
 class RegisterScreen(QWidget):
-    def __init__(self, on_register_success, go_to_login):
+    """First run only: creates the admin account (the first account), or restores a backup."""
+
+    def __init__(self, on_register_success, on_restored):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(14)
         content.setAlignment(Qt.AlignHCenter)
 
-        title = QLabel("Employee Registration")
+        title = QLabel("Create the admin account")
         title.setProperty("role", "hero-title")
         title.setAlignment(Qt.AlignHCenter)
         content.addWidget(title)
+
+        warning = QLabel(storage.ADMIN_WARNING)
+        warning.setProperty("role", "warning")
+        warning.setWordWrap(True)
+        warning.setFixedWidth(420)
+        warning.setAlignment(Qt.AlignHCenter)
+        content.addWidget(warning, alignment=Qt.AlignHCenter)
         content.addSpacing(10)
 
         self.fullNameInput = QLineEdit()
@@ -194,22 +212,35 @@ class RegisterScreen(QWidget):
 
         self.messageLabel = QLabel("")
         self.messageLabel.setAlignment(Qt.AlignHCenter)
-        content.addWidget(self.messageLabel)
+        self.messageLabel.setWordWrap(True)
+        self.messageLabel.setFixedWidth(420)
+        content.addWidget(self.messageLabel, alignment=Qt.AlignHCenter)
 
-        register_button = QPushButton("Register")
-        register_button.setProperty("role", "primary")
-        register_button.setFixedWidth(260)
-        register_button.setFixedHeight(44)
-        register_button.clicked.connect(self._handle_register)
-        content.addWidget(register_button, alignment=Qt.AlignHCenter)
+        self.createButton = QPushButton("Create Admin Account")
+        self.createButton.setProperty("role", "primary")
+        self.createButton.setFixedWidth(260)
+        self.createButton.setFixedHeight(44)
+        self.createButton.clicked.connect(self._handle_register)
+        content.addWidget(self.createButton, alignment=Qt.AlignHCenter)
 
-        login_link = QPushButton("Already have an account? Login")
-        login_link.setProperty("role", "ghost")
-        login_link.clicked.connect(go_to_login)
-        content.addWidget(login_link, alignment=Qt.AlignHCenter)
+        self.restoreButton = QPushButton("Restore from backup")
+        self.restoreButton.setProperty("role", "ghost")
+        self.restoreButton.clicked.connect(self._handle_restore)
+        content.addWidget(self.restoreButton, alignment=Qt.AlignHCenter)
 
         self.on_register_success = on_register_success
+        self.on_restored = on_restored
         self.setLayout(centered(content))
+
+    def _handle_restore(self):
+        outcome = restore_from_backup(self)
+        if outcome is None:
+            return
+        ok, message = outcome
+        if not ok:
+            self._set_error(message)
+            return
+        self.on_restored()
 
     def _handle_register(self):
         full_name = self.fullNameInput.text().strip()
@@ -229,9 +260,6 @@ class RegisterScreen(QWidget):
             self._set_error(message)
             return
 
-        self.messageLabel.setProperty("role", "status-success")
-        self.messageLabel.setText(f"✔ {message}")
-        self._refresh_message_style()
         self.fullNameInput.clear()
         self.usernameInput.clear()
         self.passwordInput.clear()
@@ -254,7 +282,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Signature Verification System")
         self.resize(900, 680)
         self.current_employee = None
-        self._build_auth_stack()
+        self.startup_failed = False
+        try:
+            first_run = storage.is_first_run()
+        except storage.StorageError as e:   # e.g. a database made by an older version
+            self.startup_failed = True
+            QMessageBox.critical(None, STORAGE_ERROR_TITLE, str(e))
+            QTimer.singleShot(0, QApplication.instance().quit)
+            return
+        self._build_auth_stack(first_run)
 
         # AGENTS.md: call SignatureService.warm_up() once when the app opens, on a
         # background thread, so the first verification does not pay the model load.
@@ -268,27 +304,28 @@ class MainWindow(QMainWindow):
         wait_for_workers()
         super().closeEvent(event)
 
-    def _build_auth_stack(self):
+    def _build_auth_stack(self, first_run=False):
+        """First run: only the admin-account screen. Afterwards: Welcome and Login, no Register."""
         self.auth_stack = QStackedWidget()
-
-        self.welcome_screen = WelcomeScreen(
-            go_to_login=lambda: self.auth_stack.setCurrentWidget(self.login_screen),
-            go_to_register=lambda: self.auth_stack.setCurrentWidget(self.register_screen),
-        )
-        self.login_screen = LoginScreen(
-            on_login_success=self._handle_login_success,
-            go_to_register=lambda: self.auth_stack.setCurrentWidget(self.register_screen),
-        )
-        self.register_screen = RegisterScreen(
-            on_register_success=lambda: self.auth_stack.setCurrentWidget(self.login_screen),
-            go_to_login=lambda: self.auth_stack.setCurrentWidget(self.login_screen),
-        )
-
-        self.auth_stack.addWidget(self.welcome_screen)
+        self.login_screen = LoginScreen(on_login_success=self._handle_login_success)
+        if first_run:
+            start = RegisterScreen(
+                on_register_success=lambda: self._handle_login_success(storage.current_employee()),
+                on_restored=self._handle_restored,
+            )
+        else:
+            start = WelcomeScreen(go_to_login=lambda: self.auth_stack.setCurrentWidget(self.login_screen))
+        self.auth_stack.addWidget(start)
         self.auth_stack.addWidget(self.login_screen)
-        self.auth_stack.addWidget(self.register_screen)
-        self.auth_stack.setCurrentWidget(self.welcome_screen)
+        self.auth_stack.setCurrentWidget(start)
         self.setCentralWidget(self.auth_stack)
+
+    def _show_login(self, notice=""):
+        self.current_employee = None
+        self._build_auth_stack()
+        self.auth_stack.setCurrentWidget(self.login_screen)
+        if notice:
+            self.login_screen.show_notice(notice)
 
     def _build_app_stack(self):
         container = QWidget()
@@ -301,6 +338,7 @@ class MainWindow(QMainWindow):
         self.sidebar.go_enrollment.connect(lambda: self.content_stack.setCurrentWidget(self.enrollment_panel))
         self.sidebar.go_verification.connect(lambda: self.content_stack.setCurrentWidget(self.verification_panel))
         self.sidebar.go_clients.connect(self._open_clients_page)
+        self.sidebar.go_employees.connect(self._open_employees_page)
         self.sidebar.go_profile.connect(self._open_profile_page)
         self.sidebar.go_logout.connect(self._handle_logout)
         main_layout.addWidget(self.sidebar)
@@ -311,16 +349,19 @@ class MainWindow(QMainWindow):
         self.verification_panel = VerificationPanel()
         self.clients_page = ClientsPage()
         self.profile_page = ProfilePage()
+        self.employees_page = EmployeesPage()
 
         self.enrollment_panel.client_list_changed.connect(self._refresh_after_change)
         self.clients_page.client_selected.connect(self._open_client_in_enrollment)
         self.profile_page.profile_updated.connect(self._handle_profile_updated)
+        self.employees_page.restored.connect(self._handle_restored)
 
         self.content_stack.addWidget(self.dashboard_screen)
         self.content_stack.addWidget(self.enrollment_panel)
         self.content_stack.addWidget(self.verification_panel)
         self.content_stack.addWidget(self.clients_page)
         self.content_stack.addWidget(self.profile_page)
+        self.content_stack.addWidget(self.employees_page)
         self.content_stack.setCurrentWidget(self.dashboard_screen)
 
         main_layout.addWidget(self.content_stack)
@@ -331,15 +372,28 @@ class MainWindow(QMainWindow):
         self.current_employee = employee
         self._build_app_stack()
         self.sidebar.set_employee(employee["full_name"], employee["username"])
+        self.sidebar.set_admin(employee["is_admin"])
         self.dashboard_screen.set_employee_name(employee["full_name"])
         self.enrollment_panel.set_current_employee(employee["username"])
         self.verification_panel.set_current_employee(employee["username"])
+        self.employees_page.set_current_employee(employee["username"])
         self.profile_page.load_employee(employee)
         self._refresh_after_change()
 
     def _handle_logout(self):
-        self.current_employee = None
-        self._build_auth_stack()
+        storage.logout()
+        self._show_login()
+
+    def _handle_restored(self):
+        # The backup's admin is logged in by the restore; ask for a fresh login instead.
+        storage.logout()
+        self._show_login(RESTORED_NOTICE)
+
+    def _open_employees_page(self):
+        if not self.current_employee["is_admin"]:
+            return
+        self.employees_page.refresh()
+        self.content_stack.setCurrentWidget(self.employees_page)
 
     def _open_clients_page(self):
         self.clients_page.refresh(self.current_employee["username"])
@@ -354,6 +408,7 @@ class MainWindow(QMainWindow):
         self.dashboard_screen.set_employee_name(updated_employee["full_name"])
         self.enrollment_panel.set_current_employee(updated_employee["username"])
         self.verification_panel.set_current_employee(updated_employee["username"])
+        self.employees_page.set_current_employee(updated_employee["username"])
 
     def _open_client_in_enrollment(self, client_id: str):
         self.enrollment_panel.prefill_client(client_id)
@@ -365,11 +420,17 @@ class MainWindow(QMainWindow):
         self.clients_page.refresh(username)
 
 
-if __name__ == "__main__":
+def main():
     from src.capture.pen_input import choose_pen_input
     choose_pen_input()
     app = QApplication(sys.argv)
+    sys.excepthook = show_unexpected_error
     app.setStyleSheet(STYLE)
     window = MainWindow()
-    window.show()
+    if not window.startup_failed:
+        window.show()
     sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

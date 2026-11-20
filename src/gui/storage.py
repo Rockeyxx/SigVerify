@@ -196,6 +196,11 @@ def is_first_run() -> bool:
     return not _get_db().has_employees()
 
 
+def current_employee():
+    """The logged-in employee as the GUI sees them, or None."""
+    return None if _session is None else _public_employee(_session)
+
+
 def find_employee(username: str):
     emp = _get_db().find_employee(username)
     return None if emp is None else _public_employee(emp)
@@ -409,18 +414,18 @@ def save_client_enrollment(client_id: str, dynamic_refs, employee_username: str,
     return True, "Saved"
 
 
-def delete_client(client_id: str, employee_username: str = None) -> bool:
+def delete_client(client_id: str, employee_username: str = None) -> tuple:
     """Admin only: removes the client and all its templates; the verification log is kept and
-    the deletion is logged. Returns False if refused (not the admin, or not the logged-in
-    employee) or there is no such client. The logged-in employee is the one deleting."""
+    the deletion is logged. The logged-in employee is the one deleting. Returns
+    (success, message); refused when not the admin, not the logged-in employee, or no such client."""
     try:
         emp_id = _actor(employee_username)
-    except (PermissionError, StorageError):
-        return False
-    try:
-        return _get_db().delete_client(_norm(client_id), emp_id)
-    except (PermissionError, LookupError):
-        return False
+        deleted = _get_db().delete_client(_norm(client_id), emp_id)
+    except (PermissionError, LookupError, StorageError) as e:
+        return False, str(e)
+    if not deleted:
+        return False, f"No client '{client_id.strip()}'"
+    return True, f"Deleted client '{client_id.strip()}'"
 
 
 def count_clients_enrolled_this_month(employee_username: str = None) -> int:

@@ -420,13 +420,16 @@ class EnrollmentPanel(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm == QMessageBox.Yes:
-            storage.delete_client(client_id)
+            ok, message = storage.delete_client(client_id, self.current_employee_username)
+            if not ok:
+                self._set_status_error(message)
+                return
             self.image_references = []
             self.dynamic_references = []
             self.pen_signatures = []
             self._refresh_image_list()
             self._update_counts()
-            self._set_status_success(f"Deleted client '{client_id}'")
+            self._set_status_success(message)
             self.client_list_changed.emit()
 
     def _set_status_error(self, text):

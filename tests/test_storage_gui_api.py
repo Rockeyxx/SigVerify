@@ -67,9 +67,10 @@ def login(username, password):
 
 # ---------------------------------------------------------------- employees
 def test_first_account_is_the_admin_and_is_told_passwords_cannot_be_recovered():
-    assert storage.is_first_run()
+    assert storage.is_first_run() and storage.current_employee() is None
     ok, msg = storage.register_employee("Alice A", "alice", PW_A)
     assert ok and msg.startswith("Admin account created") and storage.ADMIN_WARNING in msg
+    assert storage.current_employee() == {"full_name": "Alice A", "username": "alice", "is_admin": True}
     assert "cannot be recovered" in storage.ADMIN_WARNING and not storage.is_first_run()
     assert storage.find_employee("alice")["is_admin"] is True
     assert storage.register_employee("Bob B", "bob", PW_B) == (True, "Account created successfully")
@@ -158,7 +159,7 @@ def test_writes_run_as_the_logged_in_employee_never_a_name_passed_in(people, tmp
     assert storage.remove_employee("alice", "bob")[0] is False
     assert storage.register_employee("Mallory", "mallory", "mallory-pass-1")[0] is False
     assert storage.save_client_enrollment("C", None, "alice", spatial_embeddings=spatial(base=9), spatial_origin="scan")[0] is False
-    assert storage.delete_client("C", "alice") is False
+    assert storage.delete_client("C", "alice")[0] is False
     assert storage.add_confirmed_reference("c", b64(512, 5), "alice") is False
     assert storage.backup_database(str(tmp_path), "alice")[0] is False
     with pytest.raises(storage.NotLoggedInAsError):
@@ -173,7 +174,7 @@ def test_writes_need_a_login(people):
     storage.logout()
     with pytest.raises(storage.StorageLockedError):
         storage.append_verification_log("C", "Genuine", 90.0, "scan", "alice")
-    assert storage.delete_client("C", "alice") is False
+    assert storage.delete_client("C", "alice") == (False, "Log in first.")
     assert storage.reset_employee_password("alice", "bob", "bob-new-password")[0] is False
 
 
@@ -303,14 +304,14 @@ def test_only_the_admin_deletes_and_the_log_is_kept(people):
     login("bob", PW_B)
     storage.save_client_enrollment("Gone", [], "bob", spatial_embeddings=spatial(), spatial_origin="scan")
     storage.append_verification_log("Gone", "Genuine", 90.0, "scan", "bob")
-    assert storage.delete_client("Gone", "bob") is False
-    assert storage.delete_client("Gone", "ghost") is False
+    assert storage.delete_client("Gone", "bob") == (False, "Only the admin can delete a client")
+    assert storage.delete_client("Gone", "ghost")[0] is False
     assert storage.client_exists("gone")
     login("alice", PW_A)
-    assert storage.delete_client("Gone", "alice") is True
+    assert storage.delete_client("Gone", "alice") == (True, "Deleted client 'Gone'")
     assert storage.get_client("gone") is None and not storage.client_exists("gone")
     assert storage.get_last_verification_for_client("gone", "bob") is not None
-    assert storage.delete_client("never existed", "alice") is False
+    assert storage.delete_client("never existed", "alice") == (False, "No client 'never existed'")
     assert [e["event"] for e in storage.get_audit_log()] == ["enrol", "verify", "delete refused", "delete"]
 
 
@@ -682,7 +683,7 @@ def test_backup_and_restore(people, tmp_path):
     ok, path = storage.backup_database(str(folder), "alice")
     assert ok and os.path.dirname(path) == str(folder) and os.path.basename(path).endswith(".db")
     assert storage.backup_database(str(tmp_path / "missing"), "alice")[0] is False
-    assert storage.delete_client("C", "alice")
+    assert storage.delete_client("C", "alice")[0]
 
     login("bob", PW_B)
     assert storage.restore_database(path, "bob", PW_B) == (False, "Only the admin can restore a backup.")
