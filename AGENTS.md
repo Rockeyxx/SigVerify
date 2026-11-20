@@ -636,7 +636,8 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 - Audit log: record every verification event — `User ID, Timestamp,
   Modality State, Similarity Score, Decision`, plus `routing`, `degraded`, `reasons`,
   `model_version` and `threshold` — plaintext and queryable. Enrolments, re-enrolments,
-  deletions, every refused attempt, every account change (`employee added`, `password reset`,
+  deletions, every refused re-enrolment, deletion, replay or verification (stale set, other
+  tablet), every account change (`employee added`, `password reset`,
   `employee removed`, `profile changed`, never the password itself) and every `backup` are
   logged too, each with its employee. Only `verify` rows count as verifications.
 - **The login password unlocks the data (one key slot per employee).** The random data

@@ -1055,8 +1055,8 @@ class DatabaseManager:
         and `username` / `password` is an ADMIN of the backup whose key slot opens it. Then
         the live database is copied to `<name>.before-restore-<YYYYmmdd-HHMMSS>` beside it
         (owner-only), a "restore" row is written into the scratch copy, and only then is the
-        live database replaced. A failure before the replacement leaves the live file as it
-        was. Afterwards the store is unlocked with the backup's key. Returns that admin's
+        live database replaced. A failure before the replacement leaves the live data as it
+        was (the owner-only copy adds one "backup" audit row to the live file). Afterwards the store is unlocked with the backup's key. Returns that admin's
         employee dict.
         Raises ValueError (not a usable backup), PermissionError (not an admin, wrong password).
         """

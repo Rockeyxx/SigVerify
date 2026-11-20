@@ -653,7 +653,7 @@ def backup_database(dest_folder: str, employee_username: str) -> tuple:
     name = f"signatures-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
     try:
         return True, db.backup_to(actor, os.path.join(dest_folder, name))
-    except (OSError, PermissionError) as e:
+    except (OSError, sqlite3.Error) as e:   # PermissionError is an OSError
         return False, str(e)
 
 
