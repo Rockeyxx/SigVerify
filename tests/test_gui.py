@@ -894,15 +894,14 @@ def test_a_company_registered_from_login_sees_none_of_the_other_companys_clients
     assert window.clients_page.table.rowCount() == 1
 
 
-def test_startup_storage_error_shows_it_and_quits(app, empty_db, make_window, dialogs, monkeypatch):
-    def old_database():
-        raise storage.StorageError("This database was made by an older version of the app.")
-    monkeypatch.setattr(storage, "is_first_run", old_database)
+def test_startup_storage_error_shows_it_and_quits(app, empty_db, make_window, dialogs, monkeypatch, tmp_path):
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "companies").write_text("not a folder")       # the company list cannot be read
     later = []
     monkeypatch.setattr(QTimer, "singleShot", lambda ms, slot: later.append(slot))
     window = make_window()
-    assert dialogs == [(None, "Cannot open the signature data",
-                        "This database was made by an older version of the app.")]
+    assert len(dialogs) == 1 and dialogs[0][:2] == (None, "Cannot open the signature data")
+    assert "companies cannot be read" in dialogs[0][2]
     assert later == [QtWidgets.QApplication.instance().quit]
     assert window.startup_failed and window.centralWidget() is None
 

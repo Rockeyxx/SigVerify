@@ -317,7 +317,7 @@ class MainWindow(QMainWindow):
         self.startup_failed = False
         try:
             first_run = storage.is_first_run()
-        except storage.StorageError as e:   # e.g. a database made by an older version
+        except storage.StorageError as e:   # the company folder cannot be read
             self.startup_failed = True
             QMessageBox.critical(None, STORAGE_ERROR_TITLE, str(e))
             QTimer.singleShot(0, QApplication.instance().quit)

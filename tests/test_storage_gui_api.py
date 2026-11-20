@@ -907,6 +907,47 @@ def test_company_names_are_checked_and_unique(isolated_storage):
     assert storage.current_company() == "Acme Inc." and storage.current_employee()["username"] == "alice"
 
 
+def test_company_names_in_any_script_get_their_own_folder(isolated_storage):
+    for name in ("شركة النور", "Café", "Cafe"):                    # é is not e: two companies
+        ok, msg = storage.create_company(name, "Alice A", "alice", PW_A)
+        assert ok, msg
+    assert storage.list_companies() == ["Cafe", "Café", "شركة النور"]
+    assert sorted(os.listdir(isolated_storage / "companies")) == ["cafe", "café", "شركة-النور"]
+    storage.open_company("شركة النور")
+    assert storage.authenticate_employee("alice", PW_A)[0]
+
+
+def test_a_company_name_never_leaves_the_companies_folder(isolated_storage):
+    for name, slug in (("../x", "x"), ("/etc", "etc"), ("a/../../b", "a-b")):
+        assert storage.create_company(name, "Alice A", "alice", PW_A)[0]
+        assert (company_dir(isolated_storage, slug) / "company.txt").read_text() == name
+    assert sorted(os.listdir(isolated_storage)) == ["companies"]
+    for bad in ("..", "./", "__"):
+        assert storage.create_company(bad, "Alice A", "alice", PW_A) == (
+            False, "The company name must have 2 to 40 characters, with at least one letter or digit.")
+
+
+def test_windows_device_names_are_refused_as_company_names(isolated_storage):
+    for bad in ("CON", "prn", " Aux ", "nul.", "COM1", "lpt9"):
+        ok, msg = storage.create_company(bad, "Alice A", "alice", PW_A)
+        assert not ok and msg == f"'{bad.strip()}' is a name Windows keeps for a device. Choose another company name."
+    assert storage.is_first_run()
+    assert storage.create_company("Con Ltd", "Alice A", "alice", PW_A)[0]
+    assert storage.create_company("COM10", "Alice A", "alice", PW_A)[0]
+
+
+def test_an_unreadable_companies_folder_is_a_storage_error(isolated_storage):
+    isolated_storage.mkdir()
+    (isolated_storage / "companies").write_text("not a folder")
+    with pytest.raises(storage.StorageError, match="cannot be read"):
+        storage.is_first_run()
+
+
+def test_a_long_company_file_is_read_only_in_part(people, isolated_storage):
+    (company_dir(isolated_storage) / "company.txt").write_text("x" * 5000)
+    assert storage.list_companies() == ["x" * 200]
+
+
 def test_a_failed_registration_leaves_no_company_folder(isolated_storage):
     ok, msg = storage.create_company("Acme", "Alice A", "alice", "short")
     assert not ok and "12 characters" in msg

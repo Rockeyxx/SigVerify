@@ -32,7 +32,8 @@ Where the data lives (never relative to the working directory):
   ~/.sigverify/companies/<slug>/signatures.db   (override ~/.sigverify with SIGVER_HOME)
   ~/.sigverify/companies/<slug>/company.txt     the company name as typed (not secret: the
                                                 login screen lists it)
-<slug> is the name lowercased, every run of other characters than a-z0-9 made one "-".
+<slug> is the name case-folded, every run of characters other than letters and digits
+(of any script) made one "-"; a Windows device name (con, nul, com1, ...) is refused.
 SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A database made
 before per-employee passwords (schema v4 or older) is refused; clients enrol again.
 
@@ -47,6 +48,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import unicodedata
 from datetime import datetime
 
 from cryptography.exceptions import InvalidTag
@@ -111,8 +113,14 @@ def _data_dir() -> str:
     return os.path.abspath(os.path.expanduser(base))
 
 
+# Names Windows keeps for devices: a folder with one of them as its whole name cannot be made.
+_WINDOWS_DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"{p}{i}" for p in ("com", "lpt") for i in range(1, 10))}
+
+
 def _slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    """Letters and digits of any script, case-folded; every other run is one "-" (so no
+    "/", "." or ".." survives: the folder stays inside companies/)."""
+    return re.sub(r"[\W_]+", "-", unicodedata.normalize("NFKC", name.strip()).casefold()).strip("-")
 
 
 def _companies_dir() -> str:
@@ -128,8 +136,8 @@ def _read_company_name(slug: str):
     if not slug:
         return None
     try:
-        with open(os.path.join(_companies_dir(), slug, COMPANY_NAME_FILE), encoding="utf-8") as f:
-            return f.read().strip()
+        with open(os.path.join(_companies_dir(), slug, COMPANY_NAME_FILE), encoding="utf-8") as f:  # skylos: ignore[SKY-D215,SKY-D325] slug is reduced to letters, digits and '-', inside the company folder; read is bounded
+            return f.read(200).strip()
     except OSError:
         return None
 
@@ -246,6 +254,8 @@ def list_companies() -> list:
         slugs = os.listdir(_companies_dir())
     except FileNotFoundError:
         return []
+    except OSError as e:                     # not a folder, no permission
+        raise StorageError(f"The company folder {_companies_dir()} cannot be read: {e}") from None
     names = [_read_company_name(slug) for slug in slugs]
     return sorted((n for n in names if n), key=str.casefold)
 
@@ -271,7 +281,9 @@ def _new_company(company_name: str, fill) -> tuple:
     (logged out)."""
     name = (company_name or "").strip()
     if not 2 <= len(name) <= 40 or not _slug(name):
-        return False, "The company name must have 2 to 40 characters, at least one a letter or a digit."
+        return False, "The company name must have 2 to 40 characters, with at least one letter or digit."
+    if _slug(name) in _WINDOWS_DEVICE_NAMES:
+        return False, f"'{name}' is a name Windows keeps for a device. Choose another company name."
     folder = _company_folder(name)
     try:
         os.makedirs(_data_dir(), mode=0o700, exist_ok=True)
