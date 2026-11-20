@@ -986,6 +986,7 @@ def test_profile_password_change_needs_the_current_password(app, db):
     page = profile_page.ProfilePage()
     page.load_employee(storage.current_employee())
     page.newPasswordInput.setText("alice-new-pass-1")
+    page.confirmNewPasswordInput.setText("alice-new-pass-1")
     page.saveButton.click()
     assert page.statusLabel.text() == "⚠ Enter your current password to set a new one"
     page.currentPasswordInput.setText("wrong-password-1")
@@ -996,6 +997,32 @@ def test_profile_password_change_needs_the_current_password(app, db):
     assert page.statusLabel.text() == "✔ Profile updated successfully"
     storage.logout()
     assert storage.authenticate_employee("alice", "alice-new-pass-1")[0]
+
+
+def test_profile_new_password_must_match_its_confirmation(app, db, monkeypatch):
+    called = []
+    monkeypatch.setattr(storage, "update_employee_profile", lambda *a, **k: called.append(a))
+    page = profile_page.ProfilePage()
+    page.load_employee(storage.current_employee())
+    page.newPasswordInput.setText("alice-new-pass-1")
+    page.confirmNewPasswordInput.setText("alice-new-pass-2")
+    page.currentPasswordInput.setText("alice-password-1")
+    page.saveButton.click()
+    assert page.statusLabel.text() == "⚠ The new passwords do not match"
+    assert called == []
+
+
+def test_profile_password_is_kept_exactly_as_typed(app, db):
+    page = profile_page.ProfilePage()            # no strip, as at login and registration
+    page.load_employee(storage.current_employee())
+    page.newPasswordInput.setText("alice-new-pass-1 ")
+    page.confirmNewPasswordInput.setText("alice-new-pass-1 ")
+    page.currentPasswordInput.setText("alice-password-1")
+    page.saveButton.click()
+    assert page.statusLabel.text() == "✔ Profile updated successfully"
+    storage.logout()
+    assert storage.authenticate_employee("alice", "alice-new-pass-1")[0] is False
+    assert storage.authenticate_employee("alice", "alice-new-pass-1 ")[0]
 
 
 def _alice_client_and_one_bob_verification():

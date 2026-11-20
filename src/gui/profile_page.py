@@ -38,6 +38,11 @@ class ProfilePage(QWidget):
         self.newPasswordInput.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.newPasswordInput)
 
+        layout.addWidget(self._section_label("CONFIRM NEW PASSWORD"))
+        self.confirmNewPasswordInput = QLineEdit()
+        self.confirmNewPasswordInput.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.confirmNewPasswordInput)
+
         layout.addWidget(self._section_label("CURRENT PASSWORD (needed to set a new one)"))
         self.currentPasswordInput = QLineEdit()
         self.currentPasswordInput.setEchoMode(QLineEdit.Password)
@@ -64,16 +69,20 @@ class ProfilePage(QWidget):
         self.fullNameInput.setText(employee["full_name"])
         self.usernameInput.setText(employee["username"])
         self.newPasswordInput.clear()
+        self.confirmNewPasswordInput.clear()
         self.currentPasswordInput.clear()
         self.statusLabel.setText("")
 
     def _handle_save(self):
         new_full_name = self.fullNameInput.text().strip()
         new_username = self.usernameInput.text().strip()
-        new_password = self.newPasswordInput.text().strip() or None
+        new_password = self.newPasswordInput.text() or None   # never stripped, as at login
 
         if not new_full_name or not new_username:
             self._set_error("Full name and User ID cannot be empty")
+            return
+        if (new_password or "") != self.confirmNewPasswordInput.text():
+            self._set_error("The new passwords do not match")
             return
 
         success, message, updated_employee = storage.update_employee_profile(
@@ -88,6 +97,7 @@ class ProfilePage(QWidget):
         self.current_username = updated_employee["username"]
         self._set_success(message)
         self.newPasswordInput.clear()
+        self.confirmNewPasswordInput.clear()
         self.currentPasswordInput.clear()
         self.profile_updated.emit(updated_employee)
 
