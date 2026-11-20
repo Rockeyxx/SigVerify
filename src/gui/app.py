@@ -378,7 +378,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_employee(employee["full_name"], employee["username"])
         self.sidebar.set_admin(employee["is_admin"])
         self.dashboard_screen.set_employee_name(employee["full_name"])
-        self.enrollment_panel.set_current_employee(employee["username"])
+        self.enrollment_panel.set_current_employee(employee["username"], employee["is_admin"])
         self.verification_panel.set_current_employee(employee["username"])
         self.employees_page.set_current_employee(employee["username"])
         self.profile_page.load_employee(employee)
@@ -410,7 +410,7 @@ class MainWindow(QMainWindow):
         self.current_employee = updated_employee
         self.sidebar.set_employee(updated_employee["full_name"], updated_employee["username"])
         self.dashboard_screen.set_employee_name(updated_employee["full_name"])
-        self.enrollment_panel.set_current_employee(updated_employee["username"])
+        self.enrollment_panel.set_current_employee(updated_employee["username"], updated_employee["is_admin"])
         self.verification_panel.set_current_employee(updated_employee["username"])
         self.employees_page.set_current_employee(updated_employee["username"])
 

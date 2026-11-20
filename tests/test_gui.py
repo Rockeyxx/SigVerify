@@ -436,6 +436,128 @@ def test_enrolment_delete_refused_shows_why_and_keeps_the_form(app, alice_bob, m
     assert panel.dynamic_references == ["kept"] and storage.client_exists("c")
 
 
+def _enrol_panel(username, k=NUM_ENROLLMENT_REFERENCES):
+    panel = enrollment.EnrollmentPanel()
+    panel.set_current_employee(username, is_admin=(username == "alice"))
+    return panel
+
+
+def _load(panel, client_id):
+    panel.clientIdInput.setText(client_id)
+    panel.load_or_start_new_client()
+
+
+def test_enrolment_non_admin_adds_paper_to_a_pen_only_client(app, alice_bob):
+    k = NUM_ENROLLMENT_REFERENCES
+    storage.save_client_enrollment("c", [_b64(128, i) for i in range(k)], "alice")
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _enrol_panel("bob")
+    _load(panel, "c")
+    assert panel.selectImageButton.isEnabled() and panel.addImageButton.isEnabled()
+    assert not panel.captureDynamicButton.isEnabled()
+    assert panel.deleteClientButton.isHidden()
+    assert "Only the admin can replace these" in panel.clientStatusLabel.text()
+    panel._pending_client_id = "c"
+    panel._on_enroll_success({"embeddings": [_b64(512, i) for i in range(k)],
+                              "dynamic_embeddings": [], "spatial_origin": "scan"})
+    assert panel.statusLabel.text().startswith("✔")
+    rec = storage.get_client("c")
+    assert len(rec["spatial_sets"]["scan"]["embeddings"]) == k and len(rec["dynamic_references"]) == k
+
+
+def test_enrolment_non_admin_cannot_replace_a_paper_set(app, alice_bob):
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(5)])
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _enrol_panel("bob")
+    _load(panel, "c")
+    assert not panel.selectImageButton.isEnabled() and not panel.addImageButton.isEnabled()
+    assert panel.captureDynamicButton.isEnabled()          # no pen set yet: Bob may add one
+
+
+def test_enrolment_new_client_is_open_to_everyone(app, alice_bob):
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _enrol_panel("bob")
+    _load(panel, "new")
+    assert panel.selectImageButton.isEnabled() and panel.captureDynamicButton.isEnabled()
+    assert panel.deleteClientButton.isHidden()             # Delete is the admin's, new or not
+
+
+def test_enrolment_lookup_is_company_wide(app, alice_bob):
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, 1)])
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _enrol_panel("bob")
+    _load(panel, "c")
+    assert panel.clientStatusLabel.text().startswith("Loaded existing client")
+    assert "another employee" not in panel.clientStatusLabel.text()
+
+
+def test_enrolment_admin_replacing_paper_asks_and_keeps_the_pen_rows(app, alice_bob, fake_workers, monkeypatch):
+    k = NUM_ENROLLMENT_REFERENCES
+    import sqlite3
+    storage.save_client_enrollment("c", [_b64(128, i) for i in range(k)], "alice",
+                                   spatial_embeddings=[_b64(512, i) for i in range(k)],
+                                   capture_device={"device_model": "XPPen", "os": "Linux"})
+    assert storage.add_confirmed_reference("c", _b64(128, 99), "alice", modality="temporal")
+
+    def pen_rows():
+        with sqlite3.connect(storage._get_db().db_path) as conn:
+            return conn.execute("SELECT source, model_version, capture_device FROM enrollments "
+                                "WHERE modality = 'temporal' ORDER BY id").fetchall()
+    before = pen_rows()
+    asked = []
+    answers = iter([QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.Yes])
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        lambda *a: asked.append(a[2]) or next(answers))
+    panel = _enrol_panel("alice")
+    _load(panel, "c")
+    assert panel.selectImageButton.isEnabled() and panel.captureDynamicButton.isEnabled()
+    new_scan = [_b64(512, 100 + i) for i in range(k)]
+    result = {"embeddings": new_scan, "dynamic_embeddings": [], "spatial_origin": "scan"}
+    panel.image_references = ["a.png"] * k
+    panel.run_enrollment()                      # answer No: no worker, nothing saved
+    assert asked == ["This replaces the client's paper references. Continue?"]
+    assert fake_workers == []
+    panel.run_enrollment()                      # answer Yes
+    assert len(fake_workers) == 1
+    panel._pending_client_id = "c"
+    panel._on_enroll_success(result)
+    assert storage.get_client("c")["spatial_sets"]["scan"]["embeddings"] == new_scan
+    assert pen_rows() == before
+    assert storage.add_confirmed_reference("c", _b64(128, 100), "alice", modality="temporal") is True
+
+
+def test_enrolment_new_pen_passes_the_capture_device(app, db, fake_workers, monkeypatch):
+    k = NUM_ENROLLMENT_REFERENCES
+    captured = {"signatures": [_trajectory(i) for i in range(k)], "os": "Windows",
+                "device_model": "XPPen", "qt_platform": "windows"}
+    import src.capture.collect as collect
+    monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: captured)
+    panel = _enrol_panel("alice")
+    _load(panel, "c")
+    panel.capture_pen_signatures()
+    panel._pending_client_id = "c"
+    panel._on_enroll_success({"embeddings": [], "spatial_origin": "scan",
+                              "dynamic_embeddings": [_b64(128, i) for i in range(k)]})
+    device = storage.get_client("c")["temporal_set"]["capture_device"]
+    assert device == {"os": "Windows", "device_model": "XPPen", "qt_platform": "windows"}
+
+
+def test_enrolment_storage_refusal_is_shown_not_a_success(app, alice_bob, monkeypatch):
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(5)])
+    storage.logout()
+    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    panel = _enrol_panel("bob")                  # opened as a new client by mistake: a race
+    panel._pending_client_id = "c"
+    panel._on_enroll_success({"embeddings": [_b64(512, 7)], "dynamic_embeddings": [],
+                              "spatial_origin": "scan"})
+    assert "Only the admin can replace" in panel.statusLabel.text()
+    assert not panel.statusLabel.text().startswith("✔")
+
+
 # ------------------------------------------------------------------ app shell, accounts, backup
 from PyQt5.QtCore import QTimer  # noqa: E402
 from src.gui import app as app_module, employees_page, profile_page, sidebar  # noqa: E402

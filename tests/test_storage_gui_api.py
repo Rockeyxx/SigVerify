@@ -516,6 +516,23 @@ def test_resaving_without_new_pen_signatures_keeps_the_pen_set_and_its_added_sig
     assert len(storage.get_client("c")["dynamic_references"]) == 6     # a stale set takes no more rows
 
 
+def _pen_rows():
+    with sqlite3.connect(storage._get_db().db_path) as conn:
+        return conn.execute("SELECT source, model_version FROM enrollments WHERE modality = 'temporal' "
+                            "ORDER BY id").fetchall()
+
+
+def test_resaving_without_new_pen_keeps_pen_rows_and_the_next_signing_is_kept(people):
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=spatial(), spatial_origin="scan")
+    assert storage.add_confirmed_reference("c", b64(128, 999), "alice", modality="temporal")
+    before = _pen_rows()
+    assert storage.save_client_enrollment("C", None, "alice", spatial_embeddings=spatial(base=50), spatial_origin="scan")[0]
+    assert _pen_rows() == before and before[-1][0] == "added"
+    assert storage.get_client("c")["temporal_set"]["stale"] is False
+    assert storage.add_confirmed_reference("c", b64(128, 1000), "alice", modality="temporal") is True
+    assert storage.get_client("c")["temporal_set"]["embeddings"][-1] == b64(128, 1000)
+
+
 def test_each_set_has_its_own_model_version_and_stale_flag(people, monkeypatch):
     old_version = storage.MODEL_VERSION
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
