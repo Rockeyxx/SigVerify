@@ -915,6 +915,27 @@ def test_a_failed_registration_leaves_no_company_folder(isolated_storage):
     assert storage.create_company("Acme", "Alice A", "alice", PW_A)[0]           # the name is free again
 
 
+def test_a_company_is_listed_only_after_its_admin_exists(isolated_storage, monkeypatch):
+    seen = []
+    real = DatabaseManager.create_employee
+
+    def spy(self, *args, **kw):                      # the scrypt step: a crash here must list nothing
+        seen.append((storage.list_companies(), (company_dir(isolated_storage, "acme") / "company.txt").exists()))
+        return real(self, *args, **kw)
+    monkeypatch.setattr(DatabaseManager, "create_employee", spy)
+    assert storage.create_company("Acme", "Alice A", "alice", PW_A)[0]
+    assert seen == [([], False)] and storage.list_companies() == ["Acme"]
+
+
+def test_a_database_error_while_registering_is_reported_and_leaves_no_folder(isolated_storage, monkeypatch):
+    def disk_full(self, *args, **kw):
+        raise sqlite3.OperationalError("database or disk is full")
+    monkeypatch.setattr(DatabaseManager, "create_employee", disk_full)
+    assert storage.create_company("Acme", "Alice A", "alice", PW_A) == (False, "database or disk is full")
+    assert storage.is_first_run() and storage.current_company() is None
+    assert not company_dir(isolated_storage, "acme").exists()
+
+
 def test_unknown_company_and_no_company_chosen(people):
     with pytest.raises(storage.StorageError, match="No company named 'Nope'"):
         storage.open_company("Nope")
@@ -943,7 +964,14 @@ def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, iso
     assert not new.exists()
     assert storage.restore_company(COMPANY, path, "alice", PW_A) == (
         False, "A company with this name already exists")
+    assert storage.restore_company("Branch Two", path, "alice", PW_A) == (     # Test Co's backup
+        False, "This backup belongs to company 'Test Co'.")
+    assert not new.exists()
+    with closing(sqlite3.connect(path)) as conn:                                 # a backup with no name recorded
+        conn.execute("DELETE FROM company_info")
+        conn.commit()
     assert storage.restore_company("Branch Two", path, "alice", PW_A) == (True, "Backup restored")
+    assert storage._get_db().company_name() == "Branch Two"
     assert storage.current_company() == "Branch Two" and storage.current_employee()["username"] == "alice"
     assert storage.get_client("c")["spatial_embeddings"] == spatial(5)
     assert sorted(os.listdir(new)) == ["company.txt", "signatures.db"]
@@ -951,6 +979,18 @@ def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, iso
     assert storage.current_company() == COMPANY and storage.get_client("c") is not None
     storage.open_company("Branch Two")
     assert storage.authenticate_employee("bob", PW_B)[0]                         # the backup's passwords
+
+
+def test_a_company_records_its_name_and_refuses_another_companys_backup(people, tmp_path, isolated_storage):
+    assert storage._get_db().company_name() == COMPANY
+    assert storage.create_company("Beta Ltd", "Alice Beta", "alice", PW_BETA)[0]
+    assert storage._get_db().company_name() == "Beta Ltd"
+    beta_backup = storage.backup_database(str(tmp_path), "alice")[1]
+    login("alice", PW_A)
+    live = db_bytes(isolated_storage)
+    assert storage.restore_database(beta_backup, "alice", PW_BETA) == (
+        False, "This backup belongs to company 'Beta Ltd'.")
+    assert db_bytes(isolated_storage) == live and storage.current_employee()["username"] == "alice"
 
 
 def test_last_event_for_backup_and_delete_and_survives_restore(people, tmp_path):

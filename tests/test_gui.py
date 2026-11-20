@@ -1053,15 +1053,18 @@ def test_first_run_restore_returns_to_login(db, make_window, tmp_path, monkeypat
     window = make_window()
     screen = window.auth_stack.currentWidget()
     assert isinstance(screen, app_module.RegisterScreen)
-    _answer_restore(monkeypatch, backup, "alice", "wrong-password-1", company="Restored Co")
+    _answer_restore(monkeypatch, backup, "alice", "wrong-password-1", company="Test Co")
     screen.restoreButton.click()
     assert screen.messageLabel.text().startswith("⚠ ") and storage.list_companies() == []
     _answer_restore(monkeypatch, backup, "alice", "alice-password-1", company="Restored Co")
     screen.restoreButton.click()
+    assert screen.messageLabel.text() == "⚠ This backup belongs to company 'Test Co'."
+    _answer_restore(monkeypatch, backup, "alice", "alice-password-1", company="Test Co")
+    screen.restoreButton.click()
     assert window.auth_stack.currentWidget() is window.login_screen
     assert window.login_screen.errorLabel.text() == "Backup restored. Log in again."
     _login(window, "alice", "alice-password-1")
-    assert window.current_employee["username"] == "alice" and storage.current_company() == "Restored Co"
+    assert window.current_employee["username"] == "alice" and storage.current_company() == "Test Co"
 
 
 def test_profile_password_change_needs_the_current_password(app, db):

@@ -571,6 +571,34 @@ def test_a_restore_on_a_new_install_logs_who_restored_it(db, staff, tmp_path):
     assert not [f for f in os.listdir(tmp_path / "new") if ".before-restore-" in f]   # nothing to keep
 
 
+def test_the_company_name_is_recorded_and_travels_with_the_backup(db, staff, path, tmp_path):
+    assert db.company_name() is None                                  # not recorded yet: unknown
+    db.set_company_name("Acme")
+    db.set_company_name("Acme Ltd")                                   # one row, replaced
+    assert db.company_name() == "Acme Ltd"
+    assert DatabaseManager(db.backup_to(staff[0], str(tmp_path / "b.db"))).company_name() == "Acme Ltd"
+    with closing(sqlite3.connect(path)) as conn:                     # a database made before the table
+        conn.execute("DROP TABLE company_info")
+        conn.commit()
+    assert db.company_name() is None
+
+
+def test_a_backup_of_another_company_is_refused_and_nothing_changes(db, staff, path, tmp_path):
+    admin, _ = staff
+    db.set_company_name("Acme")
+    backup = db.backup_to(admin, str(tmp_path / "backup.db"))
+    live = file_bytes(path)
+    with pytest.raises(ValueError, match=r"^This backup belongs to company 'Acme'\.$"):
+        db.restore_from(admin, backup, "admin", PW_ADMIN, "Beta")
+    assert file_bytes(path) == live and not [f for f in os.listdir(tmp_path) if ".before-restore-" in f]
+    assert db.restore_from(admin, backup, "admin", PW_ADMIN, "Acme")["is_admin"]
+
+
+def test_a_backup_without_a_company_name_restores_into_any_company(db, staff, tmp_path):
+    backup = db.backup_to(staff[0], str(tmp_path / "backup.db"))       # name never recorded
+    assert db.restore_from(staff[0], backup, "admin", PW_ADMIN, "Beta")["is_admin"]
+
+
 # ------------------------------------------------------ old databases (v3 / v4)
 LEGACY_KEY = "legacy-key-file-contents"
 OLD_A = "old-a"                  # a v4 password too short for a key slot (v4 had no minimum)

@@ -264,8 +264,10 @@ def open_company(company_name: str) -> None:
 
 
 def _new_company(company_name: str, fill) -> tuple:
-    """Make the company's folder, choose it and run fill() -> (ok, message) inside it.
-    On any failure the folder is removed and the company chosen before is chosen again
+    """Make the company's folder, choose it and run fill() -> (ok, message) inside it, then
+    record the name in its database and in company.txt. The company is listed (company.txt)
+    only once fill() made its admin, so a crash before that lists no company nobody can log
+    into. On any failure the folder is removed and the company chosen before is chosen again
     (logged out)."""
     name = (company_name or "").strip()
     if not 2 <= len(name) <= 40 or not _slug(name):
@@ -279,19 +281,22 @@ def _new_company(company_name: str, fill) -> tuple:
         return False, "A company with this name already exists"
     except OSError as e:
         return False, f"The company folder could not be made: {e}"
-    previous, ok, message = _company, False, "The company could not be created."
+    previous, done = _company, False
     try:
-        with open(os.path.join(folder, COMPANY_NAME_FILE), "w", encoding="utf-8") as f:
-            f.write(name)
         _select(name)
         ok, message = fill()
-    except (OSError, StorageError) as e:
+        if ok:
+            _get_db().set_company_name(name)
+            with open(os.path.join(folder, COMPANY_NAME_FILE), "w", encoding="utf-8") as f:
+                f.write(name)
+            done = True
+    except (OSError, sqlite3.Error, StorageError) as e:   # disk full, unreadable folder
         message = str(e)
     finally:
-        if not ok:
+        if not done:
             _select(previous)     # drop the handle before removing its file
             shutil.rmtree(folder, ignore_errors=True)
-    return ok, message
+    return done, message
 
 
 def create_company(company_name: str, full_name: str, username: str, password: str) -> tuple:
@@ -803,7 +808,7 @@ def restore_database(backup_path: str, username: str, password: str) -> tuple:
     if db.has_employees() and not (_session and _session["is_admin"]):
         return False, "Only the admin can restore a backup."
     try:
-        emp = db.restore_from(_session["id"] if _session else None, backup_path, username, password)
+        emp = db.restore_from(_session["id"] if _session else None, backup_path, username, password, _company)
     except (ValueError, PermissionError) as e:
         return False, str(e)
     except (OSError, sqlite3.Error) as e:   # disk full, unreadable file, locked database

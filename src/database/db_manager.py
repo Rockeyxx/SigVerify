@@ -123,6 +123,9 @@ _KEY_SLOTS_SQL = """
         wrapped_dek BLOB NOT NULL,
         CHECK ((kind = 'employee') = (employee_id IS NOT NULL))
     )"""
+# The company this database belongs to (one row; plain text, not secret). A database made
+# before it has no row, and its company is unknown.
+_COMPANY_INFO_SQL = "CREATE TABLE IF NOT EXISTS company_info (name TEXT NOT NULL)"
 _ONE_SHARED_SLOT_SQL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS one_shared_slot_per_kind ON key_slots(kind) "
     "WHERE kind != 'employee'"
@@ -265,6 +268,7 @@ class DatabaseManager:
             conn.execute(_EMPLOYEES_SQL)
             conn.execute(_KEY_SLOTS_SQL)
             conn.execute(_ONE_SHARED_SLOT_SQL)
+            conn.execute(_COMPANY_INFO_SQL)
             # `users` holds the clients (user_id = lower-cased client ID).
             # enrolled_by points at employees.id so a username rename detaches nothing.
             conn.execute("""
@@ -385,6 +389,21 @@ class DatabaseManager:
         if row is None or not row[1]:
             raise LookupError("Employee not found")
         return bool(row[0])
+
+    def company_name(self):
+        """The company name recorded in this database, or None (not recorded: unknown)."""
+        with closing(self.get_connection()) as conn:
+            try:
+                row = conn.execute("SELECT name FROM company_info").fetchone()
+            except sqlite3.OperationalError:          # made before the table existed
+                return None
+        return None if row is None else row[0]
+
+    def set_company_name(self, name: str) -> None:
+        with self._transaction() as conn:
+            conn.execute(_COMPANY_INFO_SQL)
+            conn.execute("DELETE FROM company_info")
+            conn.execute("INSERT INTO company_info (name) VALUES (?)", (name,))
 
     def has_employees(self) -> bool:
         with closing(self.get_connection()) as conn:
@@ -1056,7 +1075,7 @@ class DatabaseManager:
             self._log_event(conn, EVENT_BACKUP, None, None, actor_id, [os.path.basename(dest_path)])
         return dest_path
 
-    def restore_from(self, actor_id, backup_path: str, username: str, password: str) -> dict:
+    def restore_from(self, actor_id, backup_path: str, username: str, password: str, company: str = None) -> dict:
         """
         Replace this database with a backup. If this database has employees, only its active
         admin (`actor_id`) may do it (PermissionError). Everything is checked on a scratch
@@ -1073,7 +1092,10 @@ class DatabaseManager:
         replaced. A failure before the replacement leaves the live data as it was (the
         owner-only copy adds one "backup" audit row to the live file). Afterwards the store
         is unlocked with the backup's key. Returns that admin's employee dict.
-        Raises ValueError (not a usable backup), PermissionError (not an admin, wrong password).
+        With `company`, a backup that records another company name is refused before anything
+        is copied ("This backup belongs to company ..."); one with no name recorded is allowed.
+        Raises ValueError (not a usable backup, another company's), PermissionError (not an
+        admin, wrong password).
         """
         live_admin = None
         if self.has_employees():
@@ -1115,6 +1137,9 @@ class DatabaseManager:
                 raise ValueError("This file is not a backup of this app") from None
             except RuntimeError as e:
                 raise ValueError(str(e)) from None
+            recorded = candidate.company_name()
+            if company is not None and recorded is not None and recorded != company:
+                raise ValueError(f"This backup belongs to company '{recorded}'.")
             employee, _ = candidate.authenticate_employee(username, password)
             if employee is None:
                 raise PermissionError("The user ID or password does not open this backup")

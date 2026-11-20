@@ -18,7 +18,7 @@ def restore_from_backup(parent, new_company=False):
     Returns None when the employee cancels, otherwise storage's (success, message)."""
     company = None
     if new_company:
-        company, ok = QInputDialog.getText(parent, "Restore a company", "Name of the new company:")
+        company, ok = QInputDialog.getText(parent, "Restore a company", "Company name, as in the backup:")
         if not ok or not company.strip():
             return None
     path, _ = QFileDialog.getOpenFileName(parent, "Choose a backup", "", "Backup (*.db);;All files (*)")
