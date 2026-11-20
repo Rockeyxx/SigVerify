@@ -531,14 +531,14 @@ signature drifts over months, and references from one sitting fall behind it: on
 BiosecurID-SONOF writers enrolled at one sitting, the product refused 19.5% of genuine signers
 three sessions later at the shipped threshold, against 4.4% at the same sitting. References
 from several occasions follow the drift. After a verification that was accepted **and** in
-which the employee confirmed the person's identity, append that visit's embeddings (from the
+which the member confirmed the person's identity, append that visit's embeddings (from the
 same `verify()` inputs, re-embedded with `enroll_*`) to the person's stored references. The
 model side needs no change: `verify()` takes any number of references. Measured on SONOF:
 references from three occasions lowered the fused EER from 8.38% to 6.68%, and adding accepted
 signatures lowered FRR from 13.90% to 8.07% while FAR at the same threshold rose from 4.57% to
 6.31%.
 
-- Add only results with `decision == "Genuine"`, `degraded == False`, and the employee's
+- Add only results with `decision == "Genuine"`, `degraded == False`, and the member's
   confirmation. Never add a rejected, degraded or unconfirmed signing: an added forgery would
   stay in the references.
 - Store embeddings only, as at enrolment, with the date and `spatial_origin` of each one.
@@ -598,7 +598,7 @@ To preserve strict separation of concerns and engineering modularity:
   reference templates for comparison. The model branch never holds encryption keys and never performs
   cryptographic operations.
 - **Backend / Database Layer:** Manages application-layer AES-256-GCM encryption and decryption (ISO/IEC 18033-1),
-  key management (one wrapped data key per employee, unlocked by the login password), and SQLite persistence (ISO/IEC 9075-1). It receives plain
+  key management (one wrapped data key per member, unlocked by the login password), and SQLite persistence (ISO/IEC 9075-1). It receives plain
   embeddings from `SignatureService.enroll_*()`, encrypts them for storage, and decrypts them before passing
   to `SignatureService.verify()`.
 
@@ -639,51 +639,51 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   deletions, every refused re-enrolment, deletion, replay or verification (stale set, other
   tablet), every account change (`employee added`, `password reset`,
   `employee removed`, `profile changed`, never the password itself) and every `backup` are
-  logged too, each with its employee. Only `verify` rows count as verifications.
-- **One encrypted folder per company.** Register creates a company: its own folder
+  logged too, each with its member. Only `verify` rows count as verifications.
+- **One encrypted folder per vault.** The user-facing words are vault, owner, member and signer; the code still calls them company, admin, employee and client (`storage.create_company`, folder `companies/`, `is_admin`). Register creates a vault: its own folder
   (`<SIGVER_HOME or ~/.sigverify>/companies/<slug>/`, mode 0700), its own database and
-  data key, and its own admin (the person registering), employees and clients. A company
-  cannot list, read, verify or decrypt another company's clients: no employee, password
-  or key slot is shared, and the same User ID in two companies is two accounts. The
-  company name is plain text in `company.txt` (the login screen lists it); it is not a
-  secret. A company name has 2 to 40 characters, at least one a letter or digit of any
+  data key, and its own owner (the person registering), members and signers. A vault
+  cannot list, read, verify or decrypt another vault's signers: no member, password
+  or key slot is shared, and the same User ID in two vaults is two accounts. The
+  vault name is plain text in `company.txt` (the login screen lists it); it is not a
+  secret. A vault name has 2 to 40 characters, at least one a letter or digit of any
   script; its folder `<slug>` is the case-folded name with every other run of characters
   made one `-`, so it never leaves `companies/`. A name whose slug is a Windows device name
-  (`con`, `prn`, `aux`, `nul`, `com1` to `com9`, `lpt1` to `lpt9`) is refused. A company is
-  listed only after its admin exists. The name is also recorded inside the company's
-  database (`company_info`), so a backup carries it: a restore over a company refuses a
-  backup of another company, and `restore_company` refuses a name other than the one the
+  (`con`, `prn`, `aux`, `nul`, `com1` to `com9`, `lpt1` to `lpt9`) is refused. A vault is
+  listed only after its owner exists. The name is also recorded inside the vault's
+  database (`company_info`), so a backup carries it: a restore over a vault refuses a
+  backup of another vault, and `restore_company` refuses a name other than the one the
   backup records (a backup with no name recorded is allowed). Every `src/gui/storage.py`
-  call works on the current company
+  call works on the current vault
   (`open_company`, `create_company`, `restore_company`) and raises `StorageLockedError`
-  when none is chosen. Inside a company the rules below hold unchanged.
-- **The login password unlocks the data (one key slot per employee).** The random data
-  key is stored only wrapped, once per employee, by a key derived with scrypt
-  (`DatabaseManager.KDF_N = 2**17`) from that employee's password. Unwrapping is the
+  when none is chosen. Inside a vault the rules below hold unchanged.
+- **The login password unlocks the data (one key slot per member).** The random data
+  key is stored only wrapped, once per member, by a key derived with scrypt
+  (`DatabaseManager.KDF_N = 2**17`) from that member's password. Unwrapping is the
   login check, so no password hash is stored. No password, no unwrapped key and no key
-  file is ever written to disk, the database, a log or a backup. An employee changes
+  file is ever written to disk, the database, a log or a backup. A member changes
   only their own profile, and a new password needs the current one. A forgotten password
-  is reset by the admin, who wraps a new copy (never their own: the admin uses their
+  is reset by the owner, who wraps a new copy (never their own: the owner uses their
   profile). If every password is lost, the templates cannot be recovered. Passwords need
   `MIN_PASSWORD_LENGTH` (`config/settings.py`) characters. `SIGVER_DB_PASSPHRASE` is for
   tests and CI only.
 - **A write is done by whoever is logged in.** `src/gui/storage.py` takes the acting
-  employee from the session, never from a name a page passes; a different name is
-  refused, so nobody acts, or is logged, as the admin.
-- **Clients belong to their company, not to one employee.** Any employee of the company
-  enrols a new client, adds a set the client lacks, and verifies any of its clients. Only
-  the admin (who registered the company) adds employees, resets a password, removes an
-  employee, deletes a client, replaces or removes a set a client already holds, or
-  changes a client's name.
+  member from the session, never from a name a page passes; a different name is
+  refused, so nobody acts, or is logged, as the owner.
+- **Signers belong to their vault, not to one member.** Any member of the vault
+  enrols a new signer, adds a set the signer lacks, and verifies any of its signers. Only
+  the owner (who registered the vault) adds members, resets a password, removes a
+  member, deletes a signer, replaces or removes a set a signer already holds, or
+  changes a signer's name.
   `enrolled_by` is recorded and never used to block. Every enrolment, re-enrolment and
-  deletion, and every refused attempt, goes to the audit log with the employee.
+  deletion, and every refused attempt, goes to the audit log with the member.
 - **Data after capture.** The database stores embeddings only, never an image, an
   image path or a trajectory. Templates have no
-  expiry date: a client's templates are removed only when the admin deletes the client.
+  expiry date: a signer's templates are removed only when the owner deletes the signer.
 - **Replay check.** Each verification row stores the SHA-256 of each probe embedding
-  (never the embedding). A probe equal to one of the client's stored references (an
+  (never the embedding). A probe equal to one of the signer's stored references (an
   enrolment scan given again), a probe whose hash was already accepted for the same
-  client within `REPLAY_WINDOW_DAYS`, or a visit that gives one signing twice, is a replay.
+  signer within `REPLAY_WINDOW_DAYS`, or a visit that gives one signing twice, is a replay.
   The hashing happens in the backend: `verify()` only returns the embeddings it already
   made (`probe_embeddings`), and the GUI hashes them with `db_manager.probe_fingerprint`,
   the one function that also hashes the stored references, so the two can never differ.
@@ -696,33 +696,33 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   pen set stores the tablet model and operating system it was signed on, and a signing
   from another model or system is refused. Both refusals are logged as a `verify refused`
   event with the reasons shown, and are not counted.
-- **Backup and restore.** Only the admin backs up, and a backup is a consistent copy of
+- **Backup and restore.** Only the owner backs up, and a backup is a consistent copy of
   the encrypted database, created owner-only (mode 0600 on Linux and macOS; Windows ignores
   the mode) and never over an existing file.
-  It opens with the same passwords. Only the admin restores over the current company
-  (`restore_company` on the register screen makes a new company from a backup instead,
+  It opens with the same passwords. Only the owner restores over the current vault
+  (`restore_company` on the register screen makes a new vault from a backup instead,
   and removes its folder again on any failure), and `DatabaseManager.restore_from` checks this itself. A restore is
   checked on a scratch copy first: a backup holding a trigger, a view or a table this app
   never creates is refused, and it must be a sound database of a readable schema, opened
-  by an admin of the backup. Then the live database is copied, owner-only, to
+  by an owner of the backup. Then the live database is copied, owner-only, to
   `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside it (`-2`, `-3` on a clash), and
   a `restore` row naming who restored and from which file goes into the backup's audit
   log. Nothing is replaced until all of that passes. A restore never rolls the audit log
   back: every live audit row the backup does not hold is carried into the restored
-  database first, in live order (with the employee's username as `employee_label`), and
+  database first, in live order (with the member's username as `employee_label`), and
   the `restore` row says how many were carried. Rows are matched by content, never by
   timestamp, so a row written in the backup's last second or after the clock stepped back
-  is kept. The Employees page shows the last backup and
-  the last client deletion, each with when and by whom, read from the audit log.
+  is kept. The Members page shows the last backup and
+  the last signer deletion, each with when and by whom, read from the audit log.
 - **Old databases are refused, not upgraded.** A v3 or v4 database is refused when its
-  company is opened at login (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
-  and the owner moves that company's folder away and enrols again. A
-  `signatures.db` directly in the base folder (made before companies) is ignored. No key file is read.
-- **Two known limits, documented instead of built.** Removing an employee does not change
+  vault is opened at login (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
+  and the owner moves that vault's folder away and enrols again. A
+  `signatures.db` directly in the base folder (made before vaults) is ignored. No key file is read.
+- **Two known limits, documented instead of built.** Removing a member does not change
   the data key, so a copy of the database taken before the removal still opens with their
   old password (key rotation would be a separate, manual step, as in Bitwarden
   organisations). `is_admin` is a plain column: signing it with a key derived from the
-  data key would not help, because any employee with a password can unwrap the data key
+  data key would not help, because any member with a password can unwrap the data key
   and re-sign a hand-edited flag. Protecting against someone who holds both the file and
   a valid password needs a server, which is a non-goal.
 

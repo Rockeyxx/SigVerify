@@ -245,8 +245,8 @@ def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_ima
                        bool(ref_spatial), bool(ref_temporal))
     if mode is None:
         raise ValueError(
-            "Nothing to compare: this client has no references for the signature given. "
-            "Use the kind of signature the client was enrolled with.")
+            "Nothing to compare: this signer has no references for the signature given. "
+            "Use the kind of signature the signer was enrolled with.")
 
     service = _get_service()
     temp_files = []

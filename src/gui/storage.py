@@ -7,7 +7,7 @@ Companies: Register creates a COMPANY, with its own folder, encrypted database, 
 admin (the person registering), employees and clients. Companies cannot read each other's
 data. Pick one with open_company() (or create_company() / restore_company()); every other
 function works on that current company. With no company chosen they raise
-StorageLockedError("Choose a company first."). logout() keeps the company chosen.
+StorageLockedError("Choose a vault first."). logout() keeps the company chosen.
 
 Inside a company, everything lives in one SQLite database managed by
 src.database.db_manager.DatabaseManager:
@@ -78,8 +78,8 @@ HOME_ENV_VAR = "SIGVER_HOME"
 SIGN_AGAIN = "Sign again"
 
 ADMIN_WARNING = (
-    "Passwords are not stored anywhere. If the admin and every employee forget their "
-    "passwords, the enrolled signatures cannot be recovered and every client must enrol again."
+    "Passwords are not stored anywhere. If the owner and every member forget their "
+    "passwords, the enrolled signatures cannot be recovered and every signer must enrol again."
 )
 
 
@@ -152,7 +152,7 @@ def _get_db() -> DatabaseManager:
     with _db_lock:
         if _db is None:
             if _company is None:
-                raise StorageLockedError("Choose a company first.")
+                raise StorageLockedError("Choose a vault first.")
             data_dir = _company_folder(_company)
             db_path = os.path.join(data_dir, DB_FILENAME)
             try:
@@ -162,7 +162,7 @@ def _get_db() -> DatabaseManager:
                     raise StorageError(
                         "This database was made by an older version of the app and cannot be opened. "
                         f"Move the folder {data_dir} somewhere else and start the app again; "
-                        "clients must enrol again.") from None
+                        "signers must enrol again.") from None
                 raise StorageError(str(e)) from None
             env = os.environ.get(PASSPHRASE_ENV_VAR)
             try:
@@ -258,7 +258,7 @@ def list_companies() -> list:
     except FileNotFoundError:
         return []
     except OSError as e:                     # not a folder, no permission
-        raise StorageError(f"The company folder {_companies_dir()} cannot be read: {e}") from None
+        raise StorageError(f"The vault folder {_companies_dir()} cannot be read: {e}") from None
     names = [_read_company_name(slug) for slug in slugs]
     return sorted((n for n in names if n), key=str.casefold)
 
@@ -272,7 +272,7 @@ def open_company(company_name: str) -> None:
     Raises StorageError for an unknown name (the chosen company stays as it was)."""
     name = _read_company_name(_slug(company_name or ""))
     if name is None:
-        raise StorageError(f"No company named '{(company_name or '').strip()}'.")
+        raise StorageError(f"No vault named '{(company_name or '').strip()}'.")
     _select(name)
 
 
@@ -284,18 +284,18 @@ def _new_company(company_name: str, fill) -> tuple:
     (logged out)."""
     name = (company_name or "").strip()
     if not 2 <= len(name) <= 40 or not _slug(name):
-        return False, "The company name must have 2 to 40 characters, with at least one letter or digit."
+        return False, "The vault name must have 2 to 40 characters, with at least one letter or digit."
     if _slug(name) in _WINDOWS_DEVICE_NAMES:
-        return False, f"'{name}' is a name Windows keeps for a device. Choose another company name."
+        return False, f"'{name}' is a name Windows keeps for a device. Choose another vault name."
     folder = _company_folder(name)
     try:
         os.makedirs(_data_dir(), mode=0o700, exist_ok=True)
         os.makedirs(_companies_dir(), mode=0o700, exist_ok=True)
         os.mkdir(folder, 0o700)
     except FileExistsError:
-        return False, "A company with this name already exists"
+        return False, "A vault with this name already exists"
     except OSError as e:
-        return False, f"The company folder could not be made: {e}"
+        return False, f"The vault folder could not be made: {e}"
     previous, done = _company, False
     try:
         _select(name)
@@ -359,14 +359,14 @@ def register_employee(full_name: str, username: str, password: str) -> tuple:
     try:
         emp_id = db.create_employee(full_name, username, password, created_by=creator)
     except PermissionError:
-        return False, "Only the admin can add employees. Ask the admin to add your account."
+        return False, "Only the owner can add members. Ask the owner to add your account."
     except DatabaseLockedError:
-        return False, "Log in as the admin to add employees."
+        return False, "Log in as the owner to add members."
     except (ValueError, LookupError, RuntimeError) as e:
         return False, str(e)
     if first:
         _session = {"id": emp_id, "username": username.strip(), "full_name": full_name, "is_admin": True}
-        return True, f"Admin account created. {ADMIN_WARNING}"
+        return True, f"Owner account created. {ADMIN_WARNING}"
     return True, "Account created successfully"
 
 
@@ -393,7 +393,7 @@ def update_employee_profile(old_username: str, new_full_name: str, new_username:
     except NotLoggedInAsError:
         return False, "You can only change your own profile", None
     except LookupError:
-        return False, "Employee not found", None
+        return False, "Member not found", None
     except (PermissionError, ValueError, StorageError) as e:
         return False, str(e), None
     _session = emp
@@ -524,11 +524,11 @@ def save_client_enrollment(client_id: str, dynamic_refs, employee_username: str,
     """
     key = _norm(client_id or "")
     if not key:
-        return False, "Client ID is required"
+        return False, "Signer ID is required"
     if "|" in key:
-        return False, "Client ID must not contain '|'"
+        return False, "Signer ID must not contain '|'"
     if _employee_id(employee_username or "") is None:
-        return False, "Employee not found"
+        return False, "Member not found"
     try:
         emp_id = _actor(employee_username)
     except (PermissionError, StorageError) as e:
@@ -543,11 +543,11 @@ def save_client_enrollment(client_id: str, dynamic_refs, employee_username: str,
         )
     except PermissionError:
         return False, (
-            f"'{client_id}' already has references. Only the admin can replace them; "
-            f"ask the admin to re-enrol this client."
+            f"'{client_id}' already has references. Only the owner can replace them; "
+            f"ask the owner to re-enrol this signer."
         )
     except LookupError:
-        return False, "Employee not found"
+        return False, "Member not found"
     except (ValueError, StorageError) as e:
         return False, str(e)
     return True, "Saved"
@@ -563,8 +563,8 @@ def delete_client(client_id: str, employee_username: str = None) -> tuple:
     except (PermissionError, LookupError, StorageError) as e:
         return False, str(e)
     if not deleted:
-        return False, f"No client '{client_id.strip()}'"
-    return True, f"Deleted client '{client_id.strip()}'"
+        return False, f"No signer '{client_id.strip()}'"
+    return True, f"Deleted signer '{client_id.strip()}'"
 
 
 def count_clients_enrolled_this_month(employee_username: str = None) -> int:
@@ -715,14 +715,14 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
             problems.append(
                 f"The {spatial_origin} references were made by another model version "
                 f"({found['model_version']}, this app runs {MODEL_VERSION}). "
-                f"Ask the admin to re-enrol the client's paper signatures.")
+                f"Ask the owner to re-enrol the signer's paper signatures.")
     pen = record["temporal_set"]
     if use_pen and pen:
         if pen["stale"]:
             problems.append(
                 f"The pen references were made by another model version "
                 f"({pen['model_version']}, this app runs {MODEL_VERSION}). "
-                f"Ask the admin to re-enrol the client's pen signatures.")
+                f"Ask the owner to re-enrol the signer's pen signatures.")
         stored = pen["capture_device"]
         if stored and not capture_device:
             problems.append(
@@ -733,7 +733,7 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
                 f"The pen references were signed on {stored.get('device_model')} "
                 f"({stored.get('os')}); this signing is on {capture_device.get('device_model')} "
                 f"({capture_device.get('os')}). Sign on the same tablet model and system, "
-                f"or ask the admin to re-enrol the pen signatures.")
+                f"or ask the owner to re-enrol the pen signatures.")
     return problems
 
 
@@ -795,7 +795,7 @@ def backup_database(dest_folder: str, employee_username: str) -> tuple:
     No password and no unwrapped key goes into the copy; it opens with the same employee
     passwords. Returns (success, backup file path or message)."""
     if _employee_id(employee_username or "") is None:
-        return False, "Employee not found"
+        return False, "Member not found"
     try:
         actor = _actor(employee_username)
         db = _unlocked_db()
@@ -821,7 +821,7 @@ def restore_database(backup_path: str, username: str, password: str) -> tuple:
     global _session
     db = _get_db()
     if db.has_employees() and not (_session and _session["is_admin"]):
-        return False, "Only the admin can restore a backup."
+        return False, "Only the owner can restore a backup."
     try:
         emp = db.restore_from(_session["id"] if _session else None, backup_path, username, password, _company)
     except (ValueError, PermissionError) as e:

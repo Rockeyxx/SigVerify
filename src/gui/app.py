@@ -111,16 +111,17 @@ class LoginScreen(QWidget):
         content.setSpacing(14)
         content.setAlignment(Qt.AlignHCenter)
 
-        title = QLabel("Employee Login")
+        title = QLabel("Member Login")
         title.setProperty("role", "hero-title")
         title.setAlignment(Qt.AlignHCenter)
         content.addWidget(title)
         content.addSpacing(10)
 
-        self.companyInput = QComboBox()            # the last company used is preselected
+        self.companyInput = QComboBox()            # the last vault used is preselected
         self.companyInput.addItems(storage.list_companies())
         self.companyInput.setCurrentText(storage.current_company() or "")
         self.companyInput.setFixedWidth(260)
+        self.companyInput.setHidden(self.companyInput.count() == 1)   # one vault: nothing to pick
         content.addWidget(self.companyInput, alignment=Qt.AlignHCenter)
 
         self.usernameInput = QLineEdit()
@@ -148,7 +149,7 @@ class LoginScreen(QWidget):
         login_button.clicked.connect(self._handle_login)
         content.addWidget(login_button, alignment=Qt.AlignHCenter)
 
-        self.registerButton = QPushButton("Register a new company")
+        self.registerButton = QPushButton("Create a new vault")
         self.registerButton.setProperty("role", "ghost")
         self.registerButton.clicked.connect(go_register)
         content.addWidget(self.registerButton, alignment=Qt.AlignHCenter)
@@ -185,7 +186,7 @@ class LoginScreen(QWidget):
 
 
 class RegisterScreen(QWidget):
-    """Registers a new company (its own encrypted data; the person registering is its admin),
+    """Creates a new vault (its own encrypted data; the person registering is its admin),
     or makes one from a backup."""
 
     def __init__(self, on_register_success, on_restored, go_back=None):
@@ -194,7 +195,7 @@ class RegisterScreen(QWidget):
         content.setSpacing(14)
         content.setAlignment(Qt.AlignHCenter)
 
-        title = QLabel("Register a new company")
+        title = QLabel("Create a vault")
         title.setProperty("role", "hero-title")
         title.setAlignment(Qt.AlignHCenter)
         content.addWidget(title)
@@ -208,7 +209,7 @@ class RegisterScreen(QWidget):
         content.addSpacing(10)
 
         self.companyInput = QLineEdit()
-        self.companyInput.setPlaceholderText("Company name")
+        self.companyInput.setPlaceholderText("Vault name (your company, branch, or your own name)")
         self.companyInput.setFixedWidth(260)
         content.addWidget(self.companyInput, alignment=Qt.AlignHCenter)
 
@@ -216,6 +217,8 @@ class RegisterScreen(QWidget):
         self.fullNameInput.setPlaceholderText("Full Name")
         self.fullNameInput.setFixedWidth(260)
         content.addWidget(self.fullNameInput, alignment=Qt.AlignHCenter)
+        self._prefilled = ""                       # the vault name follows Full Name until the user edits it
+        self.fullNameInput.textChanged.connect(self._prefill_vault_name)
 
         self.usernameInput = QLineEdit()
         self.usernameInput.setPlaceholderText("User ID")
@@ -240,14 +243,14 @@ class RegisterScreen(QWidget):
         self.messageLabel.setFixedWidth(420)
         content.addWidget(self.messageLabel, alignment=Qt.AlignHCenter)
 
-        self.createButton = QPushButton("Create Company")
+        self.createButton = QPushButton("Create Vault")
         self.createButton.setProperty("role", "primary")
         self.createButton.setFixedWidth(260)
         self.createButton.setFixedHeight(44)
         self.createButton.clicked.connect(self._handle_register)
         content.addWidget(self.createButton, alignment=Qt.AlignHCenter)
 
-        self.restoreButton = QPushButton("Restore a company from a backup")
+        self.restoreButton = QPushButton("Restore a vault from a backup")
         self.restoreButton.setProperty("role", "ghost")
         self.restoreButton.clicked.connect(self._handle_restore)
         content.addWidget(self.restoreButton, alignment=Qt.AlignHCenter)
@@ -261,6 +264,11 @@ class RegisterScreen(QWidget):
         self.on_register_success = on_register_success
         self.on_restored = on_restored
         self.setLayout(centered(content))
+
+    def _prefill_vault_name(self, full_name):
+        if self.companyInput.text() == self._prefilled:
+            self.companyInput.setText(full_name)
+        self._prefilled = full_name
 
     def _handle_restore(self):
         outcome = restore_from_backup(self, new_company=True)
@@ -317,7 +325,7 @@ class MainWindow(QMainWindow):
         self.startup_failed = False
         try:
             first_run = storage.is_first_run()
-        except storage.StorageError as e:   # the company folder cannot be read
+        except storage.StorageError as e:   # the vault folder cannot be read
             self.startup_failed = True
             QMessageBox.critical(None, STORAGE_ERROR_TITLE, str(e))
             QTimer.singleShot(0, QApplication.instance().quit)
@@ -337,8 +345,8 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _build_auth_stack(self, first_run=False):
-        """First run (no company yet): Register a new company. Afterwards: Welcome, then Login,
-        which also leads to Register a new company."""
+        """First run (no company yet): Create a vault. Afterwards: Welcome, then Login,
+        which also leads to Create a new vault."""
         self.auth_stack = QStackedWidget()
         show_login = lambda: self.auth_stack.setCurrentWidget(self.login_screen)  # noqa: E731
         self.login_screen = LoginScreen(

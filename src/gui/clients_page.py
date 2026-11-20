@@ -22,18 +22,18 @@ class ClientsPage(QWidget):
         layout.setContentsMargins(30, 24, 30, 24)
         layout.setSpacing(10)
 
-        title = QLabel("Clients")
+        title = QLabel("Signers")
         title.setProperty("role", "title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Double-click a row to open that client in Enrollment")
+        subtitle = QLabel("Double-click a row to open that signer in Enrollment")
         subtitle.setProperty("role", "muted")
         layout.addWidget(subtitle)
 
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(
-            ["Client Name", "Enrolled On", "References", "Last Verification"]
+            ["Signer Name", "Enrolled On", "References", "Last Verification"]
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)

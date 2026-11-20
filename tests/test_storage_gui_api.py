@@ -75,7 +75,7 @@ def login(username, password):
 def test_registering_a_company_makes_its_admin_who_is_told_passwords_cannot_be_recovered():
     assert storage.is_first_run() and storage.current_employee() is None and storage.current_company() is None
     ok, msg = storage.create_company(COMPANY, "Alice A", "alice", PW_A)
-    assert ok and msg.startswith("Admin account created") and storage.ADMIN_WARNING in msg
+    assert ok and msg.startswith("Owner account created") and storage.ADMIN_WARNING in msg
     assert storage.current_employee() == {"full_name": "Alice A", "username": "alice", "is_admin": True}
     assert "cannot be recovered" in storage.ADMIN_WARNING and not storage.is_first_run()
     assert storage.current_company() == COMPANY
@@ -87,7 +87,7 @@ def test_registering_a_company_makes_its_admin_who_is_told_passwords_cannot_be_r
 def test_only_a_logged_in_admin_adds_employees(people):
     storage.logout()
     ok, msg = storage.register_employee("Carol", "carol", "carol-password-1")
-    assert not ok and "Only the admin" in msg
+    assert not ok and "Only the owner" in msg
     login("bob", PW_B)
     assert not storage.register_employee("Carol", "carol", "carol-password-1")[0]
     login("alice", PW_A)
@@ -195,37 +195,37 @@ def test_admin_resets_a_forgotten_password_and_removes_an_employee(people):
 
 
 def test_renaming_a_username_keeps_clients_and_log_visible(people):
-    assert storage.save_client_enrollment("Client One", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")[0]
-    storage.append_verification_log("Client One", "Genuine", 88.0, "scan", "alice")
+    assert storage.save_client_enrollment("Signer One", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")[0]
+    storage.append_verification_log("Signer One", "Genuine", 88.0, "scan", "alice")
     assert storage.update_employee_profile("alice", "Alice A", "alice.renamed")[0]
 
     clients = storage.list_clients("alice.renamed")
-    assert [c["key"] for c in clients] == ["client one"]
+    assert [c["key"] for c in clients] == ["signer one"]
     assert clients[0]["enrolled_by"] == "alice.renamed"
-    assert storage.client_exists("client one", "alice.renamed")
-    assert storage.get_client("client one", "alice.renamed") is not None
-    assert storage.get_client("client one", "alice") is None
+    assert storage.client_exists("signer one", "alice.renamed")
+    assert storage.get_client("signer one", "alice.renamed") is not None
+    assert storage.get_client("signer one", "alice") is None
     assert storage.get_verification_stats("alice.renamed")["total"] == 1
     assert storage.get_verification_log("alice.renamed")[0]["employee"] == "alice.renamed"
     assert storage.count_clients_enrolled_this_month("alice.renamed") == 1
-    assert storage.save_client_enrollment("client one", [], "alice.renamed", spatial_embeddings=spatial(base=9), spatial_origin="scan")[0]
+    assert storage.save_client_enrollment("signer one", [], "alice.renamed", spatial_embeddings=spatial(base=9), spatial_origin="scan")[0]
 
 
 # ------------------------------------------------------------------ clients
 def test_save_and_get_client_shape_and_round_trip(people):
     embs = spatial()
-    assert storage.save_client_enrollment("  Client A ", [], "alice", spatial_embeddings=embs, spatial_origin="scan") == (True, "Saved")
-    rec = storage.get_client("CLIENT a", "alice")
+    assert storage.save_client_enrollment("  Signer A ", [], "alice", spatial_embeddings=embs, spatial_origin="scan") == (True, "Saved")
+    rec = storage.get_client("SIGNER a", "alice")
     assert set(rec) == CLIENT_KEYS and set(rec["spatial_sets"]["scan"]) == SET_KEYS
-    assert rec["display_name"] == "Client A"
+    assert rec["display_name"] == "Signer A"
     assert rec["enrolled_by"] == "alice"
     assert rec["spatial_embeddings"] == embs
     assert rec["dynamic_references"] == [] and rec["temporal_set"] is None
     assert rec["spatial_origin"] == "scan"
     datetime.fromisoformat(rec["enrolled_at"])
     datetime.fromisoformat(rec["updated_at"])
-    assert storage.client_exists("client a") and storage.client_exists("CLIENT A", "alice")
-    assert not storage.client_exists("client a", "bob") and not storage.client_exists("nope")
+    assert storage.client_exists("signer a") and storage.client_exists("SIGNER A", "alice")
+    assert not storage.client_exists("signer a", "bob") and not storage.client_exists("nope")
 
 
 def test_the_client_list_is_the_companys_and_can_be_narrowed(people):
@@ -245,7 +245,7 @@ def test_a_non_admin_cannot_replace_a_clients_references(people):
     storage.save_client_enrollment("Shared", [], "alice", spatial_embeddings=mine, spatial_origin="scan")
     login("bob", PW_B)
     ok, msg = storage.save_client_enrollment("SHARED", [], "bob", spatial_embeddings=spatial(base=77), spatial_origin="scan")
-    assert ok is False and "Only the admin" in msg
+    assert ok is False and "Only the owner" in msg
     assert storage.get_client("shared")["spatial_embeddings"] == mine
     # adding a set the client does not have yet is an enrolment, open to everyone
     assert storage.save_client_enrollment("shared", pen(), "bob", spatial_embeddings=None, spatial_origin="scan")[0]
@@ -276,7 +276,7 @@ def test_bad_input_is_refused_without_touching_old_data(people):
     assert storage.get_client("c", "alice")["spatial_embeddings"] == old
     assert storage.save_client_enrollment("", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")[0] is False
     assert storage.save_client_enrollment("a|b", [], "alice", spatial_embeddings=spatial(1), spatial_origin="scan")[0] is False
-    assert storage.save_client_enrollment("C", [], "ghost", spatial_embeddings=spatial(1), spatial_origin="scan") == (False, "Employee not found")
+    assert storage.save_client_enrollment("C", [], "ghost", spatial_embeddings=spatial(1), spatial_origin="scan") == (False, "Member not found")
     assert storage.save_client_enrollment("New", None, "alice", spatial_embeddings=None)[0] is False   # nothing to save
 
 
@@ -311,14 +311,14 @@ def test_only_the_admin_deletes_and_the_log_is_kept(people):
     login("bob", PW_B)
     storage.save_client_enrollment("Gone", [], "bob", spatial_embeddings=spatial(), spatial_origin="scan")
     storage.append_verification_log("Gone", "Genuine", 90.0, "scan", "bob")
-    assert storage.delete_client("Gone", "bob") == (False, "Only the admin can delete a client")
+    assert storage.delete_client("Gone", "bob") == (False, "Only the owner can delete a signer")
     assert storage.delete_client("Gone", "ghost")[0] is False
     assert storage.client_exists("gone")
     login("alice", PW_A)
-    assert storage.delete_client("Gone", "alice") == (True, "Deleted client 'Gone'")
+    assert storage.delete_client("Gone", "alice") == (True, "Deleted signer 'Gone'")
     assert storage.get_client("gone") is None and not storage.client_exists("gone")
     assert storage.get_last_verification_for_client("gone", "bob") is not None
-    assert storage.delete_client("never existed", "alice") == (False, "No client 'never existed'")
+    assert storage.delete_client("never existed", "alice") == (False, "No signer 'never existed'")
     assert [e["event"] for e in storage.get_audit_log() if e["client_key"]] == [
         "enrol", "verify", "delete refused", "delete"]
 
@@ -337,20 +337,20 @@ def test_count_clients_enrolled_this_month(people):
 
 # ---------------------------------------------------------------------- log
 def test_log_events_and_stats(people):
-    storage.append_verification_log("Client X", "Genuine", 87.3, "multimodal", "alice")
-    storage.append_verification_log("client x", "Forged", 61.0, "scan", "alice")
+    storage.append_verification_log("Signer X", "Genuine", 87.3, "multimodal", "alice")
+    storage.append_verification_log("signer x", "Forged", 61.0, "scan", "alice")
     login("bob", PW_B)
-    storage.append_verification_log("Client Y", "Genuine", 90.5, "scan", "bob")
+    storage.append_verification_log("Signer Y", "Genuine", 90.5, "scan", "bob")
     events = storage.get_verification_log("alice")
     assert [e["decision"] for e in events] == ["Genuine", "Forged"]
     assert set(events[0]) == LOG_KEYS and events[0]["event"] == "verify"
-    assert events[0]["client_key"] == "client x" and events[0]["client_display_name"] == "Client X"
+    assert events[0]["client_key"] == "signer x" and events[0]["client_display_name"] == "Signer X"
     assert events[0]["confidence"] == 87.3 and events[0]["employee"] == "alice"
     datetime.fromisoformat(events[0]["timestamp"])
     assert len(storage.get_verification_log()) == 3
-    assert storage.get_last_verification_for_client("CLIENT X", "alice")["decision"] == "Forged"
-    assert storage.get_last_verification_for_client("client x", "bob") is None
-    assert storage.get_last_verification_for_client("client y")["employee"] == "bob"
+    assert storage.get_last_verification_for_client("SIGNER X", "alice")["decision"] == "Forged"
+    assert storage.get_last_verification_for_client("signer x", "bob") is None
+    assert storage.get_last_verification_for_client("signer y")["employee"] == "bob"
     assert storage.get_verification_stats("alice") == {"total": 2, "genuine": 1, "genuine_rate": 50.0}
     assert storage.get_verification_stats() == {"total": 3, "genuine": 2, "genuine_rate": 66.7}
     assert storage.get_verification_stats("ghost") == {"total": 0, "genuine": 0, "genuine_rate": 0.0}
@@ -617,10 +617,10 @@ def test_an_enrolment_scan_given_again_as_the_probe_is_a_replay(people):
 
 
 def test_a_non_admin_cannot_swap_a_clients_name(people):
-    storage.save_client_enrollment("Client", None, "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
+    storage.save_client_enrollment("Signer", None, "alice", spatial_embeddings=spatial(1), spatial_origin="scan")
     login("bob", PW_B)
-    storage.save_client_enrollment("CLIENT", pen(), "bob", spatial_embeddings=None)
-    assert storage.get_client("client")["display_name"] == "Client"
+    storage.save_client_enrollment("SIGNER", pen(), "bob", spatial_embeddings=None)
+    assert storage.get_client("signer")["display_name"] == "Signer"
 
 
 # --------------------------------------------------- confirmed signings (restored)
@@ -720,7 +720,7 @@ def test_backup_and_restore(people, tmp_path):
     assert storage.delete_client("C", "alice")[0]
 
     login("bob", PW_B)
-    assert storage.restore_database(path, "bob", PW_B) == (False, "Only the admin can restore a backup.")
+    assert storage.restore_database(path, "bob", PW_B) == (False, "Only the owner can restore a backup.")
     login("alice", PW_A)
     ok, msg = storage.restore_database(path, "alice", "wrong-password-1")
     assert not ok and "does not open" in msg and storage.get_client("c") is None    # nothing replaced
@@ -755,7 +755,7 @@ def test_a_non_admin_session_cannot_restore_and_nothing_changes(people, tmp_path
     login("bob", PW_B)
     live = db_bytes(isolated_storage)
     ok, msg = storage.restore_database(path, "alice", PW_A)
-    assert not ok and "admin" in msg and db_bytes(isolated_storage) == live
+    assert not ok and "owner" in msg and db_bytes(isolated_storage) == live
 
 
 def test_a_failing_copy_of_the_live_database_is_reported_and_nothing_changes(people, tmp_path, isolated_storage,
@@ -903,7 +903,7 @@ def test_company_names_are_checked_and_unique(isolated_storage):
     assert storage.list_companies() == ["Acme Inc."]
     assert (company_dir(isolated_storage, "acme-inc") / "company.txt").read_text() == "Acme Inc."
     assert storage.create_company("ACME inc", "Bob B", "bob", PW_B) == (
-        False, "A company with this name already exists")
+        False, "A vault with this name already exists")
     assert storage.current_company() == "Acme Inc." and storage.current_employee()["username"] == "alice"
 
 
@@ -932,13 +932,13 @@ def test_a_company_name_never_leaves_the_companies_folder(isolated_storage):
     assert sorted(os.listdir(isolated_storage)) == ["companies"]
     for bad in ("..", "./", "__"):
         assert storage.create_company(bad, "Alice A", "alice", PW_A) == (
-            False, "The company name must have 2 to 40 characters, with at least one letter or digit.")
+            False, "The vault name must have 2 to 40 characters, with at least one letter or digit.")
 
 
 def test_windows_device_names_are_refused_as_company_names(isolated_storage):
     for bad in ("CON", "prn", " Aux ", "nul.", "COM1", "lpt9"):
         ok, msg = storage.create_company(bad, "Alice A", "alice", PW_A)
-        assert not ok and msg == f"'{bad.strip()}' is a name Windows keeps for a device. Choose another company name."
+        assert not ok and msg == f"'{bad.strip()}' is a name Windows keeps for a device. Choose another vault name."
     assert storage.is_first_run()
     assert storage.create_company("Con Ltd", "Alice A", "alice", PW_A)[0]
     assert storage.create_company("COM10", "Alice A", "alice", PW_A)[0]
@@ -986,14 +986,14 @@ def test_a_database_error_while_registering_is_reported_and_leaves_no_folder(iso
 
 
 def test_unknown_company_and_no_company_chosen(people):
-    with pytest.raises(storage.StorageError, match="No company named 'Nope'"):
+    with pytest.raises(storage.StorageError, match="No vault named 'Nope'"):
         storage.open_company("Nope")
     assert storage.current_company() == COMPANY                                  # still selected
     storage._reset()
     assert storage.current_company() is None and not storage.is_first_run()
     for call in (storage.list_clients, lambda: storage.authenticate_employee("alice", PW_A),
                  storage.list_employees):
-        with pytest.raises(storage.StorageLockedError, match="Choose a company first"):
+        with pytest.raises(storage.StorageLockedError, match="Choose a vault first"):
             call()
 
 
@@ -1012,9 +1012,9 @@ def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, iso
     assert storage.restore_company("Branch Two", str(tmp_path / "missing.db"), "alice", PW_A)[0] is False
     assert not new.exists()
     assert storage.restore_company(COMPANY, path, "alice", PW_A) == (
-        False, "A company with this name already exists")
+        False, "A vault with this name already exists")
     assert storage.restore_company("Branch Two", path, "alice", PW_A) == (     # Test Co's backup
-        False, "This backup belongs to company 'Test Co'.")
+        False, "This backup belongs to vault 'Test Co'.")
     assert not new.exists()
     with closing(sqlite3.connect(path)) as conn:                                 # a backup with no name recorded
         conn.execute("DELETE FROM company_info")
@@ -1038,7 +1038,7 @@ def test_a_company_records_its_name_and_refuses_another_companys_backup(people, 
     login("alice", PW_A)
     live = db_bytes(isolated_storage)
     assert storage.restore_database(beta_backup, "alice", PW_BETA) == (
-        False, "This backup belongs to company 'Beta Ltd'.")
+        False, "This backup belongs to vault 'Beta Ltd'.")
     assert db_bytes(isolated_storage) == live and storage.current_employee()["username"] == "alice"
 
 

@@ -199,7 +199,7 @@ class DatabaseManager:
             self._dek = self._unwrap(passphrase, *row)  # wrong passphrase: InvalidTag, never a new key
             return
         if any_slot:
-            raise ValueError("This database is unlocked by employee passwords only; log in instead")
+            raise ValueError("This database is unlocked by member passwords only; log in instead")
         dek = AESGCM.generate_key(256)
         slot = self._wrap(passphrase, dek)
         with self._transaction() as conn:
@@ -390,7 +390,7 @@ class DatabaseManager:
         """Raises LookupError for an unknown or removed employee."""
         row = conn.execute("SELECT is_admin, active FROM employees WHERE id = ?", (employee_id,)).fetchone()
         if row is None or not row[1]:
-            raise LookupError("Employee not found")
+            raise LookupError("Member not found")
         return bool(row[0])
 
     def company_name(self):
@@ -427,7 +427,7 @@ class DatabaseManager:
             first = conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is None
             any_slot = conn.execute("SELECT 1 FROM key_slots LIMIT 1").fetchone() is not None
             if not first and (created_by is None or not self._is_admin(conn, created_by)):
-                raise PermissionError("Only the admin can add employees")
+                raise PermissionError("Only the owner can add members")
         if self._dek is not None:
             dek = self._dek
         elif first and not any_slot:
@@ -440,7 +440,7 @@ class DatabaseManager:
             if still_first != first:
                 raise RuntimeError("Another account was created at the same time; try again")
             if not first and not self._is_admin(conn, created_by):   # the creator may have lost admin meanwhile
-                raise PermissionError("Only the admin can add employees")
+                raise PermissionError("Only the owner can add members")
             try:
                 cur = conn.execute(
                     "INSERT INTO employees (username, full_name, is_admin) VALUES (?, ?, ?)",
@@ -453,7 +453,7 @@ class DatabaseManager:
             emp_id = cur.lastrowid
             # The first account (the admin) is logged as added by itself.
             self._log_event(conn, EVENT_EMPLOYEE_ADDED, None, None, emp_id if first else created_by,
-                            [f"{username} (admin)" if first else username])
+                            [f"{username} (owner)" if first else username])
         self._dek = dek
         return emp_id
 
@@ -521,7 +521,7 @@ class DatabaseManager:
                 ((old_username or "").strip(),),
             ).fetchone()
             if row is None:
-                raise LookupError("Employee not found")
+                raise LookupError("Member not found")
             if row[0] != actor_id:
                 raise PermissionError("You can only change your own account")
             current = conn.execute(
@@ -540,7 +540,7 @@ class DatabaseManager:
         with self._transaction() as conn:
             emp_id = row[0]
             if conn.execute("SELECT active FROM employees WHERE id = ?", (emp_id,)).fetchone() != (1,):
-                raise LookupError("Employee not found")
+                raise LookupError("Member not found")
             if slot is not None and conn.execute(
                     "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE employee_id = ?",
                     (emp_id,)).fetchone() != tuple(current):
@@ -576,12 +576,12 @@ class DatabaseManager:
         slot = self._wrap(self._check_password(new_password), self._require_key())
         with self._transaction() as conn:
             if not self._is_admin(conn, admin_id):
-                raise PermissionError("Only the admin can reset a password")
+                raise PermissionError("Only the owner can reset a password")
             row = conn.execute(
                 "SELECT id, username FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((username or "").strip(),)).fetchone()
             if row is None:
-                raise LookupError("Employee not found")
+                raise LookupError("Member not found")
             if row[0] == admin_id:
                 # Otherwise anyone at an unlocked admin session could take the account over.
                 raise ValueError("Change your own password in your profile, with your current password")
@@ -593,14 +593,14 @@ class DatabaseManager:
         The row stays (inactive) so clients and log rows keep the name."""
         with self._transaction() as conn:
             if not self._is_admin(conn, admin_id):
-                raise PermissionError("Only the admin can remove an employee")
+                raise PermissionError("Only the owner can remove a member")
             row = conn.execute(
                 "SELECT id, username FROM employees WHERE username = ? COLLATE NOCASE AND active = 1",
                 ((username or "").strip(),)).fetchone()
             if row is None:
-                raise LookupError("Employee not found")
+                raise LookupError("Member not found")
             if row[0] == admin_id:
-                raise ValueError("The admin cannot remove their own account")
+                raise ValueError("The owner cannot remove their own account")
             conn.execute("DELETE FROM key_slots WHERE employee_id = ?", (row[0],))
             conn.execute("UPDATE employees SET active = 0 WHERE id = ?", (row[0],))
             self._log_event(conn, EVENT_EMPLOYEE_REMOVED, None, None, admin_id, [row[1]])
@@ -676,7 +676,7 @@ class DatabaseManager:
                             display_name = existing[1]   # only the admin renames a client
                 if replaced and not is_admin:
                     changes = replaced
-                    raise PermissionError("Only the admin can replace a client's existing references")
+                    raise PermissionError("Only the owner can replace a signer's existing references")
                 if spatial:
                     conn.execute(
                         "DELETE FROM enrollments WHERE user_id = ? AND modality = 'spatial' AND spatial_origin = ?",
@@ -815,7 +815,7 @@ class DatabaseManager:
         try:
             with self._transaction() as conn:
                 if not self._is_admin(conn, employee_id):
-                    raise PermissionError("Only the admin can delete a client")
+                    raise PermissionError("Only the owner can delete a signer")
                 row = conn.execute("SELECT display_name FROM users WHERE user_id = ?", (user_id,)).fetchone()
                 if row is None:
                     return False
@@ -888,7 +888,7 @@ class DatabaseManager:
                 "SELECT model_version FROM enrollments WHERE user_id = ? AND modality = ? AND spatial_origin IS ?",
                 (user_id, modality, spatial_origin))}
             if not versions:
-                raise LookupError(f"Client {user_id!r} has no {modality} set to add to")
+                raise LookupError(f"Signer {user_id!r} has no {modality} set to add to")
             if versions != {model_version}:
                 raise ValueError("The references were made by another model version; re-enrol them first")
             conn.execute(
@@ -1065,7 +1065,7 @@ class DatabaseManager:
         """
         with closing(self.get_connection()) as conn:
             if not self._is_admin(conn, actor_id):
-                raise PermissionError("Only the admin can back up the database")
+                raise PermissionError("Only the owner can back up the database")
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         os.close(os.open(dest_path, flags, 0o600))  # skylos: ignore[SKY-D215,SKY-D324] the admin picks the backup folder; O_EXCL never follows a link or overwrites a file
         try:
@@ -1108,7 +1108,7 @@ class DatabaseManager:
                 except LookupError:
                     is_admin = False
                 if not is_admin:
-                    raise PermissionError("Only the admin can restore a backup")
+                    raise PermissionError("Only the owner can restore a backup")
                 live_admin = conn.execute("SELECT username FROM employees WHERE id = ?", (actor_id,)).fetchone()[0]
         if not os.path.isfile(backup_path):
             raise ValueError(f"No backup file at {backup_path}")
@@ -1142,12 +1142,12 @@ class DatabaseManager:
                 raise ValueError(str(e)) from None
             recorded = candidate.company_name()
             if company is not None and recorded is not None and recorded != company:
-                raise ValueError(f"This backup belongs to company '{recorded}'.")
+                raise ValueError(f"This backup belongs to vault '{recorded}'.")
             employee, _ = candidate.authenticate_employee(username, password)
             if employee is None:
                 raise PermissionError("The user ID or password does not open this backup")
             if not employee["is_admin"]:
-                raise PermissionError("Only an admin of the backup can restore it")
+                raise PermissionError("Only an owner of the backup can restore it")
             if live_admin is not None:
                 base = f"{self.db_path}.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
                 dest, n = base, 1

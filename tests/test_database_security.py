@@ -164,7 +164,7 @@ def test_no_password_hash_is_stored_only_a_wrapped_key(db, db_path):
     """The key slot is the login check: there is no cheaper hash to attack instead."""
     a, b = two_employees(db)
     with sqlite3.connect(db_path) as conn:
-        columns = [r[1] for r in conn.execute("PRAGMA table_info(employees)")]
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(members)")]
     assert not {"salt", "password_hash", "legacy_salt", "legacy_hash"} & set(columns)
     rows = [r for r in slots(db_path) if r[0] == "employee"]
     assert [r[1] for r in rows] == [a, b]
@@ -337,10 +337,10 @@ def audit(db):
 
 def test_a_non_admin_cannot_change_a_clients_name(db):
     a, b = two_employees(db)
-    db.save_client("c1", "Client", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
+    db.save_client("c1", "Signer", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
     # a set the client lacks is open to everyone, but the name stays the admin's
-    db.save_client("c1", "CLIENT", b, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=[vec(128, 2)], model_version=MODEL)
-    assert db.get_client_record("c1")["display_name"] == "Client"
+    db.save_client("c1", "SIGNER", b, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=[vec(128, 2)], model_version=MODEL)
+    assert db.get_client_record("c1")["display_name"] == "Signer"
     assert audit(db)[-1] == ("enrol", "bob", ["pen set"])
 
 
@@ -353,13 +353,13 @@ def test_a_non_admin_adds_a_scan_set_to_a_pen_only_client(db):
 
 def test_the_admins_name_change_is_logged(db):
     a, _ = two_employees(db)
-    db.save_client("c1", "Client", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
-    db.save_client("c1", "CLIENT", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)
+    db.save_client("c1", "Signer", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
+    db.save_client("c1", "SIGNER", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)
     rec = db.get_client_record("c1")
-    assert rec["display_name"] == "CLIENT"
+    assert rec["display_name"] == "SIGNER"
     assert audit(db)[-1] == ("re-enrol", "alice", ["display name"])
     before = len(audit(db))
-    db.save_client("c1", "CLIENT", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)   # no change
+    db.save_client("c1", "SIGNER", a, spatial_embeddings=None, spatial_origin="scan", temporal_embeddings=None, model_version=MODEL)   # no change
     assert len(audit(db)) == before
 
 
@@ -433,8 +433,8 @@ def test_no_image_path_is_stored(db, db_path):
 
 def test_a_passphrase_never_creates_a_second_key_on_a_password_database(tmp_path):
     path = str(tmp_path / "s.db")
-    DatabaseManager(path).create_employee("Admin", "admin", PW_A)
+    DatabaseManager(path).create_employee("Owner", "owner", PW_A)
     before = slots(path)
-    with pytest.raises(ValueError, match="employee passwords"):
+    with pytest.raises(ValueError, match="member passwords"):
         DatabaseManager(path, passphrase="ci-secret")
     assert slots(path) == before

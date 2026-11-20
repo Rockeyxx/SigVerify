@@ -425,7 +425,7 @@ def test_a_refused_confirm_says_nothing_was_added(app, db):
     panel._last_accepted_client, panel._last_accepted_origin = "gone", "scan"
     panel._last_accepted_signings = ["x"]
     panel._on_confirmed([{"spatial": _b64(512), "temporal": _b64(128)}])
-    assert panel.modalityStateLabel.text() == "Nothing was added to the client's references."
+    assert panel.modalityStateLabel.text() == "Nothing was added to the signer's references."
 
 
 def test_replay_check_fails_loudly_when_the_model_returns_no_probe_embeddings(app, db, fake_workers):
@@ -570,7 +570,7 @@ def test_enrolment_delete_refused_shows_why_and_keeps_the_form(app, alice_bob, m
     panel.clientIdInput.setText("c")
     panel.dynamic_references = ["kept"]
     panel.delete_client()
-    assert panel.statusLabel.text() == "⚠ Only the admin can delete a client"
+    assert panel.statusLabel.text() == "⚠ Only the owner can delete a signer"
     assert panel.dynamic_references == ["kept"] and storage.client_exists("c")
 
 
@@ -595,7 +595,7 @@ def test_enrolment_non_admin_adds_paper_to_a_pen_only_client(app, alice_bob):
     assert panel.selectImageButton.isEnabled() and panel.addImageButton.isEnabled()
     assert not panel.captureDynamicButton.isEnabled()
     assert panel.deleteClientButton.isHidden()
-    assert "Only the admin can replace these" in panel.clientStatusLabel.text()
+    assert "Only the owner can replace these" in panel.clientStatusLabel.text()
     panel._pending_client_id = "c"
     panel._on_enroll_success({"embeddings": [_b64(512, i) for i in range(k)],
                               "dynamic_embeddings": [], "spatial_origin": "scan"})
@@ -629,8 +629,8 @@ def test_enrolment_lookup_is_company_wide(app, alice_bob):
     assert storage.authenticate_employee("bob", "bob-password-1")[0]
     panel = _enrol_panel("bob")
     _load(panel, "c")
-    assert panel.clientStatusLabel.text().startswith("Loaded existing client")
-    assert "another employee" not in panel.clientStatusLabel.text()
+    assert panel.clientStatusLabel.text().startswith("Loaded existing signer")
+    assert "another member" not in panel.clientStatusLabel.text()
 
 
 def test_enrolment_admin_replacing_paper_asks_and_keeps_the_pen_rows(app, alice_bob, fake_workers, monkeypatch):
@@ -657,7 +657,7 @@ def test_enrolment_admin_replacing_paper_asks_and_keeps_the_pen_rows(app, alice_
     result = {"embeddings": new_scan, "dynamic_embeddings": [], "spatial_origin": "scan"}
     panel.image_references = ["a.png"] * k
     panel.run_enrollment()                      # answer No: no worker, nothing saved
-    assert asked == ["This replaces the client's paper references. Continue?"]
+    assert asked == ["This replaces the signer's paper references. Continue?"]
     assert fake_workers == []
     panel.run_enrollment()                      # answer Yes
     assert len(fake_workers) == 1
@@ -691,7 +691,7 @@ def test_enrolment_confirmation_follows_the_id_being_saved_not_the_last_load(app
     panel.clientIdInput.setText("old")
     panel.image_references = ["x.png"] * k
     panel.run_enrollment()
-    assert asked == ["This replaces the client's paper references. Continue?"]
+    assert asked == ["This replaces the signer's paper references. Continue?"]
 
 
 def test_enrolment_editing_the_id_after_load_reapplies_permissions(app, alice_bob):
@@ -785,7 +785,7 @@ def test_enrolment_storage_refusal_is_shown_not_a_success(app, alice_bob, monkey
     panel._pending_client_id = "c"
     panel._on_enroll_success({"embeddings": [_b64(512, 7)], "dynamic_embeddings": [],
                               "spatial_origin": "scan"})
-    assert "Only the admin can replace" in panel.statusLabel.text()
+    assert "Only the owner can replace" in panel.statusLabel.text()
     assert not panel.statusLabel.text().startswith("✔")
 
 
@@ -825,8 +825,8 @@ def _login(window, username, password):
 
 
 def _register(screen, company, full_name, username, password):
+    screen.fullNameInput.setText(full_name)         # first: it prefills the vault name
     screen.companyInput.setText(company)
-    screen.fullNameInput.setText(full_name)
     screen.usernameInput.setText(username)
     screen.passwordInput.setText(password)
     screen.confirmPasswordInput.setText(password)
@@ -838,8 +838,8 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     screen = window.auth_stack.currentWidget()
     assert isinstance(screen, app_module.RegisterScreen)
     labels = [label.text() for label in screen.findChildren(QtWidgets.QLabel)]
-    assert "Register a new company" in labels and storage.ADMIN_WARNING in labels
-    assert "Create Company" in _buttons(screen) and "Restore a company from a backup" in _buttons(screen)
+    assert "Create a vault" in labels and storage.ADMIN_WARNING in labels
+    assert "Create Vault" in _buttons(screen) and "Restore a vault from a backup" in _buttons(screen)
     assert "Back to login" not in _buttons(screen)            # nothing to go back to on a first run
 
     _register(screen, "", "Alice A", "alice", "alice-password-1")
@@ -853,12 +853,41 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     window.sidebar.go_logout.emit()
     assert window.auth_stack.currentWidget() is window.login_screen
     assert _companies(window) == ["Acme"] and window.login_screen.companyInput.currentText() == "Acme"
-    assert "Register a new company" in _buttons(window.login_screen)
+    assert "Create a new vault" in _buttons(window.login_screen)
     storage._reset()                                          # the app starts again
     later = make_window()
     assert isinstance(later.auth_stack.currentWidget(), app_module.WelcomeScreen)
     _login(later, "alice", "alice-password-1")
     assert later.current_employee["username"] == "alice" and storage.current_company() == "Acme"
+
+
+def test_typing_a_full_name_fills_the_vault_name_until_the_user_edits_it(empty_db, make_window):
+    screen = make_window().auth_stack.currentWidget()
+    assert screen.companyInput.placeholderText() == "Vault name (your company, branch, or your own name)"
+    screen.fullNameInput.setText("Ali")
+    screen.fullNameInput.setText("Alice A")
+    assert screen.companyInput.text() == "Alice A"
+    screen.companyInput.setText("Acme Bank")                  # the user's own edit
+    screen.fullNameInput.setText("Alice Anders")
+    assert screen.companyInput.text() == "Acme Bank"
+
+
+def test_login_hides_the_vault_list_with_one_vault_and_shows_it_with_two(db, make_window):
+    storage.logout()
+    window = make_window()
+    window.auth_stack.setCurrentWidget(window.login_screen)
+    assert window.login_screen.companyInput.isHidden()
+    _login(window, "alice", "alice-password-1")
+    assert window.current_employee["username"] == "alice"
+    window.sidebar.go_logout.emit()
+
+    window.login_screen.registerButton.click()
+    _register(window.register_screen, "Beta", "Zed Z", "zed", "zed-password-12")
+    window.sidebar.go_logout.emit()
+    assert not window.login_screen.companyInput.isHidden()
+    window.login_screen.companyInput.setCurrentText("Test Co")
+    _login(window, "alice", "alice-password-1")
+    assert storage.current_company() == "Test Co"
 
 
 def _companies(window):
@@ -901,7 +930,7 @@ def test_startup_storage_error_shows_it_and_quits(app, empty_db, make_window, di
     monkeypatch.setattr(QTimer, "singleShot", lambda ms, slot: later.append(slot))
     window = make_window()
     assert len(dialogs) == 1 and dialogs[0][:2] == (None, "Cannot open the signature data")
-    assert "companies cannot be read" in dialogs[0][2]
+    assert "vault folder" in dialogs[0][2]
     assert later == [QtWidgets.QApplication.instance().quit]
     assert window.startup_failed and window.centralWidget() is None
 
@@ -1001,7 +1030,7 @@ def test_employees_page_add_reset_remove_change_only_that_account(app, alice_bob
 
     _select(page, "alice")
     page.removeButton.click()
-    assert page.statusLabel.text() == "⚠ The admin cannot remove their own account"
+    assert page.statusLabel.text() == "⚠ The owner cannot remove their own account"
     _select(page, "carol")
     page.removeButton.click()
     assert page.statusLabel.text() == "✔ Removed carol"
@@ -1057,7 +1086,7 @@ def test_first_run_restore_returns_to_login(db, make_window, tmp_path, monkeypat
     assert screen.messageLabel.text().startswith("⚠ ") and storage.list_companies() == []
     _answer_restore(monkeypatch, backup, "alice", "alice-password-1", company="Restored Co")
     screen.restoreButton.click()
-    assert screen.messageLabel.text() == "⚠ This backup belongs to company 'Test Co'."
+    assert screen.messageLabel.text() == "⚠ This backup belongs to vault 'Test Co'."
     _answer_restore(monkeypatch, backup, "alice", "alice-password-1", company="Test Co")
     screen.restoreButton.click()
     assert window.auth_stack.currentWidget() is window.login_screen
@@ -1154,7 +1183,7 @@ def test_employees_page_shows_last_backup_and_last_delete(app, alice_bob, tmp_pa
     page.set_current_employee("alice")
     page.refresh()
     assert page.lastBackupLabel.text() == "Last backup: never"
-    assert page.lastDeleteLabel.text() == "Last client deletion: none"
+    assert page.lastDeleteLabel.text() == "Last signer deletion: none"
 
     # Back up
     bak_dir = tmp_path / "backups"
@@ -1168,6 +1197,6 @@ def test_employees_page_shows_last_backup_and_last_delete(app, alice_bob, tmp_pa
     storage.save_client_enrollment("client_x", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     storage.delete_client("client_x")
     page.refresh()
-    assert "Last client deletion: client_x at " in page.lastDeleteLabel.text()
+    assert "Last signer deletion: client_x at " in page.lastDeleteLabel.text()
     assert "by alice" in page.lastDeleteLabel.text()
 

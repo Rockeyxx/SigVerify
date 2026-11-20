@@ -60,8 +60,8 @@ class Sidebar(QWidget):
         self._add_nav_button("Home", self.go_dashboard)
         self._add_nav_button("Enrollment", self.go_enrollment)
         self._add_nav_button("Verification", self.go_verification)
-        self._add_nav_button("Clients", self.go_clients)
-        self.employeesButton = self._add_nav_button("Employees", self.go_employees)
+        self._add_nav_button("Signers", self.go_clients)
+        self.employeesButton = self._add_nav_button("Members", self.go_employees)
         self._add_nav_button("Profile", self.go_profile)
         self.employeesButton.setVisible(False)   # admin only: set_admin(True) shows it
 

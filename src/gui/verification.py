@@ -110,12 +110,12 @@ class VerificationPanel(QWidget):
         title.setProperty("role", "title")
         layout.addWidget(title)
 
-        section1 = QLabel("CLIENT")
+        section1 = QLabel("SIGNER")
         section1.setProperty("role", "section")
         layout.addWidget(section1)
 
         self.clientIdInput = QLineEdit()
-        self.clientIdInput.setPlaceholderText("Enter the client's name / ID")
+        self.clientIdInput.setPlaceholderText("Enter the signer's name / ID")
         self.clientIdInput.textChanged.connect(self._reset_visit)
         layout.addWidget(self.clientIdInput)
 
@@ -221,7 +221,7 @@ class VerificationPanel(QWidget):
         self.degradedModeIndicator.setText(
             "" if (image and pen) else
             "⚠ One modality only: the result is reported as degraded and cannot be "
-            "added to the client's references.")
+            "added to the signer's references.")
 
     def _reset_visit(self):
         """A new visit: forget any pending first signing and any unconfirmed result."""
@@ -268,7 +268,7 @@ class VerificationPanel(QWidget):
         client_id = self.clientIdInput.text().strip()
 
         if not client_id:
-            self._show_idle_message("Please enter a client ID")
+            self._show_idle_message("Please enter a signer ID")
             return
 
         client = storage.get_client(client_id)
@@ -464,8 +464,8 @@ class VerificationPanel(QWidget):
         self.confirmButton.setVisible(False)
         self.degradedModeIndicator.setText("")
         self.modalityStateLabel.setText(
-            "Signing added to the client's references." if added
-            else "Nothing was added to the client's references.")
+            "Signing added to the signer's references." if added
+            else "Nothing was added to the signer's references.")
 
     def _on_confirm_failed(self, message: str):
         self.confirmButton.setEnabled(True)

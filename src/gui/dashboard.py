@@ -157,8 +157,8 @@ class StatsRow(QWidget):
         ring_layout.addWidget(ring_caption)
         ring_tile.setLayout(ring_layout)
 
-        self.newClientsTile = StatTile("New clients this month")
-        self.totalClientsTile = StatTile("Total enrolled clients")
+        self.newClientsTile = StatTile("New signers this month")
+        self.totalClientsTile = StatTile("Total enrolled signers")
         self.totalVerificationsTile = StatTile("Total verifications")
 
         bento.addWidget(ring_tile, 0, 0, 2, 1)
@@ -189,7 +189,7 @@ class DashboardScreen(QWidget):
         self.welcomeLabel.setProperty("role", "hero-title")
         layout.addWidget(self.welcomeLabel)
 
-        subtitle = QLabel("Here's a snapshot of your own and the company's verification activity")
+        subtitle = QLabel("Here's a snapshot of your own and the vault's verification activity")
         subtitle.setProperty("role", "muted")
         layout.addWidget(subtitle)
 
@@ -198,8 +198,8 @@ class DashboardScreen(QWidget):
         self.mine = StatsRow()
         self.company = StatsRow()
         self.recentTile = RecentEventsTile()
-        for caption, widget in (("MINE", self.mine), ("COMPANY", self.company),
-                                ("COMPANY ACTIVITY", self.recentTile)):
+        for caption, widget in (("MINE", self.mine), ("VAULT", self.company),
+                                ("VAULT ACTIVITY", self.recentTile)):
             label = QLabel(caption)
             label.setProperty("role", "stat-title")
             layout.addWidget(label)

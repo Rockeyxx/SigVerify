@@ -45,7 +45,7 @@ def db(path):
 
 @pytest.fixture
 def staff(db):
-    admin = db.create_employee("Admin", "admin", PW_ADMIN)
+    admin = db.create_employee("Owner", "owner", PW_ADMIN)
     bob = db.create_employee("Bob", "bob", PW_BOB, created_by=admin)
     return admin, bob
 
@@ -85,8 +85,8 @@ def test_a_new_database_opens_locked_and_the_first_account_is_the_admin(db, path
     assert not db.unlocked
     with pytest.raises(DatabaseLockedError):
         db.list_client_records()
-    admin = db.create_employee("Admin", "admin", PW_ADMIN)
-    assert db.unlocked and db.find_employee("admin")["is_admin"] is True
+    admin = db.create_employee("Owner", "owner", PW_ADMIN)
+    assert db.unlocked and db.find_employee("owner")["is_admin"] is True
     bob = db.create_employee("Bob", "bob", PW_BOB, created_by=admin)
     assert db.find_employee("bob")["is_admin"] is False
     with sqlite3.connect(path) as conn:
@@ -102,7 +102,7 @@ def test_a_copied_database_cannot_be_opened_without_a_password(db, staff, path, 
     assert not thief.unlocked
     with pytest.raises(DatabaseLockedError):
         thief.get_client_record("c1")
-    assert thief.authenticate_employee("admin", "guess-guess-guess") == (None, "bad_password")
+    assert thief.authenticate_employee("owner", "guess-guess-guess") == (None, "bad_password")
     assert db._dek not in file_bytes(copy)
     assert PW_ADMIN.encode() not in file_bytes(copy) and PW_BOB.encode() not in file_bytes(copy)
     assert not [f for f in os.listdir(tmp_path) if f.endswith(".key")]
@@ -152,12 +152,12 @@ def test_admin_add_reset_remove_each_change_only_that_slot(db, staff, path):
 def test_a_non_admin_cannot_reset_or_remove_and_the_admin_cannot_remove_themself(db, staff):
     admin, bob = staff
     with pytest.raises(PermissionError):
-        db.reset_password(bob, "admin", "taken-over-pass")
+        db.reset_password(bob, "owner", "taken-over-pass")
     with pytest.raises(PermissionError):
-        db.remove_employee(bob, "admin")
+        db.remove_employee(bob, "owner")
     with pytest.raises(ValueError):
-        db.remove_employee(admin, "admin")
-    assert db.authenticate_employee("admin", PW_ADMIN)[0] is not None
+        db.remove_employee(admin, "owner")
+    assert db.authenticate_employee("owner", PW_ADMIN)[0] is not None
 
 
 def test_a_reset_password_opens_the_same_templates(db, staff, path):
@@ -175,8 +175,8 @@ def test_anyone_enrols_a_new_client_or_adds_a_missing_set(db, staff):
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.save_client("c1", "C1", bob, spatial_embeddings=[], spatial_origin="scan", temporal_embeddings=pen(), model_version=V1)         # Bob adds the pen set
     rec = db.get_client_record("c1")
-    assert rec["enrolled_by"] == "admin" and len(rec["temporal"]) == 5
-    assert events(db) == [("enrol", "c1", "admin"), ("enrol", "c1", "bob")]
+    assert rec["enrolled_by"] == "owner" and len(rec["temporal"]) == 5
+    assert events(db) == [("enrol", "c1", "owner"), ("enrol", "c1", "bob")]
 
 
 def test_a_non_admin_reenrol_or_delete_is_refused_logged_and_changes_nothing(db, staff):
@@ -190,7 +190,7 @@ def test_a_non_admin_reenrol_or_delete_is_refused_logged_and_changes_nothing(db,
         db.delete_client("c1", bob)
     rec = db.get_client_record("c1")
     assert np.array_equal(rec["spatial"][0], scan(0)[0]) and len(rec["temporal"]) == 5
-    assert events(db) == [("enrol", "c1", "admin"), ("re-enrol refused", "c1", "bob"),
+    assert events(db) == [("enrol", "c1", "owner"), ("re-enrol refused", "c1", "bob"),
                           ("re-enrol refused", "c1", "bob"), ("delete refused", "c1", "bob")]
 
 
@@ -201,7 +201,7 @@ def test_the_admin_reenrols_and_verifies_a_client_bob_enrolled_and_both_are_logg
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(50), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     rec = db.get_client_record("c1")
     assert np.array_equal(rec["spatial"][0], scan(50)[0]) and rec["enrolled_by"] == "bob"
-    assert events(db) == [("enrol", "c1", "bob"), ("verify", "c1", "admin"), ("re-enrol", "c1", "admin")]
+    assert events(db) == [("enrol", "c1", "bob"), ("verify", "c1", "owner"), ("re-enrol", "c1", "owner")]
     assert db.get_log_events(event=None)[2]["reasons"] == ["scan set"]
 
 
@@ -212,7 +212,7 @@ def test_a_deleted_clients_audit_rows_stay(db, staff):
     assert db.delete_client("gone", admin) is True
     assert db.get_client_record("gone") is None
     assert events(db, user_id="gone") == [("enrol", "gone", "bob"), ("verify", "gone", "bob"),
-                                          ("delete", "gone", "admin")]
+                                          ("delete", "gone", "owner")]
     assert db.delete_client("gone", admin) is False
 
 
@@ -345,7 +345,7 @@ def test_a_refused_replay_is_logged_with_its_hashes_and_not_counted(db, staff, p
     admin, _ = staff
     probe = probe_fingerprint(vec(512, 6))
     db.log_replay_refused("c1", "C1", admin, [probe])
-    assert events(db) == [("replay refused", "c1", "admin")]
+    assert events(db) == [("replay refused", "c1", "owner")]
     assert db.get_log_events() == [] and db.count_log_events() == (0, 0)
     with closing(sqlite3.connect(path)) as conn:
         assert json.loads(conn.execute(
@@ -368,8 +368,8 @@ def account_rows(db):
 
 
 def test_adding_employees_is_logged_with_who_added_them(db, staff):
-    assert account_rows(db) == [("employee added", "admin", ["admin (admin)"]),
-                                ("employee added", "admin", ["bob"])]
+    assert account_rows(db) == [("employee added", "owner", ["owner (owner)"]),
+                                ("employee added", "owner", ["bob"])]
     assert db.count_log_events() == (0, 0)
 
 
@@ -377,8 +377,8 @@ def test_a_password_reset_and_a_removal_are_logged_by_the_admin(db, staff):
     admin, _ = staff
     db.reset_password(admin, "bob", "bob-new-password-1")
     db.remove_employee(admin, "bob")
-    assert account_rows(db)[-2:] == [("password reset", "admin", ["bob"]),
-                                     ("employee removed", "admin", ["bob"])]
+    assert account_rows(db)[-2:] == [("password reset", "owner", ["bob"]),
+                                     ("employee removed", "owner", ["bob"])]
     assert db.count_log_events() == (0, 0)
 
 
@@ -397,7 +397,7 @@ def test_a_profile_change_is_logged_without_the_password(db, staff, path):
 def test_a_backup_is_logged_by_the_admin(db, staff, tmp_path):
     admin, _ = staff
     db.backup_to(admin, str(tmp_path / "copy.db"))
-    assert account_rows(db)[-1] == ("backup", "admin", ["copy.db"])
+    assert account_rows(db)[-1] == ("backup", "owner", ["copy.db"])
     assert db.count_log_events() == (0, 0)
 
 
@@ -427,7 +427,7 @@ def test_restore_brings_the_backup_back(db, staff, path, tmp_path):
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.delete_client("c1", admin)
-    emp = db.restore_from(admin, backup, "admin", PW_ADMIN)
+    emp = db.restore_from(admin, backup, "owner", PW_ADMIN)
     assert emp["is_admin"] and np.array_equal(db.get_client_record("c1")["spatial"][0], scan(3)[0])
 
 
@@ -438,18 +438,18 @@ def test_restore_checks_everything_before_replacing_anything(db, staff, path, tm
     db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)   # only in the live database
     live = file_bytes(path)
     with pytest.raises(PermissionError):
-        db.restore_from(admin, backup, "admin", "wrong-password-1")
-    with pytest.raises(PermissionError, match="admin"):
+        db.restore_from(admin, backup, "owner", "wrong-password-1")
+    with pytest.raises(PermissionError, match="owner"):
         db.restore_from(admin, backup, "bob", PW_BOB)                  # not an admin of the backup
     junk = tmp_path / "junk.db"
     junk.write_bytes(b"this is not a database at all" * 100)
     with pytest.raises(ValueError):
-        db.restore_from(admin, str(junk), "admin", PW_ADMIN)
+        db.restore_from(admin, str(junk), "owner", PW_ADMIN)
     with pytest.raises(ValueError):
-        db.restore_from(admin, str(tmp_path / "missing.db"), "admin", PW_ADMIN)
+        db.restore_from(admin, str(tmp_path / "missing.db"), "owner", PW_ADMIN)
     assert db.has_client("c2") and file_bytes(path) == live           # nothing was replaced
     assert not [f for f in os.listdir(tmp_path) if ".before-restore-" in f]
-    assert DatabaseManager(path).authenticate_employee("admin", PW_ADMIN)[0] is not None
+    assert DatabaseManager(path).authenticate_employee("owner", PW_ADMIN)[0] is not None
 
 
 def test_restore_by_a_non_admin_of_the_live_database_is_refused_at_the_database(db, staff, path, tmp_path):
@@ -458,8 +458,8 @@ def test_restore_by_a_non_admin_of_the_live_database_is_refused_at_the_database(
     db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     live = file_bytes(path)
     for actor in (bob, None, 999):
-        with pytest.raises(PermissionError, match="admin"):
-            db.restore_from(actor, backup, "admin", PW_ADMIN)   # a valid backup admin does not help
+        with pytest.raises(PermissionError, match="owner"):
+            db.restore_from(actor, backup, "owner", PW_ADMIN)   # a valid backup admin does not help
     assert file_bytes(path) == live
 
 
@@ -481,7 +481,7 @@ def test_a_backup_with_objects_this_app_never_creates_is_refused(db, staff, path
     backup = _tampered_backup(db, admin, tmp_path, sql)
     live = file_bytes(path)
     with pytest.raises(ValueError, match=reason):
-        db.restore_from(admin, backup, "admin", PW_ADMIN)
+        db.restore_from(admin, backup, "owner", PW_ADMIN)
     assert file_bytes(path) == live
 
 
@@ -490,14 +490,14 @@ def test_an_old_schema_backup_is_refused_as_old_not_as_foreign(db, staff, path, 
     _make_v4(old)
     live = file_bytes(path)
     with pytest.raises(ValueError, match="schema v4 is older than v5 and is not supported"):
-        db.restore_from(staff[0], old, "admin", PW_ADMIN)
+        db.restore_from(staff[0], old, "owner", PW_ADMIN)
     assert file_bytes(path) == live
 
 
 def test_a_backup_with_an_extra_index_is_accepted(db, staff, path, tmp_path):
     admin, _ = staff
     backup = _tampered_backup(db, admin, tmp_path, "CREATE INDEX extra_idx ON audit_log(event)")
-    assert db.restore_from(admin, backup, "admin", PW_ADMIN)["is_admin"]
+    assert db.restore_from(admin, backup, "owner", PW_ADMIN)["is_admin"]
 
 
 class _FixedClock(datetime):
@@ -512,11 +512,11 @@ def test_restore_keeps_an_owner_only_copy_of_the_live_database_first(db, staff, 
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.save_client("c2", "C2", admin, spatial_embeddings=scan(9), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     monkeypatch.setattr(dbm, "datetime", _FixedClock)
-    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    db.restore_from(admin, backup, "owner", PW_ADMIN)
     first = tmp_path / "signatures.db.before-restore-20261120-143005"
     assert first.is_file() and (first.stat().st_mode & 0o777) == 0o600
     assert DatabaseManager(str(first)).has_client("c2")          # the live data before the restore
-    db.restore_from(admin, backup, "admin", PW_ADMIN)              # same second: a new name, never overwrite
+    db.restore_from(admin, backup, "owner", PW_ADMIN)              # same second: a new name, never overwrite
     second = tmp_path / "signatures.db.before-restore-20261120-143005-2"
     assert second.is_file() and (second.stat().st_mode & 0o777) == 0o600
 
@@ -531,7 +531,7 @@ def test_restore_stops_if_the_live_copy_cannot_be_made(db, staff, path, tmp_path
         raise OSError("disk full")
     monkeypatch.setattr(db, "backup_to", broken)
     with pytest.raises(OSError):
-        db.restore_from(admin, backup, "admin", PW_ADMIN)
+        db.restore_from(admin, backup, "owner", PW_ADMIN)
     assert file_bytes(path) == live
 
 
@@ -552,11 +552,11 @@ def test_the_restored_database_logs_the_restore(db, staff, path, tmp_path, monke
     admin, _ = staff
     _set_clock(monkeypatch, datetime(2030, 1, 1, 9, 0, 0))       # one second per row: never the same second
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
-    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    db.restore_from(admin, backup, "owner", PW_ADMIN)
     rows = [e for e in db.get_log_events(event=None) if e["event"] == "restore"]
-    assert len(rows) == 1 and rows[0]["employee"] == "admin"
+    assert len(rows) == 1 and rows[0]["employee"] == "owner"
     # The backup's own "backup" row and the before-restore copy's are not in the backup.
-    assert rows[0]["reasons"] == ["restored by admin from backup.db", "2 audit rows not in the backup carried over"]
+    assert rows[0]["reasons"] == ["restored by owner from backup.db", "2 audit rows not in the backup carried over"]
     assert audit_events(path) == audit_events(backup) + ["backup", "backup", "restore"]
     assert not [e for e in DatabaseManager(backup).get_log_events(event=None) if e["event"] == "restore"]
 
@@ -565,9 +565,9 @@ def test_a_restore_on_a_new_install_logs_who_restored_it(db, staff, tmp_path):
     backup = db.backup_to(staff[0], str(tmp_path / "backup.db"))
     (tmp_path / "new").mkdir()
     fresh = DatabaseManager(str(tmp_path / "new" / "signatures.db"))
-    fresh.restore_from(None, backup, "admin", PW_ADMIN)
+    fresh.restore_from(None, backup, "owner", PW_ADMIN)
     rows = [e for e in fresh.get_log_events(event=None) if e["event"] == "restore"]
-    assert rows[0]["reasons"] == ["restored by admin into a new database from backup.db"]
+    assert rows[0]["reasons"] == ["restored by owner into a new database from backup.db"]
     assert not [f for f in os.listdir(tmp_path / "new") if ".before-restore-" in f]   # nothing to keep
 
 
@@ -588,15 +588,15 @@ def test_a_backup_of_another_company_is_refused_and_nothing_changes(db, staff, p
     db.set_company_name("Acme")
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     live = file_bytes(path)
-    with pytest.raises(ValueError, match=r"^This backup belongs to company 'Acme'\.$"):
-        db.restore_from(admin, backup, "admin", PW_ADMIN, "Beta")
+    with pytest.raises(ValueError, match=r"^This backup belongs to vault 'Acme'\.$"):
+        db.restore_from(admin, backup, "owner", PW_ADMIN, "Beta")
     assert file_bytes(path) == live and not [f for f in os.listdir(tmp_path) if ".before-restore-" in f]
-    assert db.restore_from(admin, backup, "admin", PW_ADMIN, "Acme")["is_admin"]
+    assert db.restore_from(admin, backup, "owner", PW_ADMIN, "Acme")["is_admin"]
 
 
 def test_a_backup_without_a_company_name_restores_into_any_company(db, staff, tmp_path):
     backup = db.backup_to(staff[0], str(tmp_path / "backup.db"))       # name never recorded
-    assert db.restore_from(staff[0], backup, "admin", PW_ADMIN, "Beta")["is_admin"]
+    assert db.restore_from(staff[0], backup, "owner", PW_ADMIN, "Beta")["is_admin"]
 
 
 # ------------------------------------------------------ old databases (v3 / v4)
@@ -710,7 +710,7 @@ def test_restore_preserves_audit_rows_newer_than_the_backup(db, staff, path, tmp
     db.log_verification("c1", "spatial", 85.0, "Genuine", employee_id=admin, display_name="C1", probe_hashes=v_hashes)
 
     # Restore from backup
-    emp = db.restore_from(admin, backup, "admin", PW_ADMIN)
+    emp = db.restore_from(admin, backup, "owner", PW_ADMIN)
     assert emp["is_admin"]
 
     # Client c1 is back from the backup
@@ -724,11 +724,11 @@ def test_restore_preserves_audit_rows_newer_than_the_backup(db, staff, path, tmp
     delete_rows = [e for e in all_events if e["event"] == "delete"]
     assert len(delete_rows) == 1
     assert delete_rows[0]["client_display_name"] == "C1"
-    assert delete_rows[0]["employee"] == "admin"
+    assert delete_rows[0]["employee"] == "owner"
 
     verify_rows = [e for e in all_events if e["event"] == "verify"]
     assert len(verify_rows) == 1
-    assert verify_rows[0]["employee"] == "admin"
+    assert verify_rows[0]["employee"] == "owner"
 
     # Check probe_hashes was preserved in audit_log
     with closing(db.get_connection()) as conn:
@@ -747,7 +747,7 @@ def test_restore_carries_a_live_row_written_in_the_same_second_as_the_backups_ne
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     db.delete_client("c1", admin)
-    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    db.restore_from(admin, backup, "owner", PW_ADMIN)
     assert audit_events(path) == audit_events(backup) + ["backup", "delete", "backup", "restore"]
 
 
@@ -757,9 +757,9 @@ def test_restore_carries_a_live_row_written_after_the_clock_stepped_back(db, sta
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
     _set_clock(monkeypatch, datetime(2000, 1, 1, 9, 0, 0))             # older than every row in the backup
     db.delete_client("c1", admin)
-    db.restore_from(admin, backup, "admin", PW_ADMIN)
+    db.restore_from(admin, backup, "owner", PW_ADMIN)
     assert audit_events(path) == audit_events(backup) + ["backup", "delete", "backup", "restore"]
-    assert [e["employee"] for e in db.get_log_events(event="delete")] == ["admin"]
+    assert [e["employee"] for e in db.get_log_events(event="delete")] == ["owner"]
 
 
 def test_restore_does_not_copy_rows_the_backup_already_holds(db, staff, path, tmp_path):
@@ -767,8 +767,8 @@ def test_restore_does_not_copy_rows_the_backup_already_holds(db, staff, path, tm
     db.save_client("c1", "C1", admin, spatial_embeddings=scan(3), spatial_origin="scan", temporal_embeddings=None, model_version=V1)
     db.log_verification("c1", "spatial", 85.0, "Genuine", employee_id=admin, display_name="C1", probe_hashes=["ab" * 32])
     backup = db.backup_to(admin, str(tmp_path / "backup.db"))
-    db.restore_from(admin, backup, "admin", PW_ADMIN)
-    db.restore_from(admin, backup, "admin", PW_ADMIN)                  # again: nothing carried twice
+    db.restore_from(admin, backup, "owner", PW_ADMIN)
+    db.restore_from(admin, backup, "owner", PW_ADMIN)                  # again: nothing carried twice
     assert audit_events(path) == audit_events(backup) + ["backup", "backup", "restore", "backup", "restore"]
 
 
@@ -789,7 +789,7 @@ def test_a_restore_that_fails_after_the_carry_over_leaves_the_live_database_as_i
         return real(conn, event, *args)
     monkeypatch.setattr(db, "_log_event", restore_row_fails)
     with pytest.raises(sqlite3.OperationalError):
-        db.restore_from(admin, backup, "admin", PW_ADMIN)
+        db.restore_from(admin, backup, "owner", PW_ADMIN)
     with closing(sqlite3.connect(path)) as conn:
         after = conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
     assert after[:-1] == before and after[-1][14] == "backup"         # only the before-restore copy's row

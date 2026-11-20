@@ -14,20 +14,20 @@ from src.database.db_manager import EVENT_BACKUP, EVENT_DELETE
 
 def restore_from_backup(parent, new_company=False):
     """Ask for a backup file and an admin of that backup, then restore it over the current
-    company, or as a new company (new_company: its name is asked first).
+    company, or as a new vault (new_company: its name is asked first).
     Returns None when the employee cancels, otherwise storage's (success, message)."""
     company = None
     if new_company:
-        company, ok = QInputDialog.getText(parent, "Restore a company", "Company name, as in the backup:")
+        company, ok = QInputDialog.getText(parent, "Restore a vault", "Vault name, as in the backup:")
         if not ok or not company.strip():
             return None
     path, _ = QFileDialog.getOpenFileName(parent, "Choose a backup", "", "Backup (*.db);;All files (*)")
     if not path:
         return None
-    username, ok = QInputDialog.getText(parent, "Restore from backup", "User ID of an admin in the backup:")
+    username, ok = QInputDialog.getText(parent, "Restore from backup", "User ID of an owner in the backup:")
     if not ok or not username.strip():
         return None
-    password, ok = QInputDialog.getText(parent, "Restore from backup", "That admin's password:",
+    password, ok = QInputDialog.getText(parent, "Restore from backup", "That owner's password:",
                                         QLineEdit.Password)
     if not ok:
         return None
@@ -54,20 +54,20 @@ class EmployeesPage(QWidget):
         layout.setContentsMargins(30, 24, 30, 24)
         layout.setSpacing(10)
 
-        title = QLabel("Employees")
+        title = QLabel("Members")
         title.setProperty("role", "title")
         layout.addWidget(title)
 
         self.table = QTableWidget()
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Full Name", "User ID", "Admin"])
+        self.table.setHorizontalHeaderLabels(["Full Name", "User ID", "Owner"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         layout.addWidget(self.table)
 
-        layout.addWidget(self._section_label("ADD AN EMPLOYEE"))
+        layout.addWidget(self._section_label("ADD A MEMBER"))
         add_row = QHBoxLayout()
         self.fullNameInput = QLineEdit()
         self.fullNameInput.setPlaceholderText("Full Name")
@@ -75,7 +75,7 @@ class EmployeesPage(QWidget):
         self.usernameInput.setPlaceholderText("User ID")
         self.passwordInput = _password_input("Password")
         self.confirmPasswordInput = _password_input("Confirm Password")
-        self.addButton = QPushButton("Add Employee")
+        self.addButton = QPushButton("Add Member")
         self.addButton.setProperty("role", "primary")
         self.addButton.clicked.connect(self._handle_add)
         for w in (self.fullNameInput, self.usernameInput, self.passwordInput,
@@ -83,14 +83,14 @@ class EmployeesPage(QWidget):
             add_row.addWidget(w)
         layout.addLayout(add_row)
 
-        layout.addWidget(self._section_label("SELECTED EMPLOYEE"))
+        layout.addWidget(self._section_label("SELECTED MEMBER"))
         selected_row = QHBoxLayout()
         self.newPasswordInput = _password_input("New Password")
         self.confirmNewPasswordInput = _password_input("Confirm New Password")
         self.resetButton = QPushButton("Reset Password")
         self.resetButton.setProperty("role", "ghost")
         self.resetButton.clicked.connect(self._handle_reset)
-        self.removeButton = QPushButton("Remove Employee")
+        self.removeButton = QPushButton("Remove Member")
         self.removeButton.setProperty("role", "danger")
         self.removeButton.clicked.connect(self._handle_remove)
         for w in (self.newPasswordInput, self.confirmNewPasswordInput, self.resetButton, self.removeButton):
@@ -112,7 +112,7 @@ class EmployeesPage(QWidget):
 
         self.lastBackupLabel = QLabel("Last backup: never")
         self.lastBackupLabel.setWordWrap(True)
-        self.lastDeleteLabel = QLabel("Last client deletion: none")
+        self.lastDeleteLabel = QLabel("Last signer deletion: none")
         self.lastDeleteLabel.setWordWrap(True)
         layout.addWidget(self.lastBackupLabel)
         layout.addWidget(self.lastDeleteLabel)
@@ -153,15 +153,15 @@ class EmployeesPage(QWidget):
         if ev_del and ev_del.get("timestamp"):
             by = ev_del.get("employee") or "unknown"
             client = ev_del.get("client") or "unknown"
-            self.lastDeleteLabel.setText(f"Last client deletion: {client} at {ev_del['timestamp']} by {by}")
+            self.lastDeleteLabel.setText(f"Last signer deletion: {client} at {ev_del['timestamp']} by {by}")
         else:
-            self.lastDeleteLabel.setText("Last client deletion: none")
+            self.lastDeleteLabel.setText("Last signer deletion: none")
 
     def _selected_username(self):
         row = self.table.currentRow()
         item = self.table.item(row, 1) if row >= 0 else None
         if item is None:
-            self._set_error("Select an employee in the list first")
+            self._set_error("Select a member in the list first")
             return None
         return item.text()
 
@@ -208,9 +208,9 @@ class EmployeesPage(QWidget):
         if username is None:
             return
         confirm = QMessageBox.question(
-            self, "Remove Employee",
+            self, "Remove Member",
             f"Remove the account '{username}'? They can no longer log in. "
-            "Their clients and log entries stay.",
+            "Their signers and log entries stay.",
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm != QMessageBox.Yes:
