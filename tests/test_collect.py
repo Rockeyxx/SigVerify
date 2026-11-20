@@ -113,6 +113,22 @@ def test_collect_signatures_returns_the_signatures_with_os_and_tablet_or_none(ap
     assert collect_signatures(count=5) is None
 
 
+def test_a_tablet_plugged_in_after_the_window_opens_is_still_named(app, monkeypatch):
+    """ENG_REPORT G16: the name was read only when the window opened, so a tablet plugged in
+    afterwards was saved as "no driver" although the pen drew normally."""
+    import src.capture.tablet as tablet
+
+    connected = []
+    monkeypatch.setattr(tablet, "tablet_names", lambda: list(connected))
+
+    def plug_in_then_sign(self):
+        connected.append("XPPen Deco 640 Pen")
+        return _sign_and_confirm(self)
+
+    monkeypatch.setattr(collect.CollectDialog, "exec_", plug_in_then_sign)
+    assert collect_signatures(count=1)["device_model"] == "XPPen Deco 640 Pen"
+
+
 def test_two_tablets_ask_which_one_and_cancelling_closes(app, monkeypatch):
     """Qt5 cannot tell which tablet a stroke came from, so the person names it."""
     import src.capture.tablet as tablet
