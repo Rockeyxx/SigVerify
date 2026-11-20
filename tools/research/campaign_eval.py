@@ -2,7 +2,7 @@
 
 Campaign spec (docs/superpowers/specs/2026-11-02-xppen-capture-campaign-design.md):
 M2 shipped weights, M3 calibration by rule D6, M7 warm-up, and the forgers' second attempt
-after "Sign again" for the step-up decision. Product order: each writer's first 5 genuine
+(two approved forgeries per victim) for the step-up decision. Product order: each writer's first 5 genuine
 signings (tablet and paper of the same index) are the references, the later genuines and the
 team forgeries are probes. A forger code (byP01) names a forger, not participant P01.
 Prints aggregates only: no file name and no signature leaves this script.
@@ -267,7 +267,7 @@ def main(argv=None):
     f1, f2 = np.array(f1), np.array(f2)
     print(f"\nStep-up: genuine pairs refused {100 * (1 - np.mean(g_acc)):.1f}% of {len(g_acc)}, "
           f"forger pairs passed {100 * np.mean(f_acc):.1f}% of {len(f_acc)}")
-    print(f"  forger after 'Sign again': attempt 1 mean {f1.mean():.4f}, attempt 2 mean "
+    print(f"  forger's two approved attempts: attempt 1 mean {f1.mean():.4f}, attempt 2 mean "
           f"{f2.mean():.4f}; attempt 2 higher for {int((f2 > f1).sum())} of {len(f1)}; "
           f"one signing at tau passes attempt 1 {100 * np.mean(f1 >= DECISION_THRESHOLD):.1f}%, "
           f"attempt 2 {100 * np.mean(f2 >= DECISION_THRESHOLD):.1f}%")
