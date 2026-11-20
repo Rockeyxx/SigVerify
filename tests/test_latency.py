@@ -5,6 +5,7 @@ and memory usage stays below the RSS ceiling (<= 4 GB).
 """
 
 import os
+import sys
 
 import pytest
 
@@ -34,22 +35,43 @@ CI_RATIO_CEILING = 30.0
 
 
 def reference_seconds(repeats=5):
-    """Median time of a fixed convolution with no project code in it: this host's speed."""
+    """Median time of a fixed convolution with no project code in it: this host's speed, at
+    the thread count verification runs at (load_model sets INFERENCE_NUM_THREADS), so a host
+    that is slow only at that count slows both sides of the ratio (ENG_REPORT M29)."""
     import statistics
     import time
 
     import torch
 
-    torch.manual_seed(0)
-    x, w = torch.randn(1, 64, 155, 220), torch.randn(64, 64, 3, 3)
-    with torch.no_grad():
-        torch.nn.functional.conv2d(x, w, padding=1)            # warm the kernels
-        times = []
-        for _ in range(repeats):
-            t0 = time.perf_counter()
-            torch.nn.functional.conv2d(x, w, padding=1)
-            times.append(time.perf_counter() - t0)
+    before = torch.get_num_threads()
+    torch.set_num_threads(INFERENCE_NUM_THREADS)
+    try:
+        torch.manual_seed(0)
+        x, w = torch.randn(1, 64, 155, 220), torch.randn(64, 64, 3, 3)
+        with torch.no_grad():
+            torch.nn.functional.conv2d(x, w, padding=1)            # warm the kernels
+            times = []
+            for _ in range(repeats):
+                t0 = time.perf_counter()
+                torch.nn.functional.conv2d(x, w, padding=1)
+                times.append(time.perf_counter() - t0)
+    finally:
+        torch.set_num_threads(before)
     return statistics.median(times)
+
+
+def host_threading():
+    """Cores, CPU quota and thread counts, for a failure message: what slowed the host."""
+    import torch
+
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota = f.read().strip()
+    except OSError:
+        quota = "n/a"
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    return (f"cores {cores} of {os.cpu_count()}, cgroup cpu.max {quota}, torch threads "
+            f"{torch.get_num_threads()}, interop {torch.get_num_interop_threads()}")
 
 
 def assert_inside_sla(branch, median, worst, reference=None):
@@ -58,8 +80,9 @@ def assert_inside_sla(branch, median, worst, reference=None):
         ratio = median / reference
         assert ratio < CI_RATIO_CEILING, (
             f"{branch} verification is {ratio:.1f}x the reference convolution on this host "
-            f"(ceiling {CI_RATIO_CEILING:g}, healthy 7 to 9): median {median:.3f}s against "
-            f"a reference of {reference * 1000:.1f} ms. The path got slower, not the host.")
+            f"(ceiling {CI_RATIO_CEILING:g}, healthy about 4 to 8): median {median:.3f}s against "
+            f"a reference of {reference * 1000:.1f} ms at the same thread count. "
+            f"Host: {host_threading()}.")
     else:
         assert worst < LATENCY_SLA_SECONDS, (
             f"worst-case {branch} verification {worst:.3f}s breached the "
@@ -231,3 +254,27 @@ class TestThreadCap:
 
         load_model("spatial", SPATIAL_WEIGHTS, "cpu")
         assert cv2.getNumThreads() == INFERENCE_NUM_THREADS
+
+
+class TestReferenceIsLikeForLike:
+    """ENG_REPORT M29: the CI guard divides verification time by a reference convolution. The
+    reference ran at torch's default thread count while verification runs at
+    INFERENCE_NUM_THREADS, so a host slow only at that thread count failed the guard as if the
+    code had slowed down. Both must run at the same thread count."""
+
+    def test_the_reference_runs_at_the_inference_thread_count_and_restores_it(self, monkeypatch):
+        import torch
+
+        seen = []
+        real = torch.nn.functional.conv2d
+        monkeypatch.setattr(torch.nn.functional, "conv2d",
+                            lambda *a, **k: (seen.append(torch.get_num_threads()), real(*a, **k))[1])
+        torch.set_num_threads(1)
+        reference_seconds(repeats=2)
+        assert seen and set(seen) == {INFERENCE_NUM_THREADS}
+        assert torch.get_num_threads() == 1
+
+    def test_a_failure_names_the_host_threading(self, monkeypatch):
+        monkeypatch.setattr(sys.modules[__name__], "ON_CI", True)
+        with pytest.raises(AssertionError, match=r"cores .* torch threads"):
+            assert_inside_sla("spatial", median=10.0, worst=10.0, reference=0.01)
