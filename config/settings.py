@@ -253,6 +253,17 @@ NUM_ENROLLMENT_REFERENCES = 5
 # (AGENTS.md); nothing beyond 8 was measured. The GUI storage and the database both read this.
 MAX_REFERENCES = 8
 
+# ─── Template store (src/database, src/gui/storage.py) ───────────────
+# Each employee's login password unlocks the data key of the template store (one key slot
+# per employee), so a password is the only thing between a copied database and the
+# templates. scrypt makes each guess slow; length makes the space of guesses large.
+MIN_PASSWORD_LENGTH = 12
+# A probe whose embedding hash was already accepted for the same client within this many
+# days is refused as a replay. Two real signings never give identical embeddings; a
+# replayed file does. Enrolment is about a year before the next visit, so the window
+# covers that gap.
+REPLAY_WINDOW_DAYS = 365
+
 # Number of independent reference draws averaged during evaluation to minimize sample variation.
 ENROLLMENT_TRIALS = 10
 

@@ -1,5 +1,5 @@
 """
-dashboard.py — Bento-style Home + Stats screen (scoped to current employee)
+dashboard.py — Bento-style Home + Stats screen (own row and company row)
 """
 
 import math
@@ -116,7 +116,7 @@ class RecentEventsTile(QFrame):
         for e in events[-4:][::-1]:
             row = QHBoxLayout()
             decision = e.get("decision", "?")
-            name = e.get("client_display_name", "Unknown")
+            name = f'{e.get("client_display_name", "Unknown")} · {e.get("employee", "")}'
             confidence = e.get("confidence", "—")
 
             name_label = QLabel(name)
@@ -135,26 +135,12 @@ class RecentEventsTile(QFrame):
             self.rows_container.addWidget(row_widget)
 
 
-class DashboardScreen(QWidget):
+class StatsRow(QWidget):
+    """One row of stat tiles, for one employee or (username None) the whole company."""
     def __init__(self):
         super().__init__()
-        self._employee_username = None
-        layout = QVBoxLayout()
-        layout.setContentsMargins(36, 30, 36, 30)
-        layout.setSpacing(6)
-
-        self.welcomeLabel = QLabel("Welcome back")
-        self.welcomeLabel.setProperty("role", "hero-title")
-        layout.addWidget(self.welcomeLabel)
-
-        subtitle = QLabel("Here's a snapshot of your signature verification activity")
-        subtitle.setProperty("role", "muted")
-        layout.addWidget(subtitle)
-
-        layout.addSpacing(20)
-
-        # ---- شبكة Bento ----
         bento = QGridLayout()
+        bento.setContentsMargins(0, 0, 0, 0)
         bento.setSpacing(14)
 
         # البلاطة الكبيرة: دائرة التقدّم (تمتد صفين)
@@ -171,22 +157,55 @@ class DashboardScreen(QWidget):
         ring_layout.addWidget(ring_caption)
         ring_tile.setLayout(ring_layout)
 
-        self.newClientsTile = StatTile("New clients this month")
-        self.totalClientsTile = StatTile("Total enrolled clients")
+        self.newClientsTile = StatTile("New signers this month")
+        self.totalClientsTile = StatTile("Total enrolled signers")
         self.totalVerificationsTile = StatTile("Total verifications")
-        self.recentTile = RecentEventsTile()
 
         bento.addWidget(ring_tile, 0, 0, 2, 1)
         bento.addWidget(self.newClientsTile, 0, 1)
         bento.addWidget(self.totalClientsTile, 0, 2)
         bento.addWidget(self.totalVerificationsTile, 1, 1)
-        bento.addWidget(self.recentTile, 1, 2)
+        for col in range(3):
+            bento.setColumnStretch(col, 1)
+        self.setLayout(bento)
 
-        bento.setColumnStretch(0, 1)
-        bento.setColumnStretch(1, 1)
-        bento.setColumnStretch(2, 1)
+    def refresh(self, employee_username):
+        stats = storage.get_verification_stats(employee_username)
+        self.newClientsTile.set_value(storage.count_clients_enrolled_this_month(employee_username))
+        self.totalClientsTile.set_value(len(storage.list_clients(employee_username)))
+        self.totalVerificationsTile.set_value(stats["total"])
+        self.progressRing.set_percentage(stats["genuine_rate"])
 
-        layout.addLayout(bento)
+
+class DashboardScreen(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._employee_username = None
+        layout = QVBoxLayout()
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(6)
+
+        self.welcomeLabel = QLabel("Welcome back")
+        self.welcomeLabel.setProperty("role", "hero-title")
+        layout.addWidget(self.welcomeLabel)
+
+        subtitle = QLabel("Here's a snapshot of your own and the vault's verification activity")
+        subtitle.setProperty("role", "muted")
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(20)
+
+        self.mine = StatsRow()
+        self.company = StatsRow()
+        self.recentTile = RecentEventsTile()
+        for caption, widget in (("MINE", self.mine), ("VAULT", self.company),
+                                ("VAULT ACTIVITY", self.recentTile)):
+            label = QLabel(caption)
+            label.setProperty("role", "stat-title")
+            layout.addWidget(label)
+            layout.addWidget(widget)
+            layout.addSpacing(10)
+
         layout.addStretch()
         self.setLayout(layout)
 
@@ -202,13 +221,6 @@ class DashboardScreen(QWidget):
 
     def refresh(self, employee_username: str):
         self._employee_username = employee_username
-        clients = storage.list_clients(employee_username)
-        stats = storage.get_verification_stats(employee_username)
-
-        self.newClientsTile.set_value(storage.count_clients_enrolled_this_month(employee_username))
-        self.totalClientsTile.set_value(len(clients))
-        self.totalVerificationsTile.set_value(stats["total"])
-        self.progressRing.set_percentage(stats["genuine_rate"])
-
-        events = storage.get_verification_log(employee_username)
-        self.recentTile.set_events(events)
+        self.mine.refresh(employee_username)
+        self.company.refresh(None)
+        self.recentTile.set_events(storage.get_verification_log(None))

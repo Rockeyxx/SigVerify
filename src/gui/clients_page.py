@@ -1,5 +1,5 @@
 """
-clients_page.py — Table view of clients enrolled by the current employee
+clients_page.py — Table view of every client of the company, whoever enrolled them
 """
 
 from PyQt5.QtCore import pyqtSignal
@@ -22,18 +22,18 @@ class ClientsPage(QWidget):
         layout.setContentsMargins(30, 24, 30, 24)
         layout.setSpacing(10)
 
-        title = QLabel("My Enrolled Clients")
+        title = QLabel("Signers")
         title.setProperty("role", "title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Double-click a row to open that client in Enrollment")
+        subtitle = QLabel("Double-click a row to open that signer in Enrollment")
         subtitle.setProperty("role", "muted")
         layout.addWidget(subtitle)
 
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(
-            ["Client Name", "Enrolled On", "References", "Last Verification"]
+            ["Signer Name", "Enrolled On", "References", "Last Verification"]
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -45,20 +45,21 @@ class ClientsPage(QWidget):
 
     def refresh(self, employee_username: str):
         self.employee_username = employee_username
-        clients = storage.list_clients(employee_username)
+        clients = storage.list_clients(None)
         self.table.setRowCount(len(clients))
 
         for row, client in enumerate(clients):
             display_name = client.get("display_name", client.get("key", "—"))
             enrolled_at = client.get("enrolled_at", "—")
-            ref_count = len(client.get("image_references", []))
+            n_scan = len(client["spatial_sets"].get("scan", {}).get("embeddings", []))
+            n_pen = len((client["temporal_set"] or {}).get("embeddings", []))
 
-            last_event = storage.get_last_verification_for_client(display_name, employee_username)
+            last_event = storage.get_last_verification_for_client(display_name, None)
             last_verification = last_event.get("timestamp", "—") if last_event else "Never"
 
             self.table.setItem(row, 0, QTableWidgetItem(display_name))
             self.table.setItem(row, 1, QTableWidgetItem(enrolled_at))
-            self.table.setItem(row, 2, QTableWidgetItem(str(ref_count)))
+            self.table.setItem(row, 2, QTableWidgetItem(f"scan {n_scan} · pen {n_pen}"))
             self.table.setItem(row, 3, QTableWidgetItem(last_verification))
 
     def _on_row_double_clicked(self, row, column):

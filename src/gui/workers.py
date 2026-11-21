@@ -57,7 +57,7 @@ QUALITY_GATE_MESSAGE = (
 
 PEN_GATE_MESSAGE = (
     "The pen signature could not be used: it is too short or was not recorded properly. "
-    "Ask the client to sign again on the tablet, inside the box, in one go."
+    "Ask the signer to sign again on the tablet, inside the box, in one go."
 )
 
 

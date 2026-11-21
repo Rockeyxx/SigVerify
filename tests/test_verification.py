@@ -219,7 +219,7 @@ class TestVerify:
         # carrying the gate's own message for every piece of evidence that was
         # dropped. `degraded: True` alone could not say *why*.
         assert set(result) == {"decision", "confidence", "routing", "degraded", "reasons",
-                               "threshold"}
+                               "threshold", "probe_embeddings"}
         assert isinstance(result["reasons"], list)
         os.unlink(path)
 
@@ -369,6 +369,28 @@ class TestVerify:
         os.unlink(path)
 
 
+class TestProbeEmbeddingsForTheReplayCheck:
+    """
+    verify() returns the bytes of each probe embedding; the backend hashes them with
+    db_manager.probe_fingerprint, the same function that hashes stored references. A
+    resubmitted enrolment scan must therefore hash to its stored reference exactly.
+    """
+
+    def test_the_same_image_hashes_to_its_stored_reference(self):
+        from src.database.db_manager import probe_fingerprint
+        from src.verification import SignatureService
+        service = SignatureService(device="cpu")
+        path = _sharp_signature_image()
+        stored = service.enroll_unimodal([path], modality="spatial")["embeddings"]
+
+        result = service.verify("unimodal", probe_image=path, reference_spatial=stored,
+                                reference_spatial_origin="scan")
+
+        assert result["probe_embeddings"]["temporal"] == []
+        assert probe_fingerprint(result["probe_embeddings"]["spatial"][0]) == probe_fingerprint(stored[0])
+        os.unlink(path)
+
+
 class TestSeveralSignings:
     """
     `VERIFICATION_SIGNINGS` > 1: the app asks for several signings of each kind and
@@ -392,6 +414,10 @@ class TestSeveralSignings:
 
         both = verify(temporal=(model, references, [first, second]))
         assert both["confidence"] == pytest.approx((one + two) / 2)
+        # In signing order; a branch that did not run gives [].
+        assert both["probe_embeddings"] == {
+            "spatial": [],
+            "temporal": [embedding_to_bytes(embed(model, s, "temporal")) for s in (first, second)]}
 
     def test_one_signing_in_a_list_matches_a_single_probe(self):
         model, references, first, _ = self._temporal()
@@ -414,6 +440,9 @@ class TestSeveralSignings:
         assert result["routing"] == "temporal_only"
         assert result["degraded"] is True
         assert any("signing 2" in r for r in result["reasons"])
+        # A gate-failed branch hands no probe to the replay check.
+        assert result["probe_embeddings"]["spatial"] == []
+        assert len(result["probe_embeddings"]["temporal"]) == 2
         os.unlink(good)
         os.unlink(bad)
 

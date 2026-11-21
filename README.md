@@ -99,11 +99,11 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 **Application Layer:**
 
-`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`). `src/database/encryption.py` is still a stub (the AES code is in `db_manager.py`). For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
+`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database.py`, `tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`: first run, login and logout, the Members page, backup and restore, enrolment permissions, vault-wide verification, stale, tablet and replay refusals, the dashboard and signers page). That file runs the screens offscreen with a fake model, so nothing yet tests the whole system, real model included, from enrolment to a logged decision. For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
 
-- **PyQt5 Desktop Interface** (`src/gui/`) Employee accounts, client enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
+- **PyQt5 Desktop Interface** (`src/gui/`) Member accounts (owner-managed), signer enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/`. Each template is encrypted with AES-256-GCM under a random data key, and that key is itself encrypted with a key derived (scrypt) from a passphrase kept outside the database: `SIGVER_DB_PASSPHRASE` if set, otherwise a random key file the app creates beside the database on first run. Only embeddings are stored, plus the encrypted file paths of the reference images. Employee passwords are salted scrypt hashes, and an audit log records every verification.
+- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/companies/<company>/`, one encrypted database per vault. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per member, each wrapped with a key derived (scrypt) from that member's login password, so logging in is what unlocks the data. No key file and no password is kept on disk, and a copied database cannot be opened without a password. Register creates a vault, and the person registering is its owner: only the owner adds members, resets a forgotten password, deletes a signer or replaces a signer's references. Only embeddings are stored. The audit log records every verification, enrolment, re-enrolment, deletion, refused attempt, account change and backup, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the owner and every member forget their passwords, the enrolled signatures cannot be recovered and every signer must enrol again.**
 
 ---
 
@@ -127,15 +127,14 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   │   ├── dataset.py           # Preprocessing, quality gate, pair generation, splits
 │   │   ├── parsers.py           # Loaders for CEDAR, BHSig260, UTSig, SVC2004, SigComp2011
 │   │   └── features.py          # Kinematic feature extraction (deltas, accelerations)
-│   ├── database/                # Encrypted SQLite store (encryption.py is still a stub)
-│   │   ├── db_manager.py
-│   │   └── encryption.py
+│   ├── database/                # Encrypted SQLite store
+│   │   └── db_manager.py
 │   ├── capture/                 # Tablet capture, signing window, ink crop for photos
 │   │   ├── collect.py
 │   │   ├── ink.py
 │   │   ├── pen_input.py
 │   │   └── tablet.py
-│   └── gui/                     # PyQt5 employee app: login, enrolment, verification
+│   └── gui/                     # PyQt5 member app: login, enrolment, verification
 │       ├── app.py               # Entry point: python -m src.gui.app
 │       ├── enrollment.py
 │       ├── verification.py
@@ -207,30 +206,51 @@ python tools/verify_my_signature.py --crop \
 ### GUI
 
 A standalone PyQt5 desktop application (`src/gui/`) provides the
-employee-facing interface for enrollment and verification.
+member-facing interface for enrollment and verification.
 
-**Employee workflow:**
+**Member workflow** (the app says vault, owner, member and signer; the code still calls them company, admin, employee and client, as in `storage.create_company` and the folder `companies/`):
 
-1. **Register / Login** — Each employee has their own account (full name,
-   User ID, password). Enrolled clients are scoped per employee: an
-   employee only sees the clients they personally registered.
-2. **Enrollment** — Register a new client by ID with 5 reference photos of
-   their signature (blue pen on white paper), 5 signings on the tablet, or
-   both. Photos can be previewed, replaced, or removed before saving, and
-   the client can be reopened for editing at any time afterward.
-3. **Verification** — Enter a claimed client ID, choose paper + pen, paper
-   only, or pen only, give the photo and/or sign on the tablet, and receive
-   the decision with its match score drawn against the decision threshold.
-   The match score is a similarity, not a probability. When the result is
-   Genuine from paper and pen together, the employee can confirm the
-   person's identity to add that visit to the client's references.
-4. **Dashboard** — Landing screen after login showing per-employee stats:
-   clients enrolled this month, total enrolled clients, total
+1. **First start, vaults and login** — On the first start the screen is
+   Create a vault: vault name, then the owner's full name, User ID and
+   password, or restore a vault from a backup. Each vault has its own
+   encrypted database, owner, members and signers, and cannot see another
+   vault's data. After that a Welcome screen leads to Login, where the member
+   picks the vault (hidden when there is only one), then enters User ID and password; Create a new vault
+   stays on the login screen. Inside a vault only the owner adds members.
+   Logging out locks the signature data again. A database made by an older
+   version of the app is refused with a message; move that vault's folder away
+   and enrol again.
+2. **Enrollment** — Enter a signer ID. The page looks the signer up across the
+   vault and shows which sets exist (scan N, pen N). A new signer is enrolled
+   with 5 reference photos of their signature (blue pen on white paper), 5
+   signings on the tablet, or both. Only embeddings are stored, so View works
+   only for photos picked in the current session. Any member can add a set the
+   signer lacks. Only the owner can replace a set the signer already has, after
+   a confirmation that picking 5 photos again is a re-enrolment.
+3. **Verification** — Enter a claimed signer ID (any signer in the vault),
+   choose paper + pen, paper only, or pen only, give the photo and/or sign on
+   the tablet, and receive the decision with its match score drawn against the
+   decision threshold. The match score is a similarity, not a probability. The
+   page refuses, with the reason, a signer whose references were made by older
+   weights, a pen signing from another tablet or operating system than the
+   enrolled one, and a replayed signing (one already used). A refused replay is
+   logged and is not a verdict. When the result is Genuine from paper and pen
+   together, the member can confirm the person's identity to add that visit to
+   the signer's references.
+4. **Dashboard** — Landing screen after login with a "Mine" row (your own
+   numbers), a "Vault" row, and the recent vault activity with the member
+   named: signers enrolled this month, total enrolled signers, total
    verifications run, and a live genuine-rate indicator.
-5. **Clients** — A table of the employee's enrolled clients (enrollment
-   date, reference count, most recent verification), used to reopen an
-   existing client for editing.
-6. **Profile** — Employee account settings (name, User ID, password).
+5. **Signers** — A table of every signer in the vault (enrollment date,
+   references as "scan N · pen N", most recent verification). Double-click a row
+   to open the signer on the enrollment page.
+6. **Profile** — Your own name and password. A new password needs the current one.
+7. **Members (owner only)** — Add a member, reset a forgotten password,
+   remove a member, back up the encrypted database, and restore a backup
+   (after which you log in again). A restore keeps a copy of the live database
+   beside it first.
+
+An error no page catches opens a dialog instead of closing the app.
 
 **Integration:** the GUI reaches the model only through `src/gui/interfaces.py`,
 which wraps one `SignatureService` (`src/verification.py`) running on CPU, and
@@ -241,7 +261,7 @@ database (`src/database/db_manager.py`).
 
 |                             Login                                  |                           Dashboard                                  |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-|         ![Login screen](assets/screenshots/login.png)                | ![Dashboard with per-employee stats](assets/screenshots/dashboard.png) |
+|         ![Login screen](assets/screenshots/login.png)                | ![Dashboard with own and vault stats](assets/screenshots/dashboard.png) |
 
 
 |                           Enrollment                               |                            Verification                              |
@@ -249,9 +269,9 @@ database (`src/database/db_manager.py`).
 | ![Enrollment panel](assets/screenshots/enrollment.png)               | ![Verification result display](assets/screenshots/verification.png)    |
 
 
-|                       Clients                                      |                          Profile                                     |
+|                       Signers                                      |                          Profile                                     |
 | :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Enrolled clients table](assets/screenshots/clients.png)            | ![Employee profile editing](assets/screenshots/profile.png)            |
+| ![Enrolled signers table](assets/screenshots/clients.png)            | ![Member profile editing](assets/screenshots/profile.png)            |
 
 **Running the GUI** (from the repository root):
 

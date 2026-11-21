@@ -96,6 +96,11 @@ class VerificationPanel(QWidget):
         # a list of (image path or None, trajectory or None), one per signing.
         self._last_accepted_signings = None
         self._last_accepted_client = None
+        # The tablet that made the current pen signing, and the origin of the paper set
+        # used for this visit (a confirmed signing goes into that set).
+        self._pen_capture_device = None
+        self._pending_origin = "scan"
+        self._last_accepted_origin = "scan"
 
         layout = QVBoxLayout()
         layout.setContentsMargins(30, 24, 30, 24)
@@ -105,12 +110,12 @@ class VerificationPanel(QWidget):
         title.setProperty("role", "title")
         layout.addWidget(title)
 
-        section1 = QLabel("CLIENT")
+        section1 = QLabel("SIGNER")
         section1.setProperty("role", "section")
         layout.addWidget(section1)
 
         self.clientIdInput = QLineEdit()
-        self.clientIdInput.setPlaceholderText("Enter the client's name / ID")
+        self.clientIdInput.setPlaceholderText("Enter the signer's name / ID")
         self.clientIdInput.textChanged.connect(self._reset_visit)
         layout.addWidget(self.clientIdInput)
 
@@ -216,7 +221,7 @@ class VerificationPanel(QWidget):
         self.degradedModeIndicator.setText(
             "" if (image and pen) else
             "⚠ One modality only: the result is reported as degraded and cannot be "
-            "added to the client's references.")
+            "added to the signer's references.")
 
     def _reset_visit(self):
         """A new visit: forget any pending first signing and any unconfirmed result."""
@@ -225,6 +230,7 @@ class VerificationPanel(QWidget):
         self._awaiting_second = False
         self._last_accepted_signings = None
         self._last_accepted_client = None
+        self._pen_capture_device = None
         self.selected_trajectory = None
         self.penStatusLabel.setText("No pen signature yet")
         self.selected_image_path = None
@@ -254,6 +260,7 @@ class VerificationPanel(QWidget):
         if captured is None:
             return
         self.selected_trajectory = captured["signatures"][0]
+        self._pen_capture_device = {k: v for k, v in captured.items() if k != "signatures"}
         self.penStatusLabel.setText("Pen signature captured")
 
     # --- verification -------------------------------------------------------
@@ -261,20 +268,19 @@ class VerificationPanel(QWidget):
         client_id = self.clientIdInput.text().strip()
 
         if not client_id:
-            self._show_idle_message("Please enter a client ID")
+            self._show_idle_message("Please enter a signer ID")
             return
 
-        client = storage.get_client(client_id, employee_username=self.current_employee_username)
+        client = storage.get_client(client_id)
         if client is None:
             self._show_idle_message(
-                f"No enrolled record found for '{client_id}' under your account. Please enroll them first."
+                f"No enrolled record found for '{client_id}'. Please enroll them first."
             )
             return
 
         use_image, use_pen = self._uses()
         # Enrolled references plus confirmed signings added on earlier visits.
-        spatial_b64, spatial_origin = storage.get_reference_embeddings(
-            client_id, employee_username=self.current_employee_username)
+        spatial_b64, spatial_origin = storage.get_reference_embeddings(client_id)
         temporal_b64 = list(client.get("dynamic_references") or [])
 
         if use_image and not spatial_b64:
@@ -294,6 +300,14 @@ class VerificationPanel(QWidget):
             self._show_idle_message("Please press 'Sign on Tablet' and sign first")
             return
 
+        problems = storage.check_references(
+            client_id, spatial_origin if use_image else None, use_pen,
+            self._pen_capture_device if use_pen else None)
+        if problems:
+            storage.log_verify_refused(client_id, self.current_employee_username or "unknown", problems)
+            self._show_idle_message("\n".join(problems))
+            return
+
         self.verifyButton.setEnabled(False)
         self.verifyButton.setText("Verifying…")
         self._show_idle_message("Processing…")
@@ -309,6 +323,7 @@ class VerificationPanel(QWidget):
                 pen_probe = [self._first_trajectory, self.selected_trajectory]
 
         self._pending_client_id = client_id
+        self._pending_origin = spatial_origin
         self._pending_images = image_probe
         self._pending_trajectories = pen_probe
         self._verify_worker = VerifyWorker(
@@ -321,9 +336,33 @@ class VerificationPanel(QWidget):
         self._verify_worker.start()
 
     def _on_verify_success(self, result: dict):
+        try:
+            self._show_verify_result(result)
+        finally:
+            # Even if logging raises, the button must not stay on "Verifying…".
+            self.verifyButton.setEnabled(True)
+            self.verifyButton.setText("Verify")
+
+    def _show_verify_result(self, result: dict):
+        """Log first, then show: nothing is displayed that was not written to the audit log."""
         client_id = self._pending_client_id
         decision = result["decision"]
         confidence = round(result["confidence"], 1)
+
+        # Replay check first, every round: the model returns the embeddings, storage hashes them.
+        probes = result["probe_embeddings"]
+        fingerprints = [storage.probe_fingerprint(b)
+                        for b in probes.get("spatial", []) + probes.get("temporal", [])]
+        if storage.is_replayed_probe(client_id, fingerprints):
+            storage.log_replay_refused(
+                client_id, self.current_employee_username or "unknown", fingerprints)
+            self._end_round()
+            self._last_accepted_signings = None
+            self._last_accepted_client = None
+            self.degradedModeIndicator.setText("")
+            self._show_idle_message("Refused: this signing was already used (replay)")
+            self.confirmButton.setVisible(False)
+            return
 
         if decision == SIGN_AGAIN and not self._awaiting_second:
             # Not a verdict. Neutral request only: no score, no hint of how close it was.
@@ -338,23 +377,29 @@ class VerificationPanel(QWidget):
             self.selectProbeButton.setText("Select Second Signing")
             self.signPenButton.setText("Sign on Tablet Again")
             self._show_idle_message("Please sign once more and give the new signing.")
-            self.verifyButton.setEnabled(True)
-            self.verifyButton.setText("Verify")
             return
         if decision == SIGN_AGAIN:
             # Should never happen (the second call returns only Genuine or Forged).
             # Fail closed rather than asking a third time.
             decision = "Forged"
 
+        # What actually ran, why, and the threshold, so the decision can be explained later.
+        storage.append_verification_log(
+            client_id=client_id,
+            decision=decision,
+            confidence=confidence,
+            modality_state=interfaces.modality_state(result),
+            employee_username=self.current_employee_username or "unknown",
+            routing=result["routing"],
+            degraded=result["degraded"],
+            reasons=result["reasons"],
+            model_version=storage.MODEL_VERSION,
+            threshold=result["threshold"],
+            probe_fingerprints=fingerprints,
+        )
+
         signings = visit_signings(self._pending_images, self._pending_trajectories)
-        self._first_probe_path = None
-        self._first_trajectory = None
-        self._awaiting_second = False
-        self.selectProbeButton.setText("Select Probe Image")
-        self.signPenButton.setText("Sign on Tablet")
-        # A pen signature is used for one verification only.
-        self.selected_trajectory = None
-        self.penStatusLabel.setText("No pen signature yet")
+        self._end_round()
 
         threshold = threshold_for(result)
         self.resultDisplay.setText(decision)
@@ -377,22 +422,23 @@ class VerificationPanel(QWidget):
         else:
             self.degradedModeIndicator.setText("")
 
-        # What actually ran, why, and the threshold, so the decision can be explained later.
-        storage.append_verification_log(
-            client_id=client_id,
-            decision=decision,
-            confidence=confidence,
-            modality_state=interfaces.modality_state(result),
-            employee_username=self.current_employee_username or "unknown"
-        )
-
         accepted = decision == "Genuine" and not result.get("degraded")
         self._last_accepted_signings = signings if accepted else None
         self._last_accepted_client = client_id if accepted else None
+        self._last_accepted_origin = self._pending_origin
         self.confirmButton.setVisible(accepted)
 
-        self.verifyButton.setEnabled(True)
-        self.verifyButton.setText("Verify")
+    def _end_round(self):
+        """The visit's signings are used: forget the first signing and the pen probe."""
+        self._first_probe_path = None
+        self._first_trajectory = None
+        self._awaiting_second = False
+        self.selectProbeButton.setText("Select Probe Image")
+        self.signPenButton.setText("Sign on Tablet")
+        # A pen signature is used for one verification only.
+        self.selected_trajectory = None
+        self._pen_capture_device = None
+        self.penStatusLabel.setText("No pen signature yet")
 
     def confirm_identity(self):
         """The employee confirms the person's identity: add this visit to the references."""
@@ -409,16 +455,17 @@ class VerificationPanel(QWidget):
         added = 0
         for emb in embeddings:
             for modality in ("spatial", "temporal"):
+                extra = {"spatial_origin": self._last_accepted_origin} if modality == "spatial" else {}
                 if emb.get(modality) and storage.add_confirmed_reference(
-                        self._last_accepted_client, emb[modality], employee, modality=modality):
+                        self._last_accepted_client, emb[modality], employee, modality=modality, **extra):
                     added += 1
         self._last_accepted_signings = None
         self.confirmButton.setEnabled(True)
         self.confirmButton.setVisible(False)
         self.degradedModeIndicator.setText("")
         self.modalityStateLabel.setText(
-            "Signing added to the client's references." if added
-            else "Nothing was added: the client has no reference set for this signing.")
+            "Signing added to the signer's references." if added
+            else "Nothing was added to the signer's references.")
 
     def _on_confirm_failed(self, message: str):
         self.confirmButton.setEnabled(True)

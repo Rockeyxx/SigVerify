@@ -1,8 +1,8 @@
 """
 Enrollment Panel — Signature Verification System
 
-Clients are scoped per employee: an employee can only load/edit
-clients they personally enrolled.
+Any employee can load a client and add a set it lacks. Replacing a set the client
+already has is a re-enrolment, for the admin only (the controls are disabled for others).
 """
 
 import os
@@ -84,14 +84,21 @@ class EnrollmentPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.current_employee_username = None
+        self.is_admin = False
+        self.loaded_client = None     # storage record of the loaded client, None for a new one
         self.image_references = []
-        # Stored pen embeddings (base64) of a loaded client. Kept on re-enrolment when no
-        # new pen signatures are captured.
+        # Stored pen embeddings (base64) of a loaded client, shown in the count label only.
         self.dynamic_references = []
+        # What collect_signatures() said about the tablet of the pen signings in pen_signatures.
+        self._capture_device = None
         # Raw [L, 4] trajectories captured in this session. Held in memory only until the
         # enrolment is saved, never written anywhere (ISO/IEC 24745).
         self.pen_signatures = []
         self._selected_new_image_path = None
+        # What run_enrollment() handed the worker; the save uses these, not the live fields.
+        self._pending_client_id = None
+        self._pending_new_pen = False
+        self._pending_capture_device = None
 
         layout = QVBoxLayout()
         layout.setContentsMargins(30, 24, 30, 24)
@@ -101,26 +108,28 @@ class EnrollmentPanel(QWidget):
         title.setProperty("role", "title")
         layout.addWidget(title)
 
-        section1 = QLabel("CLIENT")
+        section1 = QLabel("SIGNER")
         section1.setProperty("role", "section")
         layout.addWidget(section1)
 
         client_row = QHBoxLayout()
         self.clientIdInput = QLineEdit()
-        self.clientIdInput.setPlaceholderText("Client name / ID")
+        self.clientIdInput.setPlaceholderText("Signer name / ID")
         client_row.addWidget(self.clientIdInput)
+        self.clientIdInput.textChanged.connect(self._client_id_edited)
 
         self.loadClientButton = QPushButton("Load / New")
         self.loadClientButton.clicked.connect(self.load_or_start_new_client)
         client_row.addWidget(self.loadClientButton)
         layout.addLayout(client_row)
 
-        self.clientStatusLabel = QLabel("Enter a client ID and click 'Load / New' to begin")
+        self.clientStatusLabel = QLabel("Enter a signer ID and click 'Load / New' to begin")
         self.clientStatusLabel.setProperty("role", "muted")
+        self.clientStatusLabel.setWordWrap(True)   # long messages must not widen the window
         layout.addWidget(self.clientStatusLabel)
 
         section2 = QLabel(f"IMAGE REFERENCES ({REQUIRED_IMAGE_REFERENCES} photos, "
-                          "or none for a tablet-only client)")
+                          "or none for a tablet-only signer)")
         section2.setProperty("role", "section")
         layout.addWidget(section2)
 
@@ -174,21 +183,46 @@ class EnrollmentPanel(QWidget):
         self.enrollButton.clicked.connect(self.run_enrollment)
         layout.addWidget(self.enrollButton)
 
-        self.deleteClientButton = QPushButton("Delete This Client")
+        self.deleteClientButton = QPushButton("Delete This Signer")
         self.deleteClientButton.setProperty("role", "danger")
         self.deleteClientButton.clicked.connect(self.delete_client)
         layout.addWidget(self.deleteClientButton)
 
         self.statusLabel = QLabel("")
+        self.statusLabel.setWordWrap(True)
         layout.addWidget(self.statusLabel)
 
         layout.addStretch()
         self.setLayout(layout)
 
         self._update_counts()
+        self._apply_permissions()
 
-    def set_current_employee(self, username: str):
+    def set_current_employee(self, username: str, is_admin: bool = False):
         self.current_employee_username = username
+        self.is_admin = is_admin
+        self._apply_permissions()
+
+    def _client_id_edited(self):
+        """The loaded record and this session's signings belong to the old ID: forget them."""
+        self.loaded_client = None
+        self.dynamic_references = []
+        self.pen_signatures = []
+        self._capture_device = None
+        self.image_references = []
+        self._refresh_image_list()
+        self._update_counts()
+        self._apply_permissions()
+
+    def _apply_permissions(self):
+        """Non-admin: a set the loaded client already has cannot be replaced; Delete is hidden."""
+        record = self.loaded_client
+        locked_paper = bool(record and not self.is_admin and record["spatial_sets"].get("scan"))
+        locked_pen = bool(record and not self.is_admin and record["temporal_set"])
+        for button in (self.selectImageButton, self.addImageButton):
+            button.setEnabled(not locked_paper)
+        self.captureDynamicButton.setEnabled(not locked_pen)
+        self.deleteClientButton.setVisible(self.is_admin)
 
     def prefill_client(self, client_id: str):
         self.clientIdInput.setText(client_id)
@@ -197,36 +231,32 @@ class EnrollmentPanel(QWidget):
     def load_or_start_new_client(self):
         client_id = self.clientIdInput.text().strip()
         if not client_id:
-            self.clientStatusLabel.setText("Please enter a client ID first")
+            self.clientStatusLabel.setText("Please enter a signer ID first")
             return
+        self._load_client(client_id)
 
+    def _load_client(self, client_id: str):
         self.pen_signatures = []   # never carry one client's signatures over to another
-        any_owner_record = storage.get_client(client_id, employee_username=None)
-        own_record = storage.get_client(client_id, employee_username=self.current_employee_username)
-
-        if any_owner_record and not own_record:
-            self.clientStatusLabel.setText(
-                "⚠ A client with this name already exists under another employee"
-            )
-            self.image_references = []
-            self.dynamic_references = []
-            self._refresh_image_list()
-            self._update_counts()
-            return
-
-        if own_record:
-            self.image_references = list(own_record.get("image_references", []))
-            self.dynamic_references = list(own_record.get("dynamic_references", []))
-            self.clientStatusLabel.setText(
-                f"Loaded existing client '{client_id}' — edit references below"
-            )
+        self._capture_device = None
+        self.image_references = []   # paths are not stored: only photos picked this session
+        record = storage.get_client(client_id)   # company-wide
+        self.loaded_client = record
+        if record:
+            self.dynamic_references = list(record.get("dynamic_references", []))
+            n_paper = len(record["spatial_sets"].get("scan", {}).get("embeddings", []))
+            n_pen = len((record["temporal_set"] or {}).get("embeddings", []))
+            text = (f"Loaded existing signer '{client_id}' · Paper: {n_paper} · Pen: {n_pen}. "
+                    f"Picking {REQUIRED_IMAGE_REFERENCES} photos again re-enrols the paper set (owner only)")
+            if not self.is_admin and (n_paper or n_pen):
+                text += ". Only the owner can replace these"
+            self.clientStatusLabel.setText(text)
         else:
-            self.image_references = []
             self.dynamic_references = []
             self.clientStatusLabel.setText(
-                f"New client '{client_id}' — add {REQUIRED_IMAGE_REFERENCES} image references, "
+                f"New signer '{client_id}' — add {REQUIRED_IMAGE_REFERENCES} image references, "
                 f"capture {REQUIRED_DYNAMIC_REFERENCES} pen signatures, or both"
             )
+        self._apply_permissions()
 
         self._refresh_image_list()
         self._update_counts()
@@ -329,6 +359,7 @@ class EnrollmentPanel(QWidget):
         if captured is None:      # window closed: keep whatever was there
             return
         self.pen_signatures = list(captured["signatures"])
+        self._capture_device = {k: v for k, v in captured.items() if k != "signatures"}
         self.statusLabel.setText("")
         self._update_counts()
 
@@ -336,14 +367,14 @@ class EnrollmentPanel(QWidget):
         client_id = self.clientIdInput.text().strip()
 
         if not client_id:
-            self._set_status_error("Please enter a client ID")
+            self._set_status_error("Please enter a signer ID")
             return
 
         n_images, n_pen = len(self.image_references), len(self.pen_signatures)
         if n_images not in (0, REQUIRED_IMAGE_REFERENCES):
             self._set_status_error(
                 f"Exactly {REQUIRED_IMAGE_REFERENCES} image references required "
-                f"(currently {n_images}), or none for a tablet-only client"
+                f"(currently {n_images}), or none for a tablet-only signer"
             )
             return
         if n_images == 0 and n_pen == 0:
@@ -353,13 +384,26 @@ class EnrollmentPanel(QWidget):
             )
             return
 
+        record = storage.get_client(client_id)   # the ID being saved, not the last one loaded
+        replaced = [name for name, new, have in (
+            ("paper", n_images, record and record["spatial_sets"].get("scan")),
+            ("pen", n_pen, record and record["temporal_set"])) if new and have]
+        if replaced and QMessageBox.question(
+                self, "Confirm Re-enrolment",
+                f"This replaces the signer's {' and '.join(replaced)} references. Continue?",
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+
         # نعطل الزر ونعرض مؤشر تحميل عشان المستخدم يعرف فيه شي يشتغل
         self.enrollButton.setEnabled(False)
         self.enrollButton.setText("Processing…")
         self.statusLabel.setText("")
 
         self._pending_client_id = client_id
-        self._enroll_worker = EnrollWorker(self.image_references, self.pen_signatures)
+        self._pending_new_pen = bool(self.pen_signatures)
+        self._pending_capture_device = self._capture_device
+        # Copies: an edit or a capture while the worker runs must not change its input.
+        self._enroll_worker = EnrollWorker(list(self.image_references), list(self.pen_signatures))
         self._enroll_worker.finished.connect(self._on_enroll_success)
         self._enroll_worker.failed.connect(self._on_enroll_failure)
         self._enroll_worker.start()
@@ -372,14 +416,16 @@ class EnrollmentPanel(QWidget):
         client_id = self._pending_client_id
         embeddings_b64 = result["embeddings"]
         spatial_origin = result["spatial_origin"]
-        # New pen signatures replace the stored pen set; with none captured, keep it.
-        pen_b64 = result.get("dynamic_embeddings") or list(self.dynamic_references)
+        # None keeps the stored pen set (and its added signings) untouched.
+        new_pen = self._pending_new_pen
+        pen_b64 = result["dynamic_embeddings"] if new_pen else None
 
         success, message = storage.save_client_enrollment(
-            client_id, self.image_references, pen_b64,
+            client_id, pen_b64,
             self.current_employee_username or "unknown",
             spatial_embeddings=embeddings_b64,
             spatial_origin=spatial_origin,
+            capture_device=self._pending_capture_device if new_pen else None,
         )
 
         self.enrollButton.setEnabled(True)
@@ -389,16 +435,14 @@ class EnrollmentPanel(QWidget):
             self._set_status_error(message)
             return
 
+        # Show the saved client as it is now, unless another ID was typed or loaded meanwhile.
+        # Loading drops the raw signatures, which are embedded now.
+        if self.clientIdInput.text().strip() == client_id:
+            self._load_client(client_id)
         self._set_status_success(
             f"Saved enrollment for '{client_id}' ({len(embeddings_b64)} image, "
-            f"{len(pen_b64)} pen embeddings)")
+            f"{len(pen_b64 or [])} pen embeddings)")
         self.client_list_changed.emit()
-
-        self.image_references = []
-        self.dynamic_references = []
-        self.pen_signatures = []    # the raw signatures are dropped once embedded
-        self._refresh_image_list()
-        self._update_counts()
 
     def _on_enroll_failure(self, error_message: str):
         self._set_status_error(error_message)
@@ -407,8 +451,8 @@ class EnrollmentPanel(QWidget):
 
     def delete_client(self):
         client_id = self.clientIdInput.text().strip()
-        if not client_id or not storage.client_exists(client_id, self.current_employee_username):
-            self._set_status_error("No existing client of yours loaded to delete")
+        if not client_id or not storage.client_exists(client_id):
+            self._set_status_error("No existing signer loaded to delete")
             return
 
         confirm = QMessageBox.question(
@@ -417,13 +461,18 @@ class EnrollmentPanel(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if confirm == QMessageBox.Yes:
-            storage.delete_client(client_id)
+            ok, message = storage.delete_client(client_id, self.current_employee_username)
+            if not ok:
+                self._set_status_error(message)
+                return
             self.image_references = []
             self.dynamic_references = []
             self.pen_signatures = []
+            self.loaded_client = None
+            self._apply_permissions()
             self._refresh_image_list()
             self._update_counts()
-            self._set_status_success(f"Deleted client '{client_id}'")
+            self._set_status_success(message)
             self.client_list_changed.emit()
 
     def _set_status_error(self, text):
