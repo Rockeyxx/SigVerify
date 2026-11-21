@@ -21,6 +21,21 @@ def test_file_names_follow_the_owners_default(tmp_path):
         "P07_tablet_forgery_byP02_a1.csv"
 
 
+def test_images_load_and_save_under_a_non_ascii_folder(tmp_path):
+    # The repository can sit in a Desktop folder named in Arabic. cv2.imread returns None
+    # and cv2.imwrite returns False there, so scanned sheets could not be imported.
+    folder = tmp_path / "سطح المكتب"
+    folder.mkdir()
+    sheet = folder / "sheet.png"
+    cs.make_sheet(sheet)
+    assert sheet.exists()
+    pages = cs.read_sheets([sheet])
+    assert len(pages) == 1 and pages[0].ndim == 3
+    copy = folder / "copy.jpg"
+    assert cs.imwrite(copy, pages[0]) and cs.imread(copy).shape == pages[0].shape
+    assert cs.imread(folder / "missing.png") is None
+
+
 def test_a_bad_participant_code_is_refused(tmp_path):
     with pytest.raises(ValueError):
         cs.signature_path(tmp_path, "omar", "tablet", "genuine", index=1)
@@ -727,3 +742,13 @@ def test_a_pale_stretch_of_stroke_does_not_cut_the_signature_in_two():
     cv2.line(box, (600, 250), (720, 250), (200, 60, 20), 4)                  # strong blue
     _, _, left, right = cs.ink_box(box)
     assert left < 100 and right > 720
+
+
+def test_a_fine_scan_is_shrunk_to_the_sheet_dpi_and_a_coarse_one_is_kept():
+    """A 1200 DPI scan took most of a minute to cut and froze the window; pages are read at
+    the sheet's DPI instead."""
+    a4 = int(8.27 * cs.SHEET_DPI)
+    fine = np.full((a4 * 4 + 100, a4 * 4, 3), 255, np.uint8)
+    assert min(cs.at_sheet_dpi(fine).shape[:2]) == a4
+    coarse = np.full((a4, a4 // 2, 3), 255, np.uint8)
+    assert cs.at_sheet_dpi(coarse) is coarse
