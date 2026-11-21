@@ -10,16 +10,16 @@ import os
 import sys
 import traceback
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QMessageBox,
+    QApplication, QMainWindow, QWidget, QMessageBox, QFrame, QScrollArea,
     QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QLineEdit, QComboBox
 )
 
-from src.gui.enrollment import EnrollmentPanel
-from src.gui.verification import VerificationPanel
+from src.gui.enrollment_page import EnrollmentPanel
+from src.gui.verification_page import VerificationPanel
 from src.gui.sidebar import Sidebar
-from src.gui.dashboard import DashboardScreen
+from src.gui.dashboard_page import DashboardScreen
 from src.gui.clients_page import ClientsPage
 from src.gui.employees_page import EmployeesPage, restore_from_backup
 from src.gui.profile_page import ProfilePage
@@ -316,6 +316,31 @@ class RegisterScreen(QWidget):
         self.messageLabel.style().polish(self.messageLabel)
 
 
+class PageStack(QStackedWidget):
+    """The pages after login, each inside its own scroll area. A page taller or wider than the
+    window scrolls instead of forcing the window bigger, so every page is reachable on a
+    1366×768 screen (issue #23, item 25)."""
+
+    def add_page(self, page):
+        area = QScrollArea()
+        area.setWidgetResizable(True)          # the page fills the area and scrolls only when it must
+        area.setFrameShape(QFrame.NoFrame)
+        area.setWidget(page)
+        self.addWidget(area)
+
+    def show_page(self, page):
+        self.setCurrentWidget(self.area_of(page))
+
+    def current_page(self):
+        return self.currentWidget().widget()
+
+    def area_of(self, page):
+        for i in range(self.count()):
+            if self.widget(i).widget() is page:
+                return self.widget(i)
+        raise ValueError("page is not in this stack")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -380,16 +405,16 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         self.sidebar = Sidebar()
-        self.sidebar.go_dashboard.connect(lambda: self.content_stack.setCurrentWidget(self.dashboard_screen))
-        self.sidebar.go_enrollment.connect(lambda: self.content_stack.setCurrentWidget(self.enrollment_panel))
-        self.sidebar.go_verification.connect(lambda: self.content_stack.setCurrentWidget(self.verification_panel))
+        self.sidebar.go_dashboard.connect(lambda: self.content_stack.show_page(self.dashboard_screen))
+        self.sidebar.go_enrollment.connect(lambda: self.content_stack.show_page(self.enrollment_panel))
+        self.sidebar.go_verification.connect(lambda: self.content_stack.show_page(self.verification_panel))
         self.sidebar.go_clients.connect(self._open_clients_page)
         self.sidebar.go_employees.connect(self._open_employees_page)
         self.sidebar.go_profile.connect(self._open_profile_page)
         self.sidebar.go_logout.connect(self._handle_logout)
         main_layout.addWidget(self.sidebar)
 
-        self.content_stack = QStackedWidget()
+        self.content_stack = PageStack()
         self.dashboard_screen = DashboardScreen()
         self.enrollment_panel = EnrollmentPanel()
         self.verification_panel = VerificationPanel()
@@ -402,13 +427,10 @@ class MainWindow(QMainWindow):
         self.profile_page.profile_updated.connect(self._handle_profile_updated)
         self.employees_page.restored.connect(self._handle_restored)
 
-        self.content_stack.addWidget(self.dashboard_screen)
-        self.content_stack.addWidget(self.enrollment_panel)
-        self.content_stack.addWidget(self.verification_panel)
-        self.content_stack.addWidget(self.clients_page)
-        self.content_stack.addWidget(self.profile_page)
-        self.content_stack.addWidget(self.employees_page)
-        self.content_stack.setCurrentWidget(self.dashboard_screen)
+        for page in (self.dashboard_screen, self.enrollment_panel, self.verification_panel,
+                     self.clients_page, self.profile_page, self.employees_page):
+            self.content_stack.add_page(page)
+        self.content_stack.show_page(self.dashboard_screen)
 
         main_layout.addWidget(self.content_stack)
         container.setLayout(main_layout)
@@ -440,14 +462,14 @@ class MainWindow(QMainWindow):
         if not self.current_employee["is_admin"]:
             return
         self.employees_page.refresh()
-        self.content_stack.setCurrentWidget(self.employees_page)
+        self.content_stack.show_page(self.employees_page)
 
     def _open_clients_page(self):
         self.clients_page.refresh(self.current_employee["username"])
-        self.content_stack.setCurrentWidget(self.clients_page)
+        self.content_stack.show_page(self.clients_page)
 
     def _open_profile_page(self):
-        self.content_stack.setCurrentWidget(self.profile_page)
+        self.content_stack.show_page(self.profile_page)
 
     def _handle_profile_updated(self, updated_employee: dict):
         self.current_employee = updated_employee
@@ -459,7 +481,7 @@ class MainWindow(QMainWindow):
 
     def _open_client_in_enrollment(self, client_id: str):
         self.enrollment_panel.prefill_client(client_id)
-        self.content_stack.setCurrentWidget(self.enrollment_panel)
+        self.content_stack.show_page(self.enrollment_panel)
 
     def _refresh_after_change(self):
         username = self.current_employee["username"]
@@ -470,8 +492,13 @@ class MainWindow(QMainWindow):
 def main():
     from src.capture.pen_input import choose_pen_input
     choose_pen_input()
+    if sys.platform == "win32":
+        # Without its own ID the app is grouped under python.exe, and the taskbar shows Python's icon.
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EE499.Team06.SignatureVerification")
     app = QApplication(sys.argv)
     install_error_dialog()
+    app.setWindowIcon(QIcon(ICON_PATH))   # the title bar of every window, dialogs included
     app.setStyleSheet(STYLE)
     window = MainWindow()
     if not window.startup_failed:

@@ -136,8 +136,8 @@ This document covers installation, quickstart, project structure, evaluation ben
 │   │   └── tablet.py
 │   └── gui/                     # PyQt5 member app: login, enrolment, verification
 │       ├── app.py               # Entry point: python -m src.gui.app
-│       ├── enrollment.py
-│       ├── verification.py
+│       ├── enrollment_page.py
+│       ├── verification_page.py
 │       ├── interfaces.py        # The GUI's only route to the model
 │       └── storage.py           # The GUI's only route to the database
 ├── scripts/

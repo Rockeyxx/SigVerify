@@ -289,4 +289,48 @@ QHeaderView::section {{
     border: none;
     font-weight: 700;
 }}
+
+/* ---- Scroll bars (the pages scroll on small screens) ---- */
+QScrollBar:vertical {{
+    background: {PRIMARY_DARK};
+    width: 10px;
+    margin: 0;
+}}
+
+QScrollBar:horizontal {{
+    background: {PRIMARY_DARK};
+    height: 10px;
+    margin: 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {TEXT_MUTED};
+    border-radius: 5px;
+    min-height: 30px;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {TEXT_MUTED};
+    border-radius: 5px;
+    min-width: 30px;
+}}
+
+QScrollBar::handle:hover {{
+    background: {ACCENT};
+}}
+
+QScrollBar::add-line, QScrollBar::sub-line {{
+    width: 0;
+    height: 0;
+    border: none;
+    background: none;
+}}
+
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background: none;
+}}
+
+QAbstractScrollArea::corner {{
+    background: {PRIMARY_DARK};
+}}
 """

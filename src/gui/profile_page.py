@@ -54,6 +54,7 @@ class ProfilePage(QWidget):
         layout.addWidget(self.saveButton)
 
         self.statusLabel = QLabel("")
+        self.statusLabel.setWordWrap(True)   # long messages must not widen the window
         layout.addWidget(self.statusLabel)
 
         layout.addStretch()
