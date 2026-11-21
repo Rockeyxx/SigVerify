@@ -17,6 +17,7 @@ QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
 from config.settings import NUM_ENROLLMENT_REFERENCES  # noqa: E402
 from src.database.db_manager import DatabaseManager, PASSPHRASE_ENV_VAR  # noqa: E402
 from src.gui import enrollment, interfaces, storage, verification, workers  # noqa: E402
+from tests.vault_file import on_disk  # noqa: E402
 
 
 def _blob(dim, seed=0):
@@ -375,9 +376,10 @@ def test_panel_refuses_a_replayed_probe_and_logs_it(app, db, fake_workers):
 
 
 def _audit_hashes():
-    import sqlite3, json
-    rows = sqlite3.connect(storage._get_db().db_path).execute(
-        "SELECT event, probe_hashes FROM audit_log ORDER BY id").fetchall()
+    import json
+    db = storage._get_db()
+    with on_disk(db.db_path, db._dek) as conn:
+        rows = conn.execute("SELECT event, probe_hashes FROM audit_log ORDER BY id").fetchall()
     return [(e, json.loads(h) if h else None) for e, h in rows]
 
 
@@ -635,14 +637,14 @@ def test_enrolment_lookup_is_company_wide(app, alice_bob):
 
 def test_enrolment_admin_replacing_paper_asks_and_keeps_the_pen_rows(app, alice_bob, fake_workers, monkeypatch):
     k = NUM_ENROLLMENT_REFERENCES
-    import sqlite3
     storage.save_client_enrollment("c", [_b64(128, i) for i in range(k)], "alice",
                                    spatial_embeddings=[_b64(512, i) for i in range(k)],
                                    capture_device={"device_model": "XPPen", "os": "Linux"})
     assert storage.add_confirmed_reference("c", _b64(128, 99), "alice", modality="temporal")
 
     def pen_rows():
-        with sqlite3.connect(storage._get_db().db_path) as conn:
+        db = storage._get_db()
+        with on_disk(db.db_path, db._dek) as conn:
             return conn.execute("SELECT source, model_version, capture_device FROM enrollments "
                                 "WHERE modality = 'temporal' ORDER BY id").fetchall()
     before = pen_rows()

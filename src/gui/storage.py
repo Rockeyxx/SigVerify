@@ -10,14 +10,19 @@ function works on that current company. With no company chosen they raise
 StorageLockedError("Choose a vault first."). logout() keeps the company chosen.
 
 Inside a company, everything lives in one SQLite database managed by
-src.database.db_manager.DatabaseManager:
+src.database.db_manager.DatabaseManager, encrypted as a whole file:
 
+  * at rest, the file is AES-256-GCM ciphertext behind a small plaintext header that holds
+    only each member's User ID and wrapped key slot. A copied file reveals those User IDs
+    and the format, nothing else, and a changed byte makes it refuse to open.
   * login: an employee's password unwraps their own copy of the data key (one key slot
     per employee). Nothing that opens the data is on disk: no key file, no password, no
-    password hash. A copied database folder cannot be opened without a password.
-  * signature embeddings (spatial 512-d, temporal 128-d): AES-256-GCM, bound to the
-    owning client with associated data
-  * every save is one SQLite transaction (no half-written or wiped files)
+    password hash. Until a login, nothing but the header can be read.
+  * in use, the database lives in memory; every save rewrites the whole encrypted file
+    atomically (no half-written or wiped files, no plaintext on disk)
+  * signature embeddings (spatial 512-d, temporal 128-d) are also encrypted one by one,
+    bound to the owning client with associated data
+  * one app instance per company: a second one is refused at login
 
 Clients belong to their company. Any logged-in employee of it finds, enrols and verifies
 any of its clients. On a lookup, `employee_username` only narrows the list to the clients
@@ -34,8 +39,8 @@ Where the data lives (never relative to the working directory):
                                                 login screen lists it)
 <slug> is the name case-folded, every run of characters other than letters and digits
 (of any script) made one "-"; a Windows device name (con, nul, com1, ...) is refused.
-SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A database made
-before per-employee passwords (schema v4 or older) is refused; clients enrol again.
+SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A plaintext database
+made by an older version of the app is refused; clients enrol again.
 
 Only embeddings are stored: never an image, an image path or a pen trajectory. The
 View button works only for photos picked in the current session.
@@ -61,6 +66,8 @@ from src.database.db_manager import (
     PASSPHRASE_ENV_VAR,
     DatabaseLockedError,
     DatabaseManager,
+    VaultFileError,
+    VaultInUseError,
     probe_fingerprint,  # noqa: F401 — re-exported: the GUI hashes verify()'s probe_embeddings
 )
 
@@ -212,7 +219,7 @@ def _norm(client_id: str) -> str:
 
 
 def _employee_id(username):
-    emp = _get_db().find_employee(username)
+    emp = _unlocked_db().find_employee(username)
     return None if emp is None else emp["id"]
 
 
@@ -344,12 +351,12 @@ def current_employee():
 
 
 def find_employee(username: str):
-    emp = _get_db().find_employee(username)
+    emp = _unlocked_db().find_employee(username)
     return None if emp is None else _public_employee(emp)
 
 
 def list_employees() -> list:
-    return [_public_employee(e) for e in _get_db().list_employees()]
+    return [_public_employee(e) for e in _unlocked_db().list_employees()]
 
 
 def register_employee(full_name: str, username: str, password: str) -> tuple:
@@ -376,7 +383,10 @@ def register_employee(full_name: str, username: str, password: str) -> tuple:
 def authenticate_employee(username: str, password: str) -> tuple:
     """Logging in unlocks the signature data. Returns (success, employee or None, message)."""
     global _session
-    emp, reason = _get_db().authenticate_employee(username, password)
+    try:
+        emp, reason = _get_db().authenticate_employee(username, password)
+    except (VaultFileError, VaultInUseError) as e:      # a changed file, or the vault open elsewhere
+        return False, None, str(e)
     if emp is None:
         return False, None, "User ID not found" if reason == "not_found" else "Incorrect password"
     _session = emp
@@ -530,9 +540,9 @@ def save_client_enrollment(client_id: str, dynamic_refs, employee_username: str,
         return False, "Signer ID is required"
     if "|" in key:
         return False, "Signer ID must not contain '|'"
-    if _employee_id(employee_username or "") is None:
-        return False, "Member not found"
     try:
+        if _employee_id(employee_username or "") is None:
+            return False, "Member not found"
         emp_id = _actor(employee_username)
     except (PermissionError, StorageError) as e:
         return False, str(e)
@@ -760,9 +770,11 @@ def add_confirmed_reference(client_id: str, embedding_b64: str, employee_usernam
     if modality == "spatial" and spatial_origin not in ("scan", "render"):
         raise ValueError(f"spatial_origin must be 'scan' or 'render', got {spatial_origin!r}")
     key = _norm(client_id or "")
-    if not key or _employee_id(employee_username or "") is None:
+    if not key:
         return False
     try:
+        if _employee_id(employee_username or "") is None:
+            return False
         _actor(employee_username)
     except (PermissionError, StorageError):
         return False
@@ -794,12 +806,12 @@ def add_confirmed_reference(client_id: str, embedding_b64: str, employee_usernam
 # ============================================================
 
 def backup_database(dest_folder: str, employee_username: str) -> tuple:
-    """Copy the encrypted database into `dest_folder` (a folder the employee picks).
+    """Copy the encrypted vault file into `dest_folder` (a folder the employee picks).
     No password and no unwrapped key goes into the copy; it opens with the same employee
     passwords. Returns (success, backup file path or message)."""
-    if _employee_id(employee_username or "") is None:
-        return False, "Member not found"
     try:
+        if _employee_id(employee_username or "") is None:
+            return False, "Member not found"
         actor = _actor(employee_username)
         db = _unlocked_db()
     except (PermissionError, StorageError) as e:

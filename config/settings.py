@@ -263,6 +263,9 @@ MIN_PASSWORD_LENGTH = 12
 # replayed file does. Enrolment is about a year before the next visit, so the window
 # covers that gap.
 REPLAY_WINDOW_DAYS = 365
+# A vault file is decrypted whole into memory. 200 signers make about 4 MB, so a file
+# bigger than this is refused as a backup before it is read (a wrong file picked by mistake).
+MAX_VAULT_BYTES = 1 << 30
 
 # Number of independent reference draws averaged during evaluation to minimize sample variation.
 ENROLLMENT_TRIALS = 10
