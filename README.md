@@ -1,6 +1,6 @@
 # Signature Verification System
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue)]()
@@ -103,7 +103,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 - **PyQt5 Desktop Interface** (`src/gui/`) Member accounts (owner-managed), signer enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
 - **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/companies/<company>/`, one encrypted database per vault. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per member, each wrapped with a key derived (scrypt) from that member's login password, so logging in is what unlocks the data. No key file and no password is kept on disk, and a copied database cannot be opened without a password. Register creates a vault, and the person registering is its owner: only the owner adds members, resets a forgotten password, deletes a signer or replaces a signer's references. Only embeddings are stored. The audit log records every verification, enrolment, re-enrolment, deletion, refused attempt, account change and backup, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the owner and every member forget their passwords, the enrolled signatures cannot be recovered and every signer must enrol again.**
+- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/companies/<company>/`, one encrypted database per vault. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per member, each wrapped with a key derived (scrypt) from that member's login password, so logging in is what unlocks the data. No key file and no password is kept on disk. The whole database file is encrypted and authenticated: a copied file reveals only the members' User IDs and the file format, not a name, a signer or an audit row, and a file changed by even one byte refuses to open. In use the database lives only in memory, and every save rewrites the encrypted file atomically. One app instance opens a vault at a time. Register creates a vault, and the person registering is its owner: only the owner adds members, resets a forgotten password, deletes a signer or replaces a signer's references. Only embeddings are stored. The audit log, readable by the owner after login, records every verification, enrolment, re-enrolment, deletion, refused attempt, account change and backup, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the owner and every member forget their passwords, the enrolled signatures cannot be recovered and every signer must enrol again.**
 
 ---
 
@@ -157,7 +157,7 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 ### Prerequisites
 
-- Python 3.10 or newer
+- Python 3.11 or newer (the encrypted vault uses `sqlite3` serialize / deserialize)
 - `pip` package manager
 
 ### Installation

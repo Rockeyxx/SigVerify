@@ -46,8 +46,9 @@ them, even if they appear in the literature review or older drafts:
 - **No Spatial Transformer Network (STN)** in the pipeline
 - **No BioHashing / quantization / Hamming distance** — matching uses
   continuous embeddings with L2 or cosine distance
-- **No SQLCipher / whole-file DB encryption** — encryption is
-  application-layer AES-256-GCM only
+- **No SQLCipher.** The whole database file is encrypted at the application
+  layer with AES-256-GCM (`cryptography`), through the standard `sqlite3`
+  serialize / deserialize (Python 3.11 or newer); no encrypted-SQLite build or extra package
 - **No extra _captured_ channels beyond the four in the contract** — the capture
   contract is `[1, L, 4]`, `(X, Y, Pressure, dt)`. A timestamp is standard
   across digitizers and forms `dt`, whereas channels that common hardware cannot
@@ -631,11 +632,33 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 
 - Encrypt embedding payloads with **AES-256-GCM** at the application layer
   via the `cryptography` package
+- **The whole vault file is encrypted and authenticated at rest.** `signatures.db` is
+  `"SIGVAULT"`, a format version, a plaintext header, a fresh random 96-bit nonce, and the
+  serialized SQLite database encrypted with AES-256-GCM under the data key. The header holds
+  only what login needs: each active member's User ID and key slot (scrypt salt and cost,
+  nonce, wrapped data key) and the passphrase slot if there is one; never a name, the owner
+  flag, a signer or an audit row. The header is the AAD of the body, so a changed byte
+  anywhere makes the file refuse to open with "damaged or was changed", and nothing loads.
+  A copied file reveals only the User IDs and the format. The header is rebuilt from the
+  encrypted `key_slots` table at every save, so a removed member leaves it at once. In use,
+  the database exists only in memory (`Connection.deserialize`); every committed write
+  saves the whole file: serialize, encrypt, write an owner-only temp file beside it,
+  `fsync`, `os.replace`. A crash leaves the previous file or the new one, never half of
+  one (at worst the last write is lost), and a temp file it leaves is ciphertext, removed
+  at the next login. No plaintext copy, journal or temp file ever reaches the disk.
+  Before login only the header is read: whether the vault has members, and each User ID's
+  slot. Everything else needs a login (`DatabaseLockedError`).
+- **One app instance per vault.** Login takes an OS lock on `signatures.db.lock` (`flock`,
+  or `msvcrt.locking` on Windows) and logout releases it. A second instance, or
+  `tools/view_database.py` while the app is open, is refused at login with "This vault is
+  open in another window of the app". The OS drops the lock when a process ends, so a
+  crash leaves no stale lock.
 - **Never persist raw images or raw coordinate streams** — only derived
   embeddings (ISO/IEC 24745)
 - Audit log: record every verification event — `User ID, Timestamp,
   Modality State, Similarity Score, Decision`, plus `routing`, `degraded`, `reasons`,
-  `model_version` and `threshold` — plaintext and queryable. Enrolments, re-enrolments,
+  `model_version` and `threshold`, queryable by the owner after login, through the app
+  and `tools/view_database.py`. Enrolments, re-enrolments,
   deletions, every refused re-enrolment, deletion, replay or verification (stale set, other
   tablet), every account change (`employee added`, `password reset`,
   `employee removed`, `profile changed`, never the password itself) and every `backup` are
@@ -654,8 +677,8 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   database (`company_info`), so a backup carries it: a restore over a vault refuses a
   backup of another vault, and `restore_company` refuses a name other than the one the
   backup records (a backup with no name recorded is allowed, and the vault's own name is
-  recorded after the restore). This check stops mistakes, not an attacker: the name is a plain
-  column that anyone with the file can edit, and opening the backup still needs its owner's
+  recorded after the restore). This check stops mistakes: the name is inside the encrypted
+  file, read after the backup's password opens it, and opening the backup needs its owner's
   password. A folder with no `company.txt` (left by a crash during registration) is cleared
   when that name is registered again. Every `src/gui/storage.py`
   call works on the current vault
@@ -700,35 +723,41 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   pen set stores the tablet model and operating system it was signed on, and a signing
   from another model or system is refused. Both refusals are logged as a `verify refused`
   event with the reasons shown, and are not counted.
-- **Backup and restore.** Only the owner backs up, and a backup is a consistent copy of
-  the encrypted database, created owner-only (mode 0600 on Linux and macOS; Windows ignores
+- **Backup and restore.** Only the owner backs up, and a backup is a byte copy of
+  the encrypted vault file as saved after the last write, created owner-only (mode 0600 on Linux and macOS; Windows ignores
   the mode) and never over an existing file.
   It opens with the same passwords. Only the owner restores over the current vault
   (`restore_company` on the register screen makes a new vault from a backup instead,
   and removes its folder again on any failure), and `DatabaseManager.restore_from` checks this itself. A restore is
-  checked on a scratch copy first: a backup holding a trigger, a view or a table this app
-  never creates is refused, and it must be a sound database of a readable schema, opened
-  by an owner of the backup. Then the live database is copied, owner-only, to
-  `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside it (`-2`, `-3` on a clash), and
-  a `restore` row naming who restored and from which file goes into the backup's audit
-  log. Nothing is replaced until all of that passes. A restore never rolls the audit log
+  checked in memory only: the backup is read once, opened by its own header and password
+  and decrypted into memory (no scratch file). A backup holding a trigger, a view or a table
+  this app never creates is refused, and it must be a sound database of a readable schema,
+  opened by an owner of the backup. Then the live vault file is copied byte for byte,
+  owner-only and still encrypted, to `signatures.db.before-restore-<YYYYmmdd-HHMMSS>` beside
+  it (`-2`, `-3` on a clash), and a `restore` row naming who restored, from which file, and
+  the safety copy goes into the backup's audit log. The live file is replaced only after all
+  of that passes, in one `os.replace`; a failure at any step leaves it byte-identical. A restore never rolls the audit log
   back: every live audit row the backup does not hold is carried into the restored
   database first, in live order (with the member's username as `employee_label`), and
   the `restore` row says how many were carried. Rows are matched by content, never by
   timestamp, so a row written in the backup's last second or after the clock stepped back
   is kept. The Members page shows the last backup and
   the last signer deletion, each with when and by whom, read from the audit log.
-- **Old databases are refused, not upgraded.** A v3 or v4 database is refused when its
-  vault is opened at login (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
+- **Old databases are refused, not upgraded.** A plaintext database (v3, v4, or a v5 made
+  before whole-file encryption) is refused when its vault is opened at login (`src/gui/storage.py` shows "made by an older version"); nothing is deleted or migrated,
   and the owner moves that vault's folder away and enrols again. A
   `signatures.db` directly in the base folder (made before vaults) is ignored. No key file is read.
-- **Two known limits, documented instead of built.** Removing a member does not change
-  the data key, so a copy of the database taken before the removal still opens with their
-  old password (key rotation would be a separate, manual step, as in Bitwarden
-  organisations). `is_admin` is a plain column: signing it with a key derived from the
-  data key would not help, because any member with a password can unwrap the data key
-  and re-sign a hand-edited flag. Protecting against someone who holds both the file and
-  a valid password needs a server, which is a non-goal.
+- **Three known limits, documented instead of built.** Removing a member or resetting a
+  password does not change the data key. A removed member who kept any copy of the vault
+  file and their old password can unwrap the data key, and with it decrypt every later copy
+  of the vault and its backups: removal stops their login, it does not revoke what they
+  already had (key rotation would be a separate, manual step, as in Bitwarden
+  organisations). An older valid vault file put back in place (a rollback) is accepted,
+  removed members' slots included; detecting it needs a counter kept outside the file. Someone holding the file alone can no longer read or edit anything (the
+  owner flag, `active`, audit rows), but every member's password unwraps the same data key,
+  so a member who also has the file can decrypt it, edit it and encrypt it again.
+  Protecting against someone who holds both the file and a valid password needs a server,
+  which is a non-goal.
 
 ---
 
