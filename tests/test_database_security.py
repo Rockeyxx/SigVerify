@@ -7,6 +7,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from src.database.db_manager import DatabaseLockedError, DatabaseManager, probe_fingerprint
+from tests.vault_file import edit_live, on_disk
 
 SHIPPED_KDF_N = DatabaseManager.KDF_N   # read at import, before the autouse fixture lowers it
 MODEL = "test-model-v1"
@@ -44,8 +45,8 @@ def two_employees(db):
     return a, db.create_employee("Bob", "bob", PW_B, created_by=a)
 
 
-def slots(db_path):
-    with sqlite3.connect(db_path) as conn:
+def slots(db_path, dek):
+    with on_disk(db_path, dek) as conn:
         return conn.execute("SELECT kind, employee_id, salt, wrapped_dek FROM key_slots ORDER BY id").fetchall()
 
 
@@ -60,7 +61,7 @@ def test_embedding_saved_and_loaded_is_identical(db):
 def test_stored_bytes_are_not_the_plain_embedding(db, db_path):
     original = vec(512, 2)
     db._add_references("c1", "spatial", [original], MODEL, spatial_origin="scan")
-    with sqlite3.connect(db_path) as conn:
+    with on_disk(db_path, db._dek) as conn:
         (stored,) = conn.execute("SELECT encrypted_embedding FROM enrollments").fetchone()
     plain = original.tobytes()
     assert stored != plain
@@ -69,10 +70,10 @@ def test_stored_bytes_are_not_the_plain_embedding(db, db_path):
 
 
 def test_wrong_passphrase_raises_and_keeps_the_original_key(db, db_path):
-    before = slots(db_path)
+    before = slots(db_path, db._dek)
     with pytest.raises(InvalidTag):
         DatabaseManager(db_path, passphrase="not-the-passphrase")
-    assert slots(db_path) == before
+    assert slots(db_path, db._dek) == before
 
 
 def test_decrypting_with_the_wrong_data_key_raises(db):
@@ -85,7 +86,7 @@ def test_decrypting_with_the_wrong_data_key_raises(db):
 def test_record_moved_to_another_user_raises(db, db_path):
     db._add_references("alice-client", "spatial", [vec(512, 4)], MODEL, spatial_origin="scan")
     db._add_references("bob-client", "temporal", [vec(128, 5)], MODEL)
-    with sqlite3.connect(db_path) as conn:
+    with edit_live(db) as conn:
         conn.execute("UPDATE enrollments SET user_id = 'bob-client' WHERE user_id = 'alice-client'")
     with pytest.raises(InvalidTag):
         db.get_references("bob-client", "spatial", "scan")
@@ -93,7 +94,7 @@ def test_record_moved_to_another_user_raises(db, db_path):
 
 def test_record_with_changed_origin_raises(db, db_path):
     db._add_references("c1", "spatial", [vec(512, 6)], MODEL, spatial_origin="scan")
-    with sqlite3.connect(db_path) as conn:
+    with edit_live(db) as conn:
         conn.execute("UPDATE enrollments SET spatial_origin = 'render'")
     with pytest.raises(InvalidTag):
         db.get_references("c1", "spatial", "render")
@@ -101,7 +102,7 @@ def test_record_with_changed_origin_raises(db, db_path):
 
 def test_tampered_ciphertext_raises(db, db_path):
     db._add_references("c1", "temporal", [vec(128, 7)], MODEL)
-    with sqlite3.connect(db_path) as conn:
+    with edit_live(db) as conn:
         (ct,) = conn.execute("SELECT encrypted_embedding FROM enrollments").fetchone()
         flipped = bytes([ct[0] ^ 1]) + ct[1:]
         conn.execute("UPDATE enrollments SET encrypted_embedding = ?", (flipped,))
@@ -120,14 +121,14 @@ def test_spatial_origin_saved_is_the_one_returned(db, db_path, origin):
     emp, _ = two_employees(db)
     db.save_client("c1", "C1", emp, spatial_embeddings=[vec(512, 8)], spatial_origin=origin, temporal_embeddings=[], model_version=MODEL)
     assert db.get_client_record("c1")["spatial_origin"] == origin
-    with sqlite3.connect(db_path) as conn:
+    with on_disk(db_path, db._dek) as conn:
         assert conn.execute("SELECT spatial_origin FROM enrollments").fetchall() == [(origin,)]
 
 
 def test_model_version_is_stored_per_template(db, db_path):
     emp, _ = two_employees(db)
     db.save_client("c1", "C1", emp, spatial_embeddings=[vec(512, 9)], spatial_origin="scan", temporal_embeddings=[vec(128, 10)], model_version="v-spatial-temporal-7")
-    with sqlite3.connect(db_path) as conn:
+    with on_disk(db_path, db._dek) as conn:
         rows = conn.execute("SELECT modality, model_version FROM enrollments ORDER BY id").fetchall()
     assert rows == [("spatial", "v-spatial-temporal-7"), ("temporal", "v-spatial-temporal-7")]
     assert db.get_references("c1", "temporal", model_version="other") == []
@@ -163,10 +164,10 @@ def test_password_text_is_nowhere_in_the_database_file(db, db_path):
 def test_no_password_hash_is_stored_only_a_wrapped_key(db, db_path):
     """The key slot is the login check: there is no cheaper hash to attack instead."""
     a, b = two_employees(db)
-    with sqlite3.connect(db_path) as conn:
-        columns = [r[1] for r in conn.execute("PRAGMA table_info(members)")]
-    assert not {"salt", "password_hash", "legacy_salt", "legacy_hash"} & set(columns)
-    rows = [r for r in slots(db_path) if r[0] == "employee"]
+    with on_disk(db_path, db._dek) as conn:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(employees)")]
+    assert columns and not {"salt", "password_hash", "legacy_salt", "legacy_hash"} & set(columns)
+    rows = [r for r in slots(db_path, db._dek) if r[0] == "employee"]
     assert [r[1] for r in rows] == [a, b]
     (_, _, salt_a, wrapped_a), (_, _, salt_b, wrapped_b) = rows
     assert len(salt_a) == 16 and salt_a != salt_b and wrapped_a != wrapped_b
@@ -176,24 +177,24 @@ def test_each_slot_records_its_scrypt_cost_and_the_default_is_2_17(db, db_path, 
     db.create_employee("A", "a", PW_A)                       # made at the test cost, 2**10
     monkeypatch.setattr(DatabaseManager, "KDF_N", 2 ** 11)   # raising the cost later...
     assert db.authenticate_employee("a", PW_A)[0] is not None   # ...still opens the old slot
-    with sqlite3.connect(db_path) as conn:
+    with on_disk(db_path, db._dek) as conn:
         assert conn.execute("SELECT kdf_n FROM key_slots WHERE kind = 'employee'").fetchone() == (2 ** 10,)
     assert SHIPPED_KDF_N == 2 ** 17                          # the shipped cost, lowered only in tests
 
 
-def _through_second_connection(db_path, sql, params=()):
-    with sqlite3.connect(db_path) as conn:
+def _another_session(db, sql, params=()):
+    with edit_live(db) as conn:
         conn.execute(sql, params)
 
 
 def test_create_employee_rechecks_the_creator_inside_the_transaction(db, db_path, monkeypatch):
     a, b = two_employees(db)                                 # bob is not admin; make him one, then demote
-    _through_second_connection(db_path, "UPDATE employees SET is_admin = 1 WHERE id = ?", (b,))
+    _another_session(db, "UPDATE employees SET is_admin = 1 WHERE id = ?", (b,))
     real_wrap = db._wrap
 
     def wrap_then_demote(*args):
         slot = real_wrap(*args)
-        _through_second_connection(db_path, "UPDATE employees SET is_admin = 0 WHERE id = ?", (b,))
+        _another_session(db, "UPDATE employees SET is_admin = 0 WHERE id = ?", (b,))
         return slot
 
     monkeypatch.setattr(db, "_wrap", wrap_then_demote)
@@ -208,14 +209,14 @@ def test_update_employee_refuses_when_the_slot_changed_meanwhile(db, db_path, mo
 
     def wrap_then_change_slot(*args):
         slot = real_wrap(*args)
-        _through_second_connection(db_path, "UPDATE key_slots SET salt = ? WHERE employee_id = ?",
+        _another_session(db, "UPDATE key_slots SET salt = ? WHERE employee_id = ?",
                                    (b"x" * 16, a))        # another session changed alice's slot
         return slot
 
     monkeypatch.setattr(db, "_wrap", wrap_then_change_slot)
     with pytest.raises(ValueError, match="Your password was changed meanwhile. Try again."):
         db.update_employee(a, "alice", "Alice", "alice", "new-password-33", current_password=PW_A)
-    with sqlite3.connect(db_path) as conn:
+    with on_disk(db_path, db._dek) as conn:
         assert conn.execute("SELECT salt FROM key_slots WHERE employee_id = ?", (a,)).fetchone() == (b"x" * 16,)
 
 
@@ -238,9 +239,9 @@ def test_the_backup_is_created_private_and_never_over_a_file(db, tmp_path):
 
 def test_new_password_rewraps_the_slot(db, db_path):
     a = db.create_employee("A", "a", "old-password-1")
-    before = slots(db_path)
+    before = slots(db_path, db._dek)
     db.update_employee(a, "a", "A", "a", "new-password-2", current_password="old-password-1")
-    after = slots(db_path)
+    after = slots(db_path, db._dek)
     assert [r for r in after if r[0] == "employee"] != [r for r in before if r[0] == "employee"]
     assert db.authenticate_employee("a", "old-password-1")[0] is None
     assert db.authenticate_employee("a", "new-password-2")[0] is not None
@@ -272,12 +273,12 @@ def test_an_employee_cannot_change_another_account(db):
 
 def test_a_new_password_needs_the_current_one(db, db_path):
     a = db.create_employee("A", "a", PW_A)
-    before = slots(db_path)
+    before = slots(db_path, db._dek)
     with pytest.raises(PermissionError, match="current password"):
         db.update_employee(a, "a", "A", "a", "new-password-2")
     with pytest.raises(PermissionError, match="incorrect"):
         db.update_employee(a, "a", "A", "a", "new-password-2", current_password="wrong-password-9")
-    assert slots(db_path) == before
+    assert slots(db_path, db._dek) == before
     assert db.authenticate_employee("a", PW_A)[0] is not None
 
 
@@ -286,6 +287,7 @@ def test_a_locked_store_changes_no_profile(db):
     db.lock()
     with pytest.raises(DatabaseLockedError):
         db.update_employee(a, "a", "Hacked", "mallory")
+    db.authenticate_employee("a", PW_A)
     assert db.find_employee("a")["full_name"] == "A" and db.find_employee("mallory") is None
 
 
@@ -393,7 +395,7 @@ def test_error_inside_the_transaction_rolls_everything_back(db, db_path):
     a, _ = two_employees(db)
     first = [vec(512, i) for i in range(5)]
     db.save_client("c1", "C1", a, spatial_embeddings=first, spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
-    with sqlite3.connect(db_path) as conn:  # a failure that only happens at INSERT time
+    with edit_live(db) as conn:  # a failure that only happens at INSERT time
         conn.execute("""CREATE TRIGGER boom BEFORE INSERT ON enrollments WHEN NEW.model_version = 'boom'
                         BEGIN SELECT RAISE(ABORT, 'disk on fire'); END""")
     with pytest.raises(sqlite3.DatabaseError):
@@ -407,7 +409,7 @@ def test_error_inside_the_transaction_rolls_everything_back(db, db_path):
 def test_reenrolment_replaces_old_templates_and_keeps_enrolled_at(db, db_path):
     a, _ = two_employees(db)
     db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, i) for i in range(5)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
-    with sqlite3.connect(db_path) as conn:  # backdate, so "kept" cannot be confused with "same second"
+    with edit_live(db) as conn:  # backdate, so "kept" cannot be confused with "same second"
         conn.execute("UPDATE users SET enrolled_at = '2020-01-02T03:04:05', updated_at = '2020-01-02T03:04:05'")
     new = [vec(512, 200 + i) for i in range(5)]
     db.save_client("c1", "c1 renamed", a, spatial_embeddings=new, spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
@@ -422,7 +424,7 @@ def test_reenrolment_replaces_old_templates_and_keeps_enrolled_at(db, db_path):
 def test_no_image_path_is_stored(db, db_path):
     a, _ = two_employees(db)
     db.save_client("c1", "C1", a, spatial_embeddings=[vec(512, 1)], spatial_origin="scan", temporal_embeddings=[], model_version=MODEL)
-    with sqlite3.connect(db_path) as conn:
+    with on_disk(db_path, db._dek) as conn:
         columns = [r[1] for t in ("users", "enrollments")
                    for r in conn.execute(f"PRAGMA table_info({t})")]
         assert not [c for c in columns if "image" in c.lower()]
@@ -433,8 +435,9 @@ def test_no_image_path_is_stored(db, db_path):
 
 def test_a_passphrase_never_creates_a_second_key_on_a_password_database(tmp_path):
     path = str(tmp_path / "s.db")
-    DatabaseManager(path).create_employee("Owner", "owner", PW_A)
-    before = slots(path)
+    owner = DatabaseManager(path)
+    owner.create_employee("Owner", "owner", PW_A)
+    before = slots(path, owner._dek)
     with pytest.raises(ValueError, match="member passwords"):
         DatabaseManager(path, passphrase="ci-secret")
-    assert slots(path) == before
+    assert slots(path, owner._dek) == before

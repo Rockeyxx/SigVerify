@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sigverify"
 version = "0.10.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
 include = ["config*", "src*", "scripts*", "tools*"]

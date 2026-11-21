@@ -4,9 +4,10 @@ view_database.py
 Read-only inspection script for one company's signatures.db (debugging only).
 Prints every client with the shape of their decrypted references, and the audit log.
 
-The data key is wrapped by employee passwords, so the script asks for a User ID and
-password (SIGVER_DB_PASSPHRASE unlocks a test database instead), after the company.
-SIGVER_HOME picks the folder, as in the app.
+The whole file is encrypted, so the script asks for a User ID and password
+(SIGVER_DB_PASSPHRASE unlocks a test database instead), after the company. The database
+is decrypted in memory only; the script writes nothing. Close the app first: one
+instance per vault. SIGVER_HOME picks the folder, as in the app.
 
 Run from the repository root:
     python -m tools.view_database
@@ -16,7 +17,7 @@ import getpass
 import os
 import sys
 
-from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager
+from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager, VaultFileError, VaultInUseError
 from src.gui.storage import DB_FILENAME, _company_folder, list_companies
 
 
@@ -34,11 +35,14 @@ def main():
     if not os.path.exists(path):
         sys.exit(f"No database at {path}. Run the app first, or set SIGVER_HOME.")
     passphrase = os.environ.get(PASSPHRASE_ENV_VAR)
-    db = DatabaseManager(path, passphrase=passphrase)
-    if not db.unlocked:
-        employee, _ = db.authenticate_employee(input("User ID: "), getpass.getpass("Password: "))
-        if employee is None:
-            sys.exit("Wrong User ID or password.")
+    try:
+        db = DatabaseManager(path, passphrase=passphrase)
+        if not db.unlocked:
+            employee, _ = db.authenticate_employee(input("User ID: "), getpass.getpass("Password: "))
+            if employee is None:
+                sys.exit("Wrong User ID or password.")
+    except (VaultFileError, VaultInUseError, RuntimeError) as e:   # changed file, app still open, old format
+        sys.exit(str(e))
 
     print_section("CLIENTS & REFERENCE SETS (decrypted)")
     clients = db.list_client_records()
@@ -54,7 +58,7 @@ def main():
             print(f"  [{name}] {len(found['embeddings'])} x {found['embeddings'][0].shape[0]}-d, "
                   f"model {', '.join(found['model_versions'])}, device {found['capture_device']}")
 
-    print_section("AUDIT LOG (plaintext, IEEE 730)")
+    print_section("AUDIT LOG (IEEE 730)")
     events = db.get_log_events(event=None)
     if not events:
         print("No events logged yet.")
@@ -66,6 +70,7 @@ def main():
     print("\n" + "=" * 60)
     print(f"Total clients: {len(clients)}   |   Total audit entries: {len(events)}")
     print("=" * 60)
+    db.lock()   # forget the key and free the vault for the app
 
 
 if __name__ == "__main__":

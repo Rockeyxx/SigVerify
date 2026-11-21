@@ -1,19 +1,33 @@
 """
-Encrypted template store (SQLite + AES-256-GCM at the application layer).
+Encrypted template store: one SQLite database per vault, encrypted as a whole file.
 
 Boundary (AGENTS.md): this layer holds the keys. It receives plain embeddings
 from SignatureService.enroll_*() as float32 bytes (or np.ndarray), encrypts them
 for storage, and returns decrypted float32 arrays for SignatureService.verify().
 
-Keys: one random 256-bit data key (DEK) encrypts every template. The DEK is never
-stored in the clear. The `key_slots` table holds wrapped copies of it:
-  * one slot per employee, wrapped with a key derived (scrypt) from that employee's
-    login password. Logging in IS unwrapping the slot: AES-GCM refuses a wrong
-    password, so no password hash is stored at all;
-  * at most one "passphrase" slot, for tests and CI only (SIGVER_DB_PASSPHRASE).
-No password and no unwrapped key is ever written to disk. A copied database is
-useless without an employee's password. If every password is lost, the templates
-cannot be recovered.
+The file at rest (one file, so one os.replace saves the header and the body together):
+  "SIGVAULT" | format version (2 bytes) | header length (4 bytes) | header (JSON) |
+  nonce (12 bytes) | AES-256-GCM(data key, nonce, the serialized database, AAD = all before the nonce)
+The header is plaintext and holds only what login needs: each active member's User ID
+and key slot (scrypt salt and cost, nonce, wrapped data key), and the passphrase slot if
+any. No name, no owner flag, no signer and no audit row. Every other byte is encrypted,
+and the header is authenticated as the AAD: changing any byte makes the file refuse to
+open, and nothing loads. The header is rebuilt from the encrypted `key_slots` table at
+every save, so the two always agree.
+
+In use, the database exists only in memory: login decrypts the body into one in-memory
+SQLite connection (Connection.deserialize). Every committed write saves the whole file:
+serialize, encrypt with a fresh random nonce, write an owner-only temp file beside the
+vault, fsync, os.replace. A crash leaves the previous file or the new one, never half of
+one; at worst the last write is lost. No plaintext copy, journal or temp file reaches the
+disk. One app instance per vault: an OS lock on `<vault>.lock` is held from login to logout.
+
+Keys: one random 256-bit data key (DEK) encrypts the file and, again, every template row
+(with associated data that binds the row to its signer). The DEK is never stored in the
+clear. It is wrapped once per member, with a key derived (scrypt) from that member's
+password. Logging in IS unwrapping the slot: AES-GCM refuses a wrong password, so no
+password hash is stored at all. At most one "passphrase" slot exists, for tests and CI
+only (SIGVER_DB_PASSPHRASE). If every password is lost, nothing can be recovered.
 
 Employees: the first account on an empty database is the admin. Only the admin adds
 employees, resets a password, removes an employee, deletes a client, replaces a
@@ -21,17 +35,24 @@ client's existing references, or backs up or restores the database. Any employee
 enrols new clients and verifies any client: clients belong to the company, not to the
 employee who enrolled them (`enrolled_by` is recorded, never used to block). Every
 enrolment, re-enrolment, deletion and restore, and every refused attempt, is written to
-the plaintext audit log with the employee.
+the audit log with the employee; the owner reads it after login.
 """
+import base64
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
-import tempfile
+import string
+import struct
+import threading
 from collections import Counter
-from contextlib import closing, contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 import numpy as np
 from cryptography.exceptions import InvalidTag
@@ -40,6 +61,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from config.settings import (
     MAX_REFERENCES,
+    MAX_VAULT_BYTES,
     MIN_PASSWORD_LENGTH,
     REPLAY_WINDOW_DAYS,
     SPATIAL_EMBEDDING_DIM,
@@ -57,6 +79,21 @@ FINAL_DECISIONS = ("Genuine", "Forged")
 PASSPHRASE_ENV_VAR = "SIGVER_DB_PASSPHRASE"   # tests and CI only
 SCHEMA_VERSION = 5
 WRAP_AAD = b"sigverify-dek-v2"
+VAULT_MAGIC = b"SIGVAULT"
+VAULT_FORMAT_VERSION = 1
+MAX_KDF_N = 2 ** 20   # a header asking for more scrypt work than this is refused (memory)
+
+_VAULT_PREFIX = struct.Struct(">8sHI")   # magic, format version, header length
+_NONCE_BYTES = 12
+_TAG_BYTES = 16
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_EMPTY_HEADER = {"slots": {}, "passphrase": None}
+_NOCASE = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)   # SQLite's COLLATE NOCASE
+_FILE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+_DAMAGED = "The vault file is damaged or was changed; it cannot be opened."
+_NOT_A_VAULT = "This file is not a vault of this app."
+_OLD_PLAINTEXT = ("This is a plaintext database made by an older version of the app; "
+                  "it is older than the encrypted vault format and is not supported.")
 
 # Audit events. "verify" rows carry a decision; the others record who changed a client or
 # an account, or who was refused. Only "verify" rows are counted as verifications.
@@ -87,6 +124,14 @@ _LIVE_AUDIT_SQL = ("SELECT " + _AUDIT_IDENTITY + ", a.employee_id, COALESCE(a.em
 
 class DatabaseLockedError(RuntimeError):
     """The data key is not loaded: an employee has to log in first."""
+
+
+class VaultFileError(RuntimeError):
+    """The vault file was not written by this app, or a byte of it was changed."""
+
+
+class VaultInUseError(RuntimeError):
+    """Another app instance has this vault open."""
 
 
 def _now_local() -> str:
@@ -126,8 +171,8 @@ _KEY_SLOTS_SQL = """
         wrapped_dek BLOB NOT NULL,
         CHECK ((kind = 'employee') = (employee_id IS NOT NULL))
     )"""
-# The company this database belongs to (one row; plain text, not secret). A database made
-# before it has no row, and its company is unknown.
+# The company this database belongs to (one row). A database made before it has no row,
+# and its company is unknown.
 _COMPANY_INFO_SQL = "CREATE TABLE IF NOT EXISTS company_info (name TEXT NOT NULL)"
 _ONE_SHARED_SLOT_SQL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS one_shared_slot_per_kind ON key_slots(kind) "
@@ -135,19 +180,229 @@ _ONE_SHARED_SLOT_SQL = (
 )
 
 
+def _create_schema(conn) -> None:
+    """ISO/IEC 9075-1: the relational schema of a new vault, in one transaction."""
+    conn.execute("BEGIN")
+    conn.execute(_EMPLOYEES_SQL)
+    conn.execute(_KEY_SLOTS_SQL)
+    conn.execute(_ONE_SHARED_SLOT_SQL)
+    conn.execute(_COMPANY_INFO_SQL)
+    # `users` holds the clients (user_id = lower-cased client ID).
+    # enrolled_by points at employees.id so a username rename detaches nothing.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            display_name TEXT,
+            enrolled_by INTEGER REFERENCES employees(id),
+            spatial_origin TEXT CHECK (spatial_origin IS NULL OR spatial_origin IN ('render', 'scan')),
+            enrolled_at TEXT,
+            updated_at TEXT
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS enrollments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            modality TEXT NOT NULL CHECK (modality IN ('spatial', 'temporal')),
+            spatial_origin TEXT CHECK (spatial_origin IN ('render', 'scan')),
+            encrypted_embedding BLOB NOT NULL,
+            nonce BLOB NOT NULL,
+            model_version TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'enroll' CHECK (source IN ('enroll', 'added')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            enrolled_at TEXT,
+            capture_device TEXT,
+            CHECK ((modality = 'spatial' AND spatial_origin IS NOT NULL)
+                OR (modality = 'temporal' AND spatial_origin IS NULL)),
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+        )""")
+    # No foreign key on user_id: the log outlives a deleted client.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            client_display_name TEXT,
+            employee_id INTEGER REFERENCES employees(id),
+            employee_label TEXT,
+            modality_state TEXT,
+            similarity_score REAL,
+            decision TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            routing TEXT,
+            degraded INTEGER,
+            reasons TEXT,
+            model_version TEXT,
+            threshold REAL,
+            event TEXT NOT NULL DEFAULT 'verify',
+            probe_hashes TEXT
+        )""")
+    conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")  # skylos: ignore[SKY-D211] PRAGMA takes no bound parameter; module int constant
+    conn.execute("COMMIT")
+
+
+def _memory_db(body: bytes = None):
+    """An in-memory connection holding `body` (a serialized database), or a new vault's
+    empty tables. Refuses a schema this code does not read."""
+    conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA temp_store = MEMORY")   # sorts and temp indexes never spill plaintext to the OS temp folder
+        if body is None:
+            _create_schema(conn)
+        else:
+            conn.deserialize(body)
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrollments'").fetchone():
+                raise VaultFileError(_NOT_A_VAULT)
+            if version < SCHEMA_VERSION:
+                raise RuntimeError(f"schema v{version} is older than v{SCHEMA_VERSION} and is not supported")
+            if version != SCHEMA_VERSION:
+                raise RuntimeError(f"The vault was created with schema version {version}, expected "
+                                   f"{SCHEMA_VERSION}. Move it away and enrol again.")
+        conn.execute("PRAGMA foreign_keys = ON")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _b64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _slot_tuple(slot) -> tuple:
+    """(salt, kdf_n, nonce, wrapped_dek) of one header slot. Raises ValueError, KeyError or
+    TypeError for a malformed one, and refuses a scrypt cost that is not a power of two up to MAX_KDF_N."""
+    n = slot["n"]
+    if type(n) is not int or not 2 <= n <= MAX_KDF_N or n & (n - 1):
+        raise ValueError("bad scrypt cost")
+    nonce = base64.b64decode(slot["nonce"], validate=True)
+    if len(nonce) != _NONCE_BYTES:
+        raise ValueError("bad slot nonce")
+    return (base64.b64decode(slot["salt"], validate=True), n, nonce, base64.b64decode(slot["wrapped"], validate=True))
+
+
+def _header_bytes(conn) -> bytes:
+    """The plaintext header, rebuilt from the encrypted key_slots table: active members only."""
+    def slot(salt, n, nonce, wrapped):
+        return {"salt": _b64(salt), "n": n, "nonce": _b64(nonce), "wrapped": _b64(wrapped)}
+    members = {username: slot(*rest) for username, *rest in conn.execute(
+        "SELECT e.username, k.salt, k.kdf_n, k.nonce, k.wrapped_dek FROM key_slots k "
+        "JOIN employees e ON e.id = k.employee_id WHERE e.active = 1 ORDER BY k.id")}
+    shared = conn.execute(
+        "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE kind = 'passphrase'").fetchone()
+    return json.dumps({"kdf": "scrypt", "r": 8, "p": 1, "slots": members,
+                       "passphrase": None if shared is None else slot(*shared)}).encode("utf-8")
+
+
+def _encrypt_vault(conn, dek: bytes) -> bytes:
+    """The whole vault file for the database in `conn`, with a fresh random nonce."""
+    head = _header_bytes(conn)
+    aad = _VAULT_PREFIX.pack(VAULT_MAGIC, VAULT_FORMAT_VERSION, len(head)) + head
+    nonce = os.urandom(_NONCE_BYTES)
+    return aad + nonce + AESGCM(dek).encrypt(nonce, conn.serialize(), aad)
+
+
+def _parse_vault(data: bytes) -> tuple:
+    """(header, authenticated bytes, nonce, ciphertext) of a vault file. Raises RuntimeError for
+    an old plaintext database and VaultFileError for anything else this app did not write."""
+    if data.startswith(_SQLITE_MAGIC):
+        raise RuntimeError(_OLD_PLAINTEXT)
+    if len(data) < _VAULT_PREFIX.size:
+        raise VaultFileError(_NOT_A_VAULT)
+    magic, version, length = _VAULT_PREFIX.unpack_from(data)
+    if magic != VAULT_MAGIC:
+        raise VaultFileError(_NOT_A_VAULT)
+    if version != VAULT_FORMAT_VERSION:
+        raise VaultFileError(f"Vault format {version} is not supported by this version of the app.")
+    end = _VAULT_PREFIX.size + length
+    if len(data) < end + _NONCE_BYTES + _TAG_BYTES:
+        raise VaultFileError(_DAMAGED)
+    try:
+        head = json.loads(data[_VAULT_PREFIX.size:end].decode("utf-8"))
+        for slot in [*head["slots"].values(), *([head["passphrase"]] if head["passphrase"] else [])]:
+            _slot_tuple(slot)
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        raise VaultFileError(_DAMAGED) from None
+    return head, data[:end], data[end:end + _NONCE_BYTES], data[end + _NONCE_BYTES:]
+
+
+def _decrypt_vault(data: bytes, dek: bytes) -> bytes:
+    """The serialized database inside a vault file. Any changed byte: VaultFileError."""
+    _, aad, nonce, ciphertext = _parse_vault(data)
+    try:
+        return AESGCM(dek).decrypt(nonce, ciphertext, aad)
+    except InvalidTag:
+        raise VaultFileError(_DAMAGED) from None
+
+
+def _write_new(path: str, data: bytes) -> None:
+    """Create `path` owner-only and write `data`, never over an existing file (FileExistsError)."""
+    fd = os.open(path, _FILE_FLAGS, 0o600)  # skylos: ignore[SKY-D215,SKY-D324] the vault folder or the folder the owner picked; O_EXCL never follows a link or overwrites a file
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        os.unlink(path)  # skylos: ignore[SKY-D215] removes only the file this call just created
+        raise
+
+
+def _atomic_write(path: str, data: bytes) -> None:
+    """Replace `path` with `data`: an owner-only temp file beside it, fsync, then os.replace,
+    so a crash leaves the old file or the new one, never half of one."""
+    folder = os.path.dirname(os.path.abspath(path))
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.urandom(8).hex()}.tmp")
+    try:
+        _write_new(tmp, data)
+        os.replace(tmp, path)  # skylos: ignore[SKY-D215] temp name made here, inside the vault folder
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(tmp)  # skylos: ignore[SKY-D215] temp name made here, inside the vault folder
+        raise
+    if os.name != "nt":   # the rename itself must reach the disk too
+        dir_fd = os.open(folder, os.O_RDONLY)  # skylos: ignore[SKY-D215,SKY-D325] the vault's own folder, opened only to fsync it
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+
+def _lock_file(path: str):
+    """An exclusive OS lock on `path`, held until the returned file is closed. The OS drops it
+    when the process ends, so a crash leaves no stale lock. Raises VaultInUseError."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)  # skylos: ignore[SKY-D215] <vault>.lock beside the vault file
+    f = os.fdopen(fd, "r+b")
+    try:
+        if os.name == "nt":
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise VaultInUseError("This vault is open in another window of the app. Close it there first.") from None
+    return f
+
+
 class DatabaseManager:
     KDF_N = 2 ** 17  # scrypt cost for every key slot; tests lower it for speed
     EVENT_BACKUP = EVENT_BACKUP
     EVENT_DELETE = EVENT_DELETE
 
-    def __init__(self, db_path="signatures.db", passphrase=None):
+    def __init__(self, db_path="signatures.db", passphrase=None, *, _backup_bytes=None):
         """
-        Opens the store LOCKED: nothing can be decrypted until authenticate_employee()
-        succeeds. With `passphrase` (tests and CI only) the passphrase slot unlocks it at
-        once, and is created on a new database.
+        Opens the store LOCKED: only the header is read, and nothing can be decrypted until
+        authenticate_employee() succeeds. With `passphrase` (tests and CI only) the
+        passphrase slot unlocks it at once, and is created on a new database.
+        `_backup_bytes` (restore_from only): a backup held in memory, checked and edited
+        there, never written back to `db_path` and never locked.
         """
         self.db_path = db_path
         self._dek = None
+        self._conn = None        # the decrypted database, in memory, while unlocked
+        self._instance = None    # the <vault>.lock file while unlocked
+        self._backup = _backup_bytes
+        self._lock = threading.RLock()
         self.init_db()
         if passphrase is not None:
             self.unlock_with_passphrase(passphrase)
@@ -179,8 +434,16 @@ class DatabaseManager:
         return self._dek is not None
 
     def lock(self) -> None:
-        """Forget the data key (logout). The next access needs a login again."""
-        self._dek = None
+        """Logout: drop the decrypted database and the data key, and release the vault for
+        another instance. Every write is already saved."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+            self._dek = None
+            if self._instance is not None:
+                self._instance.close()
+                self._instance = None
 
     def _require_key(self) -> bytes:
         if self._dek is None:
@@ -190,38 +453,97 @@ class DatabaseManager:
     def unlock_with_passphrase(self, passphrase) -> None:
         """Tests and CI (SIGVER_DB_PASSPHRASE)."""
         passphrase = self._to_secret(passphrase)
-        with closing(self.get_connection()) as conn:
-            row = conn.execute(
-                "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE kind = 'passphrase'"
-            ).fetchone()
-            any_slot = conn.execute("SELECT 1 FROM key_slots LIMIT 1").fetchone()
-        if row:
-            self._dek = self._unwrap(passphrase, *row)  # wrong passphrase: InvalidTag, never a new key
+        data, head = self._load()
+        if head["passphrase"]:
+            dek = self._unwrap(passphrase, *_slot_tuple(head["passphrase"]))  # wrong passphrase: InvalidTag, never a new key
+            self._open(dek, data)
             return
-        if any_slot:
+        if head["slots"]:
             raise ValueError("This database is unlocked by member passwords only; log in instead")
         dek = AESGCM.generate_key(256)
         slot = self._wrap(passphrase, dek)
-        with self._transaction() as conn:
-            if conn.execute("SELECT 1 FROM key_slots LIMIT 1").fetchone():
-                raise RuntimeError("Another process created the key at the same time; open the database again")
-            conn.execute(
-                "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
-                "VALUES ('passphrase', NULL, ?, ?, ?, ?)", slot)
-        self._dek = dek
+        self._open(dek, None)
+        try:
+            with self._transaction() as conn:
+                conn.execute(
+                    "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
+                    "VALUES ('passphrase', NULL, ?, ?, ?, ?)", slot)
+        except BaseException:
+            self.lock()
+            raise
 
     # -------------------------------------------------------------- database
-    def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+    def _file_bytes(self):
+        """The vault file's bytes, or None (no vault yet)."""
+        if self._backup is not None:
+            return self._backup
+        try:
+            with open(self.db_path, "rb") as f:
+                data = f.read(MAX_VAULT_BYTES + 1)
+        except FileNotFoundError:
+            return None
+        if len(data) > MAX_VAULT_BYTES:
+            raise VaultFileError(_NOT_A_VAULT)
+        return data
+
+    def _load(self) -> tuple:
+        """(file bytes or None, header), read once so the header and the body are the same file's."""
+        data = self._file_bytes()
+        return data, (_EMPTY_HEADER if data is None else _parse_vault(data)[0])
+
+    def init_db(self):
+        """Checks that the vault file, if any, is one this code reads (header only; nothing is
+        written). A new vault's tables are made in memory when its first key slot is."""
+        self._load()
+
+    def _open(self, dek: bytes, data) -> None:
+        """Decrypt `data` with `dek` into memory as the open store (None: a new vault, empty
+        tables) and take the vault's instance lock. On any failure nothing stays loaded."""
+        with self._lock:
+            try:
+                if self._backup is None:
+                    if self._instance is None:
+                        self._instance = _lock_file(self.db_path + ".lock")
+                    current = self._file_bytes()   # another instance may have saved while we ran scrypt
+                    if data is None and current is not None:
+                        raise RuntimeError("Another account was created at the same time; try again")
+                    data = current
+                conn = _memory_db(None if data is None else _decrypt_vault(data, dek))
+            except BaseException:
+                if self._conn is None:
+                    self.lock()
+                raise
+            if self._conn is not None:
+                self._conn.close()
+            self._conn, self._dek = conn, dek
+            if self._backup is None:
+                self._remove_stale_temp_files()
+
+    def _remove_stale_temp_files(self) -> None:
+        """Temp files a crash left before its os.replace: ciphertext, safe to drop (we hold the lock)."""
+        folder, prefix = os.path.dirname(os.path.abspath(self.db_path)), f".{os.path.basename(self.db_path)}."
+        for name in os.listdir(folder):
+            if name.startswith(prefix) and name.endswith(".tmp"):
+                with suppress(OSError):
+                    os.unlink(os.path.join(folder, name))  # skylos: ignore[SKY-D215] only our own temp names, inside the vault folder
+
+    def _require_conn(self):
+        if self._conn is None:
+            raise DatabaseLockedError("The template store is locked: log in first")
+        return self._conn
+
+    @contextmanager
+    def _read(self):
+        """The decrypted database, held against other threads (the GUI writes from a worker)."""
+        with self._lock:
+            yield self._require_conn()
 
     @contextmanager
     def _transaction(self):
-        """One explicit write transaction (BEGIN IMMEDIATE): commit on success, roll back on any error."""
-        conn = sqlite3.connect(self.db_path, isolation_level=None)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
+        """One write transaction (BEGIN IMMEDIATE): roll back on any error; after COMMIT the
+        whole vault file is saved."""
+        with self._lock:
+            conn = self._require_conn()
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
@@ -229,99 +551,25 @@ class DatabaseManager:
                 conn.execute("ROLLBACK")
                 raise
             conn.execute("COMMIT")
-        finally:
-            conn.close()
+            self._persist()
 
-    @contextmanager
-    def _migration(self):
-        """A schema change as ONE transaction, foreign keys off while tables are rebuilt.
-        DDL is transactional in SQLite, so a crash half-way leaves the old schema intact."""
-        conn = sqlite3.connect(self.db_path, isolation_level=None)
-        try:
-            conn.execute("PRAGMA foreign_keys = OFF")  # cannot change inside a transaction
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                yield conn
-                if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                    raise RuntimeError("Schema migration broke a foreign key; nothing was changed")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            conn.execute("COMMIT")
-        finally:
-            conn.close()
-
-    def init_db(self):
-        """ISO/IEC 9075-1: relational schema. Refuses a database made before v5 (nothing is written)."""
-        with closing(self.get_connection()) as conn:
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            has_tables = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrollments'"
-            ).fetchone()
-        if has_tables:
-            if version < SCHEMA_VERSION:
-                raise RuntimeError(f"schema v{version} is older than v{SCHEMA_VERSION} and is not supported")
-            if version != SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"{self.db_path} was created with schema version {version}, expected "
-                    f"{SCHEMA_VERSION}. Delete it and re-enroll."
-                )
+    def _persist(self) -> None:
+        """Save the whole vault file. If saving fails, memory goes back to the file on disk,
+        so the app never shows a write that was not kept."""
+        if self._backup is not None:      # a backup under check is never written back
             return
-        with self._migration() as conn:
-            conn.execute(_EMPLOYEES_SQL)
-            conn.execute(_KEY_SLOTS_SQL)
-            conn.execute(_ONE_SHARED_SLOT_SQL)
-            conn.execute(_COMPANY_INFO_SQL)
-            # `users` holds the clients (user_id = lower-cased client ID).
-            # enrolled_by points at employees.id so a username rename detaches nothing.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    display_name TEXT,
-                    enrolled_by INTEGER REFERENCES employees(id),
-                    spatial_origin TEXT CHECK (spatial_origin IS NULL OR spatial_origin IN ('render', 'scan')),
-                    enrolled_at TEXT,
-                    updated_at TEXT
-                )""")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS enrollments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    modality TEXT NOT NULL CHECK (modality IN ('spatial', 'temporal')),
-                    spatial_origin TEXT CHECK (spatial_origin IN ('render', 'scan')),
-                    encrypted_embedding BLOB NOT NULL,
-                    nonce BLOB NOT NULL,
-                    model_version TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT 'enroll' CHECK (source IN ('enroll', 'added')),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    enrolled_at TEXT,
-                    capture_device TEXT,
-                    CHECK ((modality = 'spatial' AND spatial_origin IS NOT NULL)
-                        OR (modality = 'temporal' AND spatial_origin IS NULL)),
-                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-                )""")
-            # No foreign key on user_id: the log outlives a deleted client.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT,
-                    client_display_name TEXT,
-                    employee_id INTEGER REFERENCES employees(id),
-                    employee_label TEXT,
-                    modality_state TEXT,
-                    similarity_score REAL,
-                    decision TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    routing TEXT,
-                    degraded INTEGER,
-                    reasons TEXT,
-                    model_version TEXT,
-                    threshold REAL,
-                    event TEXT NOT NULL DEFAULT 'verify',
-                    probe_hashes TEXT
-                )""")
-            conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")  # skylos: ignore[SKY-D211] PRAGMA takes no bound parameter; module int constant
+        try:
+            _atomic_write(self.db_path, _encrypt_vault(self._conn, self._dek))
+        except BaseException:
+            try:
+                data = self._file_bytes()
+                if data is None:
+                    self.lock()               # a new vault whose first save failed: nothing was kept
+                else:
+                    self._conn.deserialize(_decrypt_vault(data, self._dek))
+            except Exception:
+                self.lock()
+            raise
 
     # ---------------------------------------------------------------- crypto
     @staticmethod
@@ -395,7 +643,7 @@ class DatabaseManager:
 
     def company_name(self):
         """The company name recorded in this database, or None (not recorded: unknown)."""
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             try:
                 row = conn.execute("SELECT name FROM company_info").fetchone()
             except sqlite3.OperationalError:          # made before the table existed
@@ -409,8 +657,11 @@ class DatabaseManager:
             conn.execute("INSERT INTO company_info (name) VALUES (?)", (name,))
 
     def has_employees(self) -> bool:
-        with closing(self.get_connection()) as conn:
-            return conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is not None
+        """Answered from the header before login (an owner is always active, so it has a slot)."""
+        with self._lock:
+            if self._conn is not None:
+                return self._conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is not None
+        return bool(self._load()[1]["slots"])
 
     def create_employee(self, full_name: str, username: str, password: str, created_by: int = None) -> int:
         """
@@ -423,43 +674,52 @@ class DatabaseManager:
         if not username:
             raise ValueError("User ID is required")
         secret = self._check_password(password)
-        with closing(self.get_connection()) as conn:
-            first = conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is None
-            any_slot = conn.execute("SELECT 1 FROM key_slots LIMIT 1").fetchone() is not None
-            if not first and (created_by is None or not self._is_admin(conn, created_by)):
-                raise PermissionError("Only the owner can add members")
-        if self._dek is not None:
+        new_vault = False
+        if self.unlocked:
+            with self._read() as conn:
+                first = conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is None
+                if not first and (created_by is None or not self._is_admin(conn, created_by)):
+                    raise PermissionError("Only the owner can add members")
             dek = self._dek
-        elif first and not any_slot:
-            dek = AESGCM.generate_key(256)   # new install: the admin's slot is the first copy
         else:
-            raise DatabaseLockedError("The template store is locked: log in first")
-        slot = self._wrap(secret, dek)       # slow (scrypt): outside the write lock
-        with self._transaction() as conn:
-            still_first = conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is None
-            if still_first != first:
-                raise RuntimeError("Another account was created at the same time; try again")
-            if not first and not self._is_admin(conn, created_by):   # the creator may have lost admin meanwhile
+            head = self._load()[1]
+            if head["slots"] and created_by is None:
                 raise PermissionError("Only the owner can add members")
-            try:
-                cur = conn.execute(
-                    "INSERT INTO employees (username, full_name, is_admin) VALUES (?, ?, ?)",
-                    (username, full_name, int(first)))
-            except sqlite3.IntegrityError:
-                raise ValueError("This User ID already exists") from None
-            conn.execute(
-                "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
-                "VALUES ('employee', ?, ?, ?, ?, ?)", (cur.lastrowid,) + slot)
-            emp_id = cur.lastrowid
-            # The first account (the admin) is logged as added by itself.
-            self._log_event(conn, EVENT_EMPLOYEE_ADDED, None, None, emp_id if first else created_by,
-                            [f"{username} (owner)" if first else username])
-        self._dek = dek
+            if head["slots"] or head["passphrase"]:
+                raise DatabaseLockedError("The template store is locked: log in first")
+            first, new_vault, dek = True, True, AESGCM.generate_key(256)   # the admin's slot is the first copy
+        slot = self._wrap(secret, dek)       # slow (scrypt): outside the write lock
+        if new_vault:
+            self._open(dek, None)
+        try:
+            with self._transaction() as conn:
+                still_first = conn.execute("SELECT 1 FROM employees LIMIT 1").fetchone() is None
+                if still_first != first:
+                    raise RuntimeError("Another account was created at the same time; try again")
+                if not first and not self._is_admin(conn, created_by):   # the creator may have lost admin meanwhile
+                    raise PermissionError("Only the owner can add members")
+                try:
+                    cur = conn.execute(
+                        "INSERT INTO employees (username, full_name, is_admin) VALUES (?, ?, ?)",
+                        (username, full_name, int(first)))
+                except sqlite3.IntegrityError:
+                    raise ValueError("This User ID already exists") from None
+                conn.execute(
+                    "INSERT INTO key_slots (kind, employee_id, salt, kdf_n, nonce, wrapped_dek) "
+                    "VALUES ('employee', ?, ?, ?, ?, ?)", (cur.lastrowid,) + slot)
+                emp_id = cur.lastrowid
+                # The first account (the admin) is logged as added by itself.
+                self._log_event(conn, EVENT_EMPLOYEE_ADDED, None, None, emp_id if first else created_by,
+                                [f"{username} (owner)" if first else username])
+        except BaseException:
+            if new_vault:
+                self.lock()
+            raise
         return emp_id
 
     def find_employee(self, username: str):
         """{'id', 'username', 'full_name', 'is_admin'} of an active employee, or None. Case-insensitive."""
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             row = conn.execute(
                 "SELECT id, username, full_name, is_admin FROM employees "
                 "WHERE username = ? COLLATE NOCASE AND active = 1",
@@ -468,7 +728,7 @@ class DatabaseManager:
         return None if row is None else self._employee_dict(row)
 
     def list_employees(self) -> list:
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             rows = conn.execute(
                 "SELECT id, username, full_name, is_admin FROM employees WHERE active = 1 ORDER BY id"
             ).fetchall()
@@ -477,25 +737,28 @@ class DatabaseManager:
     def authenticate_employee(self, username: str, password: str):
         """
         Returns (employee dict or None, reason), reason in {"", "not_found", "bad_password"}.
-        Success loads the data key: the password unwraps the employee's key slot.
+        The User ID and key slot come from the plaintext header; the password unwraps the
+        slot, and that key decrypts the body into memory. Raises VaultFileError when the
+        file was changed and VaultInUseError when another instance has the vault open.
         """
-        with closing(self.get_connection()) as conn:
-            row = conn.execute(
-                "SELECT id, username, full_name, is_admin FROM employees "
-                "WHERE username = ? COLLATE NOCASE AND active = 1",
-                ((username or "").strip(),),
-            ).fetchone()
-            if row is None:
-                return None, "not_found"
-            slot = conn.execute(
-                "SELECT salt, kdf_n, nonce, wrapped_dek FROM key_slots WHERE employee_id = ?", (row[0],)
-            ).fetchone()
-        if slot is None:
-            return None, "bad_password"
+        name = (username or "").strip()
+        data, head = self._load()
+        found = [s for u, s in head["slots"].items() if u.translate(_NOCASE) == name.translate(_NOCASE)]
+        if not found:
+            return None, "not_found"
         try:
-            self._dek = self._unwrap((password or "").encode("utf-8"), *slot)
+            dek = self._unwrap((password or "").encode("utf-8"), *_slot_tuple(found[0]))
         except InvalidTag:
             return None, "bad_password"
+        with self._lock:
+            if self._conn is None or self._dek != dek:
+                self._open(dek, data)
+            row = self._conn.execute(
+                "SELECT id, username, full_name, is_admin FROM employees "
+                "WHERE username = ? COLLATE NOCASE AND active = 1", (name,)).fetchone()
+            if row is None:       # cannot happen: the header is rebuilt from these rows, and authenticated
+                self.lock()
+                return None, "not_found"
         return self._employee_dict(row), ""
 
     def update_employee(self, actor_id: int, old_username: str, new_full_name: str, new_username: str,
@@ -514,7 +777,7 @@ class DatabaseManager:
         if not new_username:
             raise ValueError("User ID is required")
         dek = self._require_key()
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             row = conn.execute(
                 "SELECT id, is_admin, username, full_name FROM employees "
                 "WHERE username = ? COLLATE NOCASE AND active = 1",
@@ -770,7 +1033,7 @@ class DatabaseManager:
     def get_client_record(self, user_id: str, employee_id: int = None):
         """Decrypted client record, or None. employee_id narrows to clients that employee enrolled."""
         self._require_key()
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             row = conn.execute(self._CLIENT_BY_ID, (user_id,)).fetchone()
             if row is None or (employee_id is not None and row[2] != employee_id):
                 return None
@@ -779,12 +1042,12 @@ class DatabaseManager:
     def list_client_records(self, employee_id: int = None) -> list:
         """Every client (the company list), or only those `employee_id` enrolled."""
         self._require_key()
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             rows = conn.execute(self._CLIENTS, (employee_id, employee_id)).fetchall()
             return [self._assemble_client(conn, r) for r in rows]
 
     def has_client(self, user_id: str, employee_id: int = None) -> bool:
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             if employee_id is None:
                 row = conn.execute(
                     "SELECT 1 FROM users WHERE user_id = ? AND enrolled_by IS NOT NULL", (user_id,)).fetchone()
@@ -795,7 +1058,7 @@ class DatabaseManager:
 
     def count_clients_enrolled_in_month(self, year_month: str, employee_id: int = None) -> int:
         """year_month is 'YYYY-MM' (local time, like enrolled_at)."""
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             if employee_id is None:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM users WHERE enrolled_by IS NOT NULL AND substr(enrolled_at, 1, 7) = ?",
@@ -918,7 +1181,7 @@ class DatabaseManager:
         reference_spatial_origin; render and scan sets must never be mixed.
         """
         self._check_modality(modality, spatial_origin)
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             rows = conn.execute(
                 """SELECT encrypted_embedding, nonce, model_version FROM enrollments
                    WHERE user_id = ? AND modality = ? AND spatial_origin IS ? ORDER BY id ASC""",
@@ -1004,7 +1267,7 @@ class DatabaseManager:
             return True
         self._require_key()
         cutoff = ((now or datetime.now()) - timedelta(days=window_days)).isoformat(timespec="seconds")
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             rows = conn.execute(
                 """SELECT probe_hashes FROM audit_log
                    WHERE event = 'verify' AND user_id = ? AND decision = 'Genuine'
@@ -1034,7 +1297,7 @@ class DatabaseManager:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [
             {"client_key": r[0], "client_display_name": r[1], "decision": r[2], "confidence": r[3],
@@ -1047,7 +1310,7 @@ class DatabaseManager:
 
     def count_log_events(self, employee_id: int = None):
         """(total, genuine) over the final-verdict log (verification events only)."""
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             total, genuine = conn.execute(
                 """SELECT COUNT(*), COALESCE(SUM(decision = 'Genuine'), 0) FROM audit_log
                    WHERE event = 'verify' AND (? IS NULL OR employee_id = ?)""",
@@ -1057,139 +1320,152 @@ class DatabaseManager:
     # ------------------------------------------------------- backup / restore
     def backup_to(self, actor_id: int, dest_path: str) -> str:
         """
-        Copy the whole (encrypted) database to `dest_path`, consistently, through SQLite's
-        backup API. The copy holds only what the database holds: wrapped key slots, never a
-        password or an unwrapped key, so it opens with the same employee passwords.
-        Only an active admin (`actor_id`) may do it (PermissionError). The file is created
-        owner-only and never over an existing file (FileExistsError).
+        Copy the vault file, as saved after the last write, to `dest_path`: header and
+        encrypted body, never a password or an unwrapped key, so it opens with the same
+        employee passwords. Only an active admin (`actor_id`) may do it (PermissionError).
+        The file is created owner-only and never over an existing file (FileExistsError).
         """
-        with closing(self.get_connection()) as conn:
+        with self._read() as conn:
             if not self._is_admin(conn, actor_id):
                 raise PermissionError("Only the owner can back up the database")
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-        os.close(os.open(dest_path, flags, 0o600))  # skylos: ignore[SKY-D215,SKY-D324] the admin picks the backup folder; O_EXCL never follows a link or overwrites a file
-        try:
-            with closing(self.get_connection()) as src, closing(sqlite3.connect(dest_path)) as dst:
-                src.backup(dst)
-        except BaseException:
-            os.unlink(dest_path)  # skylos: ignore[SKY-D215] removes only the file this call just created
-            raise
+            data = self._file_bytes()      # saved after every write, so it is current
+        _write_new(dest_path, data)
         with self._transaction() as conn:
             self._log_event(conn, EVENT_BACKUP, None, None, actor_id, [os.path.basename(dest_path)])
         return dest_path
 
     def restore_from(self, actor_id, backup_path: str, username: str, password: str, company: str = None) -> dict:
         """
-        Replace this database with a backup. If this database has employees, only its active
-        admin (`actor_id`) may do it (PermissionError). Everything is checked on a scratch
-        copy first: it holds no trigger, no view and no table this app does not create, it
-        is a sound SQLite database of the schema this code reads (an older one is refused),
-        and `username` / `password` is an ADMIN of the backup whose key slot opens it. Then
-        the live database is copied to `<name>.before-restore-<YYYYmmdd-HHMMSS>` beside it
-        (owner-only). Every live audit row the backup does not hold (compared by content, not
-        by time, so a row from the backup's last second or after the clock stepped back is
-        kept; the copy's own "backup" row is one of them) is added to the scratch copy in
-        live order, with employee_id NULL and the employee's username as employee_label, so a
+        Replace this vault with a backup. If this vault has employees, only its logged-in
+        active admin (`actor_id`) may do it (PermissionError). The backup is read once and
+        checked in memory only: `username` / `password` is an employee of the backup whose
+        key slot opens it, its body decrypts and authenticates, it holds no trigger, no view
+        and no table this app does not create, it is a sound database of the schema this
+        code reads (an older one is refused), and that employee is an ADMIN of the backup.
+        With `company`, a backup that records another company name is refused ("This backup
+        belongs to vault ..."); one with no name recorded is allowed.
+        Then the live file is copied byte for byte to `<name>.before-restore-<YYYYmmdd-HHMMSS>`
+        beside it (owner-only, encrypted like any backup). Every live audit row the backup
+        does not hold (compared by content, not by time, so a row from the backup's last
+        second or after the clock stepped back is kept) is added to the backup's body in live
+        order, with employee_id NULL and the employee's username as employee_label, so a
         restore never erases the log. Then a "restore" row (who, which file, how many rows
-        were carried) is written into the scratch copy, and only then is the live database
-        replaced. A failure before the replacement leaves the live data as it was (the
-        owner-only copy adds one "backup" audit row to the live file). Afterwards the store
-        is unlocked with the backup's key. Returns that admin's employee dict.
-        With `company`, a backup that records another company name is refused before anything
-        is copied ("This backup belongs to company ..."); one with no name recorded is allowed.
+        were carried, the safety copy's name) is added, and only then is the live file
+        replaced, atomically. Any failure before that leaves the live file byte-identical.
+        Afterwards the store is open with the backup's key. Returns that admin's employee dict.
         Raises ValueError (not a usable backup, another company's), PermissionError (not an
         admin, wrong password).
         """
         live_admin = None
         if self.has_employees():
-            with closing(self.get_connection()) as conn:
-                try:
-                    is_admin = self._is_admin(conn, actor_id)
-                except LookupError:
-                    is_admin = False
-                if not is_admin:
-                    raise PermissionError("Only the owner can restore a backup")
-                live_admin = conn.execute("SELECT username FROM employees WHERE id = ?", (actor_id,)).fetchone()[0]
+            try:
+                with self._read() as conn:
+                    if self._is_admin(conn, actor_id):
+                        live_admin = conn.execute(
+                            "SELECT username FROM employees WHERE id = ?", (actor_id,)).fetchone()[0]
+            except (LookupError, DatabaseLockedError):
+                pass
+            if live_admin is None:
+                raise PermissionError("Only the owner can restore a backup")
         if not os.path.isfile(backup_path):
             raise ValueError(f"No backup file at {backup_path}")
-        scratch_dir = tempfile.mkdtemp(prefix="sigverify-restore-")
-        scratch = os.path.join(scratch_dir, "check.db")
+        if os.path.getsize(backup_path) > MAX_VAULT_BYTES:
+            raise ValueError("This file is too large to be a backup of this app")
+        with open(backup_path, "rb") as f:  # skylos: ignore[SKY-D215,SKY-D325] the owner picks the backup file; size checked just above, read bounded
+            data = f.read(MAX_VAULT_BYTES + 1)
         try:
-            shutil.copyfile(backup_path, scratch)
-            fresh = type(self)(os.path.join(scratch_dir, "fresh.db"))   # the tables a new database gets
-            with closing(fresh.get_connection()) as conn:
-                tables = {n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            try:
-                with closing(sqlite3.connect(scratch)) as conn:
-                    version = conn.execute("PRAGMA user_version").fetchone()[0]
-                    found = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
-                    if found and version < SCHEMA_VERSION:   # same message as init_db, not "foreign table"
-                        raise ValueError(f"schema v{version} is older than v{SCHEMA_VERSION} and is not supported")
-                    for kind, name in found:
-                        if kind in ("trigger", "view"):
-                            raise ValueError(f"The backup contains a {kind}, which this app never creates; "
-                                             "refusing it.")
-                        if kind == "table" and name not in tables:
-                            raise ValueError(f"The backup contains a table ({name}) this app never creates; "
-                                             "refusing it.")
-                    ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
-                if ok != "ok":
-                    raise ValueError("The backup file is damaged")
-                candidate = type(self)(scratch)
-            except sqlite3.DatabaseError:
-                raise ValueError("This file is not a backup of this app") from None
-            except RuntimeError as e:
-                raise ValueError(str(e)) from None
-            recorded = candidate.company_name()
-            if company is not None and recorded is not None and recorded != company:
-                raise ValueError(f"This backup belongs to vault '{recorded}'.")
+            candidate = type(self)(backup_path, _backup_bytes=data)
+        except RuntimeError as e:                     # an old plaintext database, or not a vault at all
+            raise ValueError(str(e)) from None
+        try:                                      # the backup's key and plaintext never outlive this call
+            return self._restore_checked(candidate, backup_path, username, password, company, live_admin)
+        finally:
+            candidate.lock()
+
+    def _restore_checked(self, candidate, backup_path, username, password, company, live_admin) -> dict:
+        """restore_from after the permission check: open, check, keep a copy, carry, replace."""
+        try:
             employee, _ = candidate.authenticate_employee(username, password)
             if employee is None:
                 raise PermissionError("The user ID or password does not open this backup")
-            if not employee["is_admin"]:
-                raise PermissionError("Only an owner of the backup can restore it")
-            if live_admin is not None:
-                base = f"{self.db_path}.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-                dest, n = base, 1
-                while True:   # never over an existing copy: -2, -3, ...
-                    try:
-                        self.backup_to(actor_id, dest)
-                        break
-                    except FileExistsError:
-                        n += 1
-                        dest = f"{base}-{n}"
-            carried = []
-            if live_admin is not None:
-                # A row is carried unless the backup holds an identical one (by content, not by
-                # time: clocks repeat a second and step back). Counted, so a repeated row is too.
-                with closing(candidate.get_connection()) as conn:
-                    in_backup = Counter(conn.execute(_BACKUP_AUDIT_SQL))  # skylos: ignore[SKY-D211] module constant query, no user input
-                with closing(self.get_connection()) as conn:
-                    for row in conn.execute(_LIVE_AUDIT_SQL):  # skylos: ignore[SKY-D211] module constant query, no user input
-                        key = row[:12]
-                        if in_backup[key]:
-                            in_backup[key] -= 1
-                        else:
-                            carried.append(row)
-                if carried:
-                    with candidate._transaction() as conn:
-                        conn.executemany(
-                            """INSERT INTO audit_log (timestamp, event, user_id, client_display_name, decision,
-                                                     similarity_score, reasons, probe_hashes, modality_state,
-                                                     routing, threshold, model_version, employee_id,
-                                                     employee_label, degraded)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
-                            [r[:12] + r[13:] for r in carried])
-            source = os.path.basename(backup_path)
-            details = [f"restored by {live_admin} from {source}" if live_admin is not None
-                       else f"restored by {employee['username']} into a new database from {source}"]
+            fresh = _memory_db()                     # the tables a new vault gets
+            try:
+                tables = {n for (n,) in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            finally:
+                fresh.close()
+            with candidate._read() as conn:
+                for kind, name in conn.execute("SELECT type, name FROM sqlite_master").fetchall():
+                    if kind in ("trigger", "view"):
+                        raise ValueError(f"The backup contains a {kind}, which this app never creates; "
+                                         "refusing it.")
+                    if kind == "table" and name not in tables:
+                        raise ValueError(f"The backup contains a table ({name}) this app never creates; "
+                                         "refusing it.")
+                if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ValueError("The backup file is damaged")
+        except sqlite3.DatabaseError:
+            raise ValueError("This file is not a backup of this app") from None
+        except RuntimeError as e:                     # an old or changed file, a schema this code cannot read
+            raise ValueError(str(e)) from None
+        recorded = candidate.company_name()
+        if company is not None and recorded is not None and recorded != company:
+            raise ValueError(f"This backup belongs to vault '{recorded}'.")
+        if not employee["is_admin"]:
+            raise PermissionError("Only an owner of the backup can restore it")
+        safety, carried = None, []
+        if live_admin is not None:
+            with self._lock:
+                live = self._file_bytes()
+            base = f"{self.db_path}.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            safety, n = base, 1
+            while True:   # never over an existing copy: -2, -3, ...
+                try:
+                    _write_new(safety, live)
+                    break
+                except FileExistsError:
+                    n += 1
+                    safety = f"{base}-{n}"
+            # A row is carried unless the backup holds an identical one (by content, not by
+            # time: clocks repeat a second and step back). Counted, so a repeated row is too.
+            with candidate._read() as conn:
+                in_backup = Counter(conn.execute(_BACKUP_AUDIT_SQL))  # skylos: ignore[SKY-D211] module constant query, no user input
+            with self._read() as conn:
+                for row in conn.execute(_LIVE_AUDIT_SQL):  # skylos: ignore[SKY-D211] module constant query, no user input
+                    key = row[:12]
+                    if in_backup[key]:
+                        in_backup[key] -= 1
+                    else:
+                        carried.append(row)
             if carried:
-                details.append(f"{len(carried)} audit rows not in the backup carried over")
-            with candidate._transaction() as conn:
-                self._log_event(conn, EVENT_RESTORE, None, None, employee["id"], details)
-            with closing(sqlite3.connect(scratch)) as src, closing(sqlite3.connect(self.db_path)) as dst:
-                src.backup(dst)
-            self._dek = candidate._dek
-            return employee
-        finally:
-            shutil.rmtree(scratch_dir, ignore_errors=True)
+                with candidate._transaction() as conn:
+                    conn.executemany(
+                        """INSERT INTO audit_log (timestamp, event, user_id, client_display_name, decision,
+                                                 similarity_score, reasons, probe_hashes, modality_state,
+                                                 routing, threshold, model_version, employee_id,
+                                                 employee_label, degraded)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                        [r[:12] + r[13:] for r in carried])
+        source = os.path.basename(backup_path)
+        details = [f"restored by {live_admin} from {source}" if live_admin is not None
+                   else f"restored by {employee['username']} into a new database from {source}"]
+        if carried:
+            details.append(f"{len(carried)} audit rows not in the backup carried over")
+        if safety is not None:
+            details.append(f"live vault kept as {os.path.basename(safety)}")
+        with candidate._transaction() as conn:
+            self._log_event(conn, EVENT_RESTORE, None, None, employee["id"], details)
+        with self._lock:
+            had_conn = self._conn is not None
+            try:
+                if self._instance is None:
+                    self._instance = _lock_file(self.db_path + ".lock")
+                _atomic_write(self.db_path, _encrypt_vault(candidate._conn, candidate._dek))
+            except BaseException:
+                if not had_conn:
+                    self.lock()
+                raise
+            if had_conn:
+                self._conn.close()
+            self._conn, self._dek = candidate._conn, candidate._dek
+            candidate._conn = None
+        return employee

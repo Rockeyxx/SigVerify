@@ -4,7 +4,6 @@ import os
 import shutil
 import sqlite3
 import sys
-from contextlib import closing
 from datetime import datetime
 
 import numpy as np
@@ -14,6 +13,7 @@ from config.settings import MAX_REFERENCES
 from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager, probe_fingerprint
 from src.gui import storage
 from tests.test_database import OLD_B, _make_v4
+from tests.vault_file import edit_file, edit_live, on_disk
 
 CLIENT_KEYS = {"display_name", "enrolled_by", "dynamic_references",
                "spatial_embeddings", "spatial_origin", "enrolled_at", "updated_at",
@@ -143,8 +143,8 @@ def test_nobody_changes_another_employees_profile_or_password(people):
     assert storage.update_employee_profile("bob", "B", "bob", "alice-owns-bob-1")[0] is False
     storage.logout()                                           # nor anyone logged out
     assert storage.update_employee_profile("alice", "Hacked", "mallory")[0] is False
-    assert storage.find_employee("mallory") is None
     assert storage.authenticate_employee("alice", PW_A)[0] and storage.authenticate_employee("bob", PW_B)[0]
+    assert storage.find_employee("mallory") is None
 
 
 def test_a_new_password_needs_the_current_one(people):
@@ -256,7 +256,7 @@ def test_a_non_admin_cannot_replace_a_clients_references(people):
 
 def test_reenrolment_replaces_templates_and_keeps_enrolled_at(people):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")
-    with storage._get_db().get_connection() as conn:  # backdate: "kept" must not mean "same second"
+    with edit_live(storage._get_db()) as conn:  # backdate: "kept" must not mean "same second"
         conn.execute("UPDATE users SET enrolled_at = '2020-01-02T03:04:05', updated_at = '2020-01-02T03:04:05'")
     first = storage.get_client("c", "alice")
     new = spatial(base=300)
@@ -330,7 +330,7 @@ def test_count_clients_enrolled_this_month(people):
     assert storage.count_clients_enrolled_this_month("alice") == 1
     assert storage.count_clients_enrolled_this_month() == 2
     assert storage.count_clients_enrolled_this_month("ghost") == 0
-    with storage._get_db().get_connection() as conn:
+    with edit_live(storage._get_db()) as conn:
         conn.execute("UPDATE users SET enrolled_at = '2001-02-03T04:05:06' WHERE user_id = 'a1'")
     assert storage.count_clients_enrolled_this_month("alice") == 0
 
@@ -389,10 +389,12 @@ def test_audit_log_keeps_routing_degraded_reasons_model_version_threshold(people
     assert first["reasons"] == ["spatial gate failed", "x"]
     assert first["model_version"] == "v0.10.0" and first["threshold"] == 0.7564
     assert second["routing"] is None and second["degraded"] is None and second["reasons"] is None
-    rows = sqlite3.connect(storage._get_db().db_path).execute(
-        "SELECT routing, degraded, model_version, threshold FROM audit_log WHERE event = 'verify' ORDER BY id"
-    ).fetchall()
-    assert rows[0] == ("fused", 1, "v0.10.0", 0.7564)       # plaintext and queryable
+    db = storage._get_db()
+    with on_disk(db.db_path, db._dek) as conn:              # queryable after login, as stored
+        rows = conn.execute(
+            "SELECT routing, degraded, model_version, threshold FROM audit_log WHERE event = 'verify' ORDER BY id"
+        ).fetchall()
+    assert rows[0] == ("fused", 1, "v0.10.0", 0.7564)
 
 
 # ------------------------------------------------------- at-rest protection
@@ -424,7 +426,8 @@ def test_no_key_file_is_ever_written_and_the_cwd_stays_clean(people, tmp_path, m
     assert storage.get_client("persist", "alice") is not None
     assert sorted(os.listdir(elsewhere)) == []                     # nothing created in the cwd
     assert sorted(os.listdir(isolated_storage)) == ["companies"]
-    assert sorted(os.listdir(company_dir(isolated_storage))) == ["company.txt", "signatures.db"]   # no db.key
+    assert sorted(os.listdir(company_dir(isolated_storage))) == ["company.txt", "signatures.db",
+                                                                 "signatures.db.lock"]   # no db.key
 
 
 def test_nothing_decrypts_before_login_or_after_logout(people):
@@ -462,7 +465,7 @@ def test_passphrase_env_var_unlocks_for_tests_and_ci_without_a_file(isolated_sto
     assert storage.get_client("c") is not None                      # no login needed
     storage.logout()
     assert storage.get_client("c") is not None                      # and logout does not lock it
-    assert sorted(os.listdir(company_dir(isolated_storage))) == ["company.txt", "signatures.db"]
+    assert sorted(os.listdir(company_dir(isolated_storage))) == ["company.txt", "signatures.db", "signatures.db.lock"]
     monkeypatch.setenv(PASSPHRASE_ENV_VAR, "a-different-one")
     storage._reset()
     storage.open_company(COMPANY)
@@ -534,7 +537,8 @@ def test_resaving_without_new_pen_signatures_keeps_the_pen_set_and_its_added_sig
 
 
 def _pen_rows():
-    with sqlite3.connect(storage._get_db().db_path) as conn:
+    db = storage._get_db()
+    with on_disk(db.db_path, db._dek) as conn:
         return conn.execute("SELECT source, model_version FROM enrollments WHERE modality = 'temporal' "
                             "ORDER BY id").fetchall()
 
@@ -688,7 +692,7 @@ def test_confirmed_reference_insert_and_trim_are_one_transaction(people):
     for i in range(6):
         db.add_confirmed_reference("c", "spatial", np.full(512, i, dtype=np.float32), storage.MODEL_VERSION, "scan", max_per_set=7)
     assert len(db.get_references("c", "spatial", "scan")) == 7      # 5 enrolled kept, oldest added dropped
-    with sqlite3.connect(db.db_path) as conn:
+    with edit_live(db) as conn:
         conn.execute("""CREATE TRIGGER boom BEFORE DELETE ON enrollments BEGIN
                         SELECT RAISE(ABORT, 'no trim'); END""")
     with pytest.raises(sqlite3.DatabaseError):
@@ -764,9 +768,11 @@ def test_a_failing_copy_of_the_live_database_is_reported_and_nothing_changes(peo
     storage.save_client_enrollment("D", [], "alice", spatial_embeddings=spatial(5, 9), spatial_origin="scan")
     live, session = db_bytes(isolated_storage), dict(storage._session)
 
-    def disk_full(self, actor_id, dest):
+    import src.database.db_manager as dbm
+
+    def disk_full(dest, data):                                  # the owner-only copy of the live vault
         raise OSError("No space left on device")
-    monkeypatch.setattr(DatabaseManager, "backup_to", disk_full)
+    monkeypatch.setattr(dbm, "_write_new", disk_full)
     ok, msg = storage.restore_database(path, "alice", PW_A)
     assert not ok and "No space left on device" in msg
     assert db_bytes(isolated_storage) == live and storage._session == session
@@ -805,13 +811,14 @@ def test_backup_needs_a_login(people, tmp_path):
 
 def test_a_damaged_backup_is_refused_before_anything_is_replaced(people, tmp_path):
     storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(5), spatial_origin="scan")
-    backup = storage._get_db().backup_to(storage._session["id"], str(tmp_path / "b.db"))
-    with sqlite3.connect(backup) as conn:   # an index that no longer matches its table
+    db = storage._get_db()
+    backup = db.backup_to(storage._session["id"], str(tmp_path / "b.db"))
+    with edit_file(backup, db._dek) as conn:   # an index that no longer matches its table
         conn.execute("CREATE INDEX damaged ON audit_log(event)")
         conn.execute("PRAGMA writable_schema = ON")
         conn.execute("UPDATE sqlite_master SET sql = 'CREATE INDEX damaged ON audit_log(decision)' "
                      "WHERE name = 'damaged'")
-    with sqlite3.connect(backup) as conn:
+    with on_disk(backup, db._dek) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok"   # opens, but is damaged
     storage.save_client_enrollment("D", [], "alice", spatial_embeddings=spatial(5, 9), spatial_origin="scan")
     ok, _ = storage.restore_database(backup, "alice", PW_A)
@@ -827,7 +834,7 @@ def test_an_older_added_row_makes_a_current_set_stale(people):
 
 
 def _set_last_row_version(version):
-    with sqlite3.connect(storage._get_db().db_path) as conn:
+    with edit_live(storage._get_db()) as conn:
         conn.execute("UPDATE enrollments SET model_version = ? WHERE id = (SELECT MAX(id) FROM enrollments)",
                      (version,))
 
@@ -1005,6 +1012,7 @@ def test_logout_keeps_the_company_selected(people):
 
 def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, isolated_storage):
     path = _backup_of_c(tmp_path)
+    dek = storage._get_db()._dek
     new = company_dir(isolated_storage, "branch-two")
     for user, password in (("bob", PW_B), ("alice", "wrong-password-1")):        # not an admin / wrong password
         ok, msg = storage.restore_company("Branch Two", path, user, password)
@@ -1016,14 +1024,13 @@ def test_restore_company_makes_a_new_company_from_a_backup(people, tmp_path, iso
     assert storage.restore_company("Branch Two", path, "alice", PW_A) == (     # Test Co's backup
         False, "This backup belongs to vault 'Test Co'.")
     assert not new.exists()
-    with closing(sqlite3.connect(path)) as conn:                                 # a backup with no name recorded
+    with edit_file(path, dek) as conn:                                           # a backup with no name recorded
         conn.execute("DELETE FROM company_info")
-        conn.commit()
     assert storage.restore_company("Branch Two", path, "alice", PW_A) == (True, "Backup restored")
     assert storage._get_db().company_name() == "Branch Two"
     assert storage.current_company() == "Branch Two" and storage.current_employee()["username"] == "alice"
     assert storage.get_client("c")["spatial_embeddings"] == spatial(5)
-    assert sorted(os.listdir(new)) == ["company.txt", "signatures.db"]
+    assert sorted(os.listdir(new)) == ["company.txt", "signatures.db", "signatures.db.lock"]
     login("alice", PW_A)                                                         # Test Co is untouched
     assert storage.current_company() == COMPANY and storage.get_client("c") is not None
     storage.open_company("Branch Two")
@@ -1053,12 +1060,10 @@ def test_last_event_for_backup_and_delete_and_survives_restore(people, tmp_path)
     folder.mkdir()
     ok, path = storage.backup_database(str(folder), "alice")
     assert ok
-    with closing(sqlite3.connect(path)) as conn:
+    with edit_file(path, storage._get_db()._dek) as conn:
         conn.execute("UPDATE audit_log SET timestamp = '2026-01-01T00:00:00'")
-        conn.commit()
-    with closing(sqlite3.connect(storage._get_db().db_path)) as conn:
+    with edit_live(storage._get_db()) as conn:
         conn.execute("UPDATE audit_log SET timestamp = '2026-01-01T00:00:00'")
-        conn.commit()
 
     ev_bak = storage.last_event(DatabaseManager.EVENT_BACKUP)
     assert ev_bak is not None
@@ -1092,9 +1097,11 @@ def test_a_restore_records_the_vault_name_when_the_backup_has_none(people, tmp_p
     folder = tmp_path / "bak"; folder.mkdir()
     ok, path = storage.backup_database(str(folder), "alice")
     assert ok
-    with closing(sqlite3.connect(path)) as conn:
-        conn.execute("DELETE FROM company_info"); conn.commit()
-    assert DatabaseManager(path).company_name() is None
+    with edit_file(path, storage._get_db()._dek) as conn:
+        conn.execute("DELETE FROM company_info")
+    copy = DatabaseManager(path)
+    copy.authenticate_employee("alice", PW_A)
+    assert copy.company_name() is None
     assert storage.restore_database(path, "alice", PW_A)[0]
     assert storage._get_db().company_name() == storage.current_company()
 
