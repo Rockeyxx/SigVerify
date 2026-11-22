@@ -76,7 +76,7 @@ them, even if they appear in the literature review or older drafts:
 | Inference RAM ceiling           | ≤ 4 GB                                            |
 | End-to-end verification latency | < 3.0 s, Enter to fused result (see below)        |
 | Execution                       | Local only — no cloud, no dedicated GPU           |
-| Platform support                | Windows + Arch Linux (x86_64 and ARM64)           |
+| Platform support                | Windows + Arch Linux (x86_64)                     |
 | Native build steps              | None — all dependencies must have prebuilt wheels |
 
 The latency budget starts when the user presses Enter after submitting
@@ -779,6 +779,16 @@ cryptography, matplotlib, scikit-learn, Pillow, scipy, sqlite3 (stdlib)
 tqdm, pytest
 ```
 
+**Allowed for building the installer only** (`requirements-build.txt`, never imported by `src/`):
+
+```
+pyinstaller
+```
+
+The installer installs `requirements-app.txt`, the libraries the app imports and nothing
+else. Add a new `src/` import to it in the same commit; `tests/test_packaging.py` fails
+otherwise.
+
 **Not allowed:**
 
 - No vendor signature-pad SDKs
@@ -801,6 +811,7 @@ tqdm, pytest
 | `config/`       | Centralized hyperparameters and constants               | Runtime logic                           |
 | `assets/screenshots/` | Hand-made screenshots shown in the README, for every team | Generated figures. Never put screenshots in `docs/` (gitignored) |
 | `results/`      | Figures written by code through `RESULTS_DIR`           | Hand-made images                        |
+| `bundle/`       | Installer build: PyInstaller recipe, `--debug` launcher, weight check, Windows and AppImage scripts | App logic. Never imported by `src/` |
 
 ---
 
