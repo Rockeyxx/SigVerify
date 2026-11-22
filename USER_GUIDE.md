@@ -38,6 +38,24 @@ enrol again. Make a backup (see below).
 
 After that, log in with your User ID and password. Only the owner adds members.
 
+## Passwords
+
+A new password needs at least 15 characters. Capitals, digits and symbols are not
+required: a long phrase of ordinary words works. Very common passwords are refused.
+The line under the password field says what is missing while you type. Passwords set
+in an older version of the app still log in; the rule applies when a password is set
+or changed.
+
+**Generate password** fills both password fields with 20 random letters and digits and
+shows them once, with a Copy button. Write the password down or keep it in a password
+manager before you close that window: nobody can recover it, not even the owner.
+
+The eye button at the end of a password field shows or hides what you typed. The text
+is hidden again when you leave the page.
+
+A member who forgets their password asks the owner to set a new one (Members page,
+Reset Password). Anyone changes their own password on the Profile page, with the current one.
+
 ## Tablet setup
 
 The app was tested with the XPPen Deco 640.
@@ -96,6 +114,8 @@ uninstalling the app does not touch this folder.
 | Already has references. Only the owner can replace them | Ask the owner to re-enrol the signer |
 | This database was made by an older version of the app | Move the folder named in the message somewhere else and start again; signers must enrol again |
 | Log in first: the signature data is locked | Log in again |
+| The password must have at least 15 characters | Use a longer password, or press Generate password |
+| This password is too common | Choose another one, or press Generate password |
 | Windows: `MSVCP140.dll` or `VCRUNTIME140.dll` was not found | Install the Microsoft Visual C++ Redistributable (x64) from Microsoft's website, then start the app again |
 
 ## If something goes wrong

@@ -691,9 +691,16 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   file is ever written to disk, the database, a log or a backup. A member changes
   only their own profile, and a new password needs the current one. A forgotten password
   is reset by the owner, who wraps a new copy (never their own: the owner uses their
-  profile). If every password is lost, the templates cannot be recovered. Passwords need
-  `MIN_PASSWORD_LENGTH` (`config/settings.py`) characters. `SIGVER_DB_PASSPHRASE` is for
-  tests and CI only.
+  profile). If every password is lost, the templates cannot be recovered. A new or changed
+  password follows NIST SP 800-63B, checked only in `password_problem()`
+  (`src/database/db_manager.py`), so no screen can skip it: at least `MIN_PASSWORD_LENGTH`
+  (15) characters, no rules on capitals, digits or symbols, and not in
+  `src/database/common_passwords.txt` (SecLists common passwords of 15 or more characters,
+  compared in lower case). Keep that file under 1 MB. Login never applies the rule, so a
+  password set under an older rule still works. Every password field in the GUI is a
+  `PasswordField` (`src/gui/password_field.py`, eye button); every field that sets a
+  password also gets `new_password_helpers()` (live hint, Generate). `SIGVER_DB_PASSPHRASE`
+  is for tests and CI only.
 - **A write is done by whoever is logged in.** `src/gui/storage.py` takes the acting
   member from the session, never from a name a page passes; a different name is
   refused, so nobody acts, or is logged, as the owner.
