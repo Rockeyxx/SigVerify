@@ -5,11 +5,38 @@ employees_page.py — Admin page: employee accounts, backup and restore
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget,
-    QTableWidgetItem, QHeaderView, QFileDialog, QInputDialog, QMessageBox
+    QTableWidgetItem, QHeaderView, QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox
 )
 
 import src.gui.storage as storage
 from src.database.db_manager import EVENT_BACKUP, EVENT_DELETE
+from src.gui.password_field import PasswordField, new_password_helpers
+
+
+class BackupOwnerDialog(QDialog):
+    """Asks for an owner of the backup: User ID and password (with the eye button)."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Restore from backup")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("An owner of the backup:"))
+        self.usernameInput = QLineEdit()
+        self.usernameInput.setPlaceholderText("User ID")
+        self.passwordInput = PasswordField("Password")
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        for w in (self.usernameInput, self.passwordInput, buttons):
+            layout.addWidget(w)
+
+
+def ask_backup_owner(parent):
+    """(User ID, password), or None when cancelled or no User ID was typed."""
+    dialog = BackupOwnerDialog(parent)
+    if dialog.exec_() != QDialog.Accepted or not dialog.usernameInput.text().strip():
+        return None
+    return dialog.usernameInput.text().strip(), dialog.passwordInput.text()
 
 
 def restore_from_backup(parent, new_company=False):
@@ -24,23 +51,12 @@ def restore_from_backup(parent, new_company=False):
     path, _ = QFileDialog.getOpenFileName(parent, "Choose a backup", "", "Backup (*.db);;All files (*)")
     if not path:
         return None
-    username, ok = QInputDialog.getText(parent, "Restore from backup", "User ID of an owner in the backup:")
-    if not ok or not username.strip():
-        return None
-    password, ok = QInputDialog.getText(parent, "Restore from backup", "That owner's password:",
-                                        QLineEdit.Password)
-    if not ok:
+    owner = ask_backup_owner(parent)
+    if owner is None:
         return None
     if new_company:
-        return storage.restore_company(company, path, username.strip(), password)
-    return storage.restore_database(path, username.strip(), password)
-
-
-def _password_input(placeholder):
-    field = QLineEdit()
-    field.setPlaceholderText(placeholder)
-    field.setEchoMode(QLineEdit.Password)
-    return field
+        return storage.restore_company(company, path, *owner)
+    return storage.restore_database(path, *owner)
 
 
 class EmployeesPage(QWidget):
@@ -73,29 +89,34 @@ class EmployeesPage(QWidget):
         self.fullNameInput.setPlaceholderText("Full Name")
         self.usernameInput = QLineEdit()
         self.usernameInput.setPlaceholderText("User ID")
-        self.passwordInput = _password_input("Password")
-        self.confirmPasswordInput = _password_input("Confirm Password")
+        self.passwordInput = PasswordField("Password")
+        self.confirmPasswordInput = PasswordField("Confirm Password")
         self.addButton = QPushButton("Add Member")
         self.addButton.setProperty("role", "primary")
         self.addButton.clicked.connect(self._handle_add)
+        generate, hint = new_password_helpers(self.passwordInput, self.confirmPasswordInput)
         for w in (self.fullNameInput, self.usernameInput, self.passwordInput,
-                  self.confirmPasswordInput, self.addButton):
+                  self.confirmPasswordInput, generate, self.addButton):
             add_row.addWidget(w)
         layout.addLayout(add_row)
+        layout.addWidget(hint)
 
         layout.addWidget(self._section_label("SELECTED MEMBER"))
         selected_row = QHBoxLayout()
-        self.newPasswordInput = _password_input("New Password")
-        self.confirmNewPasswordInput = _password_input("Confirm New Password")
+        self.newPasswordInput = PasswordField("New Password")
+        self.confirmNewPasswordInput = PasswordField("Confirm New Password")
         self.resetButton = QPushButton("Reset Password")
         self.resetButton.setProperty("role", "ghost")
         self.resetButton.clicked.connect(self._handle_reset)
         self.removeButton = QPushButton("Remove Member")
         self.removeButton.setProperty("role", "danger")
         self.removeButton.clicked.connect(self._handle_remove)
-        for w in (self.newPasswordInput, self.confirmNewPasswordInput, self.resetButton, self.removeButton):
+        generate, hint = new_password_helpers(self.newPasswordInput, self.confirmNewPasswordInput)
+        for w in (self.newPasswordInput, self.confirmNewPasswordInput, generate, self.resetButton,
+                  self.removeButton):
             selected_row.addWidget(w)
         layout.addLayout(selected_row)
+        layout.addWidget(hint)
 
         layout.addWidget(self._section_label("BACKUP"))
         backup_row = QHBoxLayout()

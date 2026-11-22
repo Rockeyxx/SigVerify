@@ -31,12 +31,32 @@ If it does not open, the system is missing FUSE. Install `fuse3` (Arch:
 The first screen is **Create a vault**. A vault is one encrypted database with its
 own owner, members and signers. Enter the vault name (your company or branch),
 then the owner's full name, a User ID and a password.
+If you already have a vault from another computer, choose **I already have a vault:
+restore it from a backup** instead (see Backup and restore below).
 
 Passwords are not stored anywhere. If the owner and every member forget their
 passwords, the enrolled signatures cannot be recovered and every signer must
 enrol again. Make a backup (see below).
 
 After that, log in with your User ID and password. Only the owner adds members.
+
+## Passwords
+
+A new password needs at least 15 characters. Capitals, digits and symbols are not
+required: a long phrase of ordinary words works. Very common passwords are refused.
+The line under the password field says what is missing while you type. Passwords set
+in an older version of the app still log in; the rule applies when a password is set
+or changed.
+
+**Generate password** fills both password fields with 20 random letters and digits and
+shows them once, with a Copy button. Write the password down or keep it in a password
+manager before you close that window: nobody can recover it, not even the owner.
+
+The eye button at the end of a password field shows or hides what you typed. The text
+is hidden again when you leave the page.
+
+A member who forgets their password asks the owner to set a new one (Members page,
+Reset Password). Anyone changes their own password on the Profile page, with the current one.
 
 ## Tablet setup
 
@@ -72,7 +92,7 @@ The owner opens **Members**, clicks **Back Up to a Folder** and picks a folder.
 The backup file is encrypted like the vault.
 
 To restore, the owner clicks **Restore from Backup** on the Members page. On a
-new computer, use **Restore a vault from a backup** on the first screen instead,
+new computer, use **I already have a vault: restore it from a backup** on the first screen instead,
 then give the vault name and an owner's User ID and password from the backup.
 The app keeps a copy of the current database before it restores, and you log in
 again afterwards.
@@ -96,6 +116,8 @@ uninstalling the app does not touch this folder.
 | Already has references. Only the owner can replace them | Ask the owner to re-enrol the signer |
 | This database was made by an older version of the app | Move the folder named in the message somewhere else and start again; signers must enrol again |
 | Log in first: the signature data is locked | Log in again |
+| The password must have at least 15 characters | Use a longer password, or press Generate password |
+| This password is too common | Choose another one, or press Generate password |
 | Windows: `MSVCP140.dll` or `VCRUNTIME140.dll` was not found | Install the Microsoft Visual C++ Redistributable (x64) from Microsoft's website, then start the app again |
 
 ## If something goes wrong

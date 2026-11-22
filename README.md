@@ -166,79 +166,28 @@ A signer can enrol with paper only, tablet only, or both. With both, each check 
 
 ### GUI
 
-A standalone PyQt5 desktop application (`src/gui/`) provides the
-member-facing interface for enrollment and verification.
+The first start opens **Create a vault**: one encrypted store with its own owner, members
+and signers. Someone who already has a vault restores it from a backup there; later starts
+open **Login**. **Home** shows your own and the vault's numbers and the recent checks.
+**Enrollment** saves a signer from 5 paper photos, 5 tablet signings, or both.
+**Verification** checks a claimed signer from a photo, a tablet signing, or both, and shows
+Genuine or Forged with the match score against the threshold. **Signers** lists everyone
+enrolled. **Profile** changes your name and password. **Members** (owner only) adds and
+removes members, resets passwords, and makes or restores backups. Every password field has
+a show/hide button, and new passwords can be generated. [USER_GUIDE.md](USER_GUIDE.md)
+has the steps.
 
-**Member workflow** (the app says vault, owner, member and signer; the code still calls them company, admin, employee and client, as in `storage.create_company` and the folder `companies/`):
+The screenshots come from the packaged app, with a made-up demo signer signed on a tablet.
 
-1. **First start, vaults and login**: On the first start the screen is
-   Create a vault: vault name, then the owner's full name, User ID and
-   password, or restore a vault from a backup. Each vault has its own
-   encrypted database, owner, members and signers, and cannot see another
-   vault's data. After that a Welcome screen leads to Login, where the member
-   picks the vault (hidden when there is only one), then enters User ID and password; Create a new vault
-   stays on the login screen. Inside a vault only the owner adds members.
-   Logging out locks the signature data again. A database made by an older
-   version of the app is refused with a message; move that vault's folder away
-   and enrol again.
-2. **Enrollment**: Enter a signer ID. The page looks the signer up across the
-   vault and shows which sets exist (scan N, pen N). A new signer is enrolled
-   with 5 reference photos of their signature (blue pen on white paper), 5
-   signings on the tablet, or both. Only embeddings are stored, so View works
-   only for photos picked in the current session. Any member can add a set the
-   signer lacks. Only the owner can replace a set the signer already has, after
-   a confirmation that picking 5 photos again is a re-enrolment.
-3. **Verification**: Enter a claimed signer ID (any signer in the vault),
-   choose paper + pen, paper only, or pen only, give the photo and/or sign on
-   the tablet, and receive the decision with its match score drawn against the
-   decision threshold. The match score is a similarity, not a probability. The
-   page refuses, with the reason, a signer whose references were made by older
-   weights, a pen signing from another tablet or operating system than the
-   enrolled one, and a replayed signing (one already used). A refused replay is
-   logged and is not a verdict. When the result is Genuine from paper and pen
-   together, the member can confirm the person's identity to add that visit to
-   the signer's references.
-4. **Dashboard**: Landing screen after login with a "Mine" row (your own
-   numbers), a "Vault" row, and the recent vault activity with the member
-   named: signers enrolled this month, total enrolled signers, total
-   verifications run, and a live genuine-rate indicator.
-5. **Signers**: A table of every signer in the vault (enrollment date,
-   references as "scan N · pen N", most recent verification). Double-click a row
-   to open the signer on the enrollment page.
-6. **Profile**: Your own name and password. A new password needs the current one.
-7. **Members (owner only)**: Add a member, reset a forgotten password,
-   remove a member, back up the encrypted database, and restore a backup
-   (after which you log in again). A restore keeps a copy of the live database
-   beside it first.
-
-An error no page catches opens a dialog instead of closing the app.
-
-**Integration:** the GUI reaches the model only through `src/gui/interfaces.py`,
-which wraps one `SignatureService` (`src/verification.py`) running on CPU, and
-reaches storage only through `src/gui/storage.py`, which wraps the encrypted
-database (`src/database/db_manager.py`).
-
-**Screenshots:**
-
-|                             Login                                  |                           Dashboard                                  |
-| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-|         ![Login screen](assets/screenshots/login.png)                | ![Dashboard with own and vault stats](assets/screenshots/dashboard.png) |
-
-
-|                           Enrollment                               |                            Verification                              |
-| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Enrollment panel](assets/screenshots/enrollment.png)               | ![Verification result display](assets/screenshots/verification.png)    |
-
-
-|                       Signers                                      |                          Profile                                     |
-| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Enrolled signers table](assets/screenshots/clients.png)            | ![Member profile editing](assets/screenshots/profile.png)            |
-
-**Running the GUI** (from the repository root):
-
-```bash
-python -m src.gui.app
-```
+| Create a vault | Login |
+| :---: | :---: |
+| ![Create a vault](assets/screenshots/create_vault.png) | ![Login](assets/screenshots/login.png) |
+| **Home** | **Enrollment** |
+| ![Home](assets/screenshots/dashboard.png) | ![Enrollment](assets/screenshots/enrollment.png) |
+| **Verification** | **Signers** |
+| ![Verification](assets/screenshots/verification.png) | ![Signers](assets/screenshots/clients.png) |
+| **Profile** | **Members** |
+| ![Profile](assets/screenshots/profile.png) | ![Members](assets/screenshots/members.png) |
 
 ### Enrollment and decision
 

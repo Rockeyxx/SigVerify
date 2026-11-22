@@ -41,12 +41,14 @@ import base64
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import string
 import struct
 import threading
 from collections import Counter
 from contextlib import contextmanager, suppress
+from functools import cache
 from datetime import datetime, timedelta
 
 if os.name == "nt":
@@ -60,6 +62,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from config.settings import (
+    COMMON_PASSWORDS_FILE,
+    GENERATED_PASSWORD_LENGTH,
     MAX_REFERENCES,
     MAX_VAULT_BYTES,
     MIN_PASSWORD_LENGTH,
@@ -72,6 +76,29 @@ EXPECTED_DIMENSIONS = {
     "spatial": SPATIAL_EMBEDDING_DIM,
     "temporal": TEMPORAL_EMBEDDING_DIM,
 }
+@cache
+def _common_passwords() -> frozenset:
+    with open(COMMON_PASSWORDS_FILE, encoding="utf-8") as f:
+        return frozenset(line.rstrip("\n") for line in f if not line.startswith("#"))
+
+
+def password_problem(password) -> str | None:
+    """What a new password is missing, or None when it meets the rule. The GUI shows it live."""
+    if not password or len(password) < MIN_PASSWORD_LENGTH:
+        return f"The password must have at least {MIN_PASSWORD_LENGTH} characters"
+    if password.lower() in _common_passwords():
+        return "This password is too common. Choose another one"
+    return None
+
+
+def generate_password() -> str:
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(GENERATED_PASSWORD_LENGTH))
+        if password_problem(password) is None:
+            return password
+
+
 SPATIAL_ORIGINS = ("render", "scan")   # "render": enroll_from_tablet, "scan": enroll_multimodal / unimodal spatial
 SOURCES = ("enroll", "added")          # "added": confirmed signings appended after a Genuine verification
 FINAL_DECISIONS = ("Genuine", "Forged")
@@ -603,8 +630,9 @@ class DatabaseManager:
 
     @staticmethod
     def _check_password(password) -> bytes:
-        if not password or len(password) < MIN_PASSWORD_LENGTH:
-            raise ValueError(f"The password must have at least {MIN_PASSWORD_LENGTH} characters")
+        problem = password_problem(password)
+        if problem:
+            raise ValueError(problem)
         return password.encode("utf-8")
 
     @staticmethod

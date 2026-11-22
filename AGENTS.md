@@ -691,9 +691,16 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   file is ever written to disk, the database, a log or a backup. A member changes
   only their own profile, and a new password needs the current one. A forgotten password
   is reset by the owner, who wraps a new copy (never their own: the owner uses their
-  profile). If every password is lost, the templates cannot be recovered. Passwords need
-  `MIN_PASSWORD_LENGTH` (`config/settings.py`) characters. `SIGVER_DB_PASSPHRASE` is for
-  tests and CI only.
+  profile). If every password is lost, the templates cannot be recovered. A new or changed
+  password follows NIST SP 800-63B, checked only in `password_problem()`
+  (`src/database/db_manager.py`), so no screen can skip it: at least `MIN_PASSWORD_LENGTH`
+  (15) characters, no rules on capitals, digits or symbols, and not in
+  `src/database/common_passwords.txt` (SecLists common passwords of 15 or more characters,
+  compared in lower case). Keep that file under 1 MB. Login never applies the rule, so a
+  password set under an older rule still works. Every password field in the GUI is a
+  `PasswordField` (`src/gui/password_field.py`, eye button); every field that sets a
+  password also gets `new_password_helpers()` (live hint, Generate). `SIGVER_DB_PASSPHRASE`
+  is for tests and CI only.
 - **A write is done by whoever is logged in.** `src/gui/storage.py` takes the acting
   member from the session, never from a name a page passes; a different name is
   refused, so nobody acts, or is logged, as the owner.
@@ -825,6 +832,16 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 Types: feat, fix, docs, style, refactor, test, chore, perf
 Scopes: models, data, database, capture, gui, config, scripts
 ```
+
+The app version is `APP_VERSION` in `config/settings.py` (major.minor) plus the number of
+commits since that line last changed (`src/app_version.py`), shown on the login screen and
+baked into the package as `VERSION`. Never write the last number by hand; change
+`APP_VERSION` only for a minor or major release (`1.1`, `2.0`), and the count starts at 0.
+`MODEL_VERSION` is separate: it names the weights, not the app.
+Every push to `main` makes a pre-release tagged `v<app version>` and attaches both installers
+(`.github/workflows/release.yml`, job `tag`). Merge pull requests with a merge commit, not a
+squash: a squash makes the `APP_VERSION` commit the head, the count 0, and the tag `v1.0.0`,
+which already exists, so the run stops.
 
 ---
 

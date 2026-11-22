@@ -96,7 +96,7 @@ def test_only_a_logged_in_admin_adds_employees(people):
 
 def test_register_and_login_messages(people):
     assert storage.register_employee("X", "ALICE", "some-password-1") == (False, "This User ID already exists")
-    assert storage.register_employee("X", "x", "short") == (False, "The password must have at least 12 characters")
+    assert storage.register_employee("X", "x", "short") == (False, "The password must have at least 15 characters")
     ok, emp, msg = storage.authenticate_employee("Alice", PW_A)
     assert (ok, msg) == (True, "") and emp == {"full_name": "Alice A", "username": "alice", "is_admin": True}
     assert storage.authenticate_employee("alice", "nope") == (False, None, "Incorrect password")
@@ -117,21 +117,21 @@ def test_password_is_not_in_the_database_file(people, isolated_storage):
 
 
 def test_update_profile_results(people):
-    ok, msg, emp = storage.update_employee_profile("alice", "Alice Z", "alice", "new-password-1",
+    ok, msg, emp = storage.update_employee_profile("alice", "Alice Z", "alice", "new-password-1-long",
                                                    current_password=PW_A)
     assert (ok, msg) == (True, "Profile updated successfully")
     assert emp == {"full_name": "Alice Z", "username": "alice", "is_admin": True}
-    assert storage.authenticate_employee("alice", "new-password-1")[0]
+    assert storage.authenticate_employee("alice", "new-password-1-long")[0]
     assert not storage.authenticate_employee("alice", PW_A)[0]
-    login("alice", "new-password-1")
+    login("alice", "new-password-1-long")
     assert storage.update_employee_profile("alice", "A", "bob") == (False, "This User ID is already taken", None)
     assert storage.update_employee_profile("ghost", "G", "g") == (False, "You can only change your own profile", None)
     assert storage.update_employee_profile("alice", "A", "alice", "short",
-                                           current_password="new-password-1")[0] is False
+                                           current_password="new-password-1-long")[0] is False
     # no new password given: the old one keeps working
     storage.update_employee_profile("alice", "Alice Z", "alice2")
     assert storage.find_employee("alice2")["full_name"] == "Alice Z"
-    assert storage.authenticate_employee("alice2", "new-password-1")[0]
+    assert storage.authenticate_employee("alice2", "new-password-1-long")[0]
 
 
 def test_nobody_changes_another_employees_profile_or_password(people):
@@ -458,7 +458,7 @@ def test_a_copied_data_folder_cannot_be_opened(people, isolated_storage, tmp_pat
 def test_passphrase_env_var_unlocks_for_tests_and_ci_without_a_file(isolated_storage, monkeypatch):
     monkeypatch.setenv(PASSPHRASE_ENV_VAR, "from-environment")
     storage._reset()
-    assert storage.create_company(COMPANY, "E", "env", "env-password-1")[0]
+    assert storage.create_company(COMPANY, "E", "env", "env-password-1-long")[0]
     storage.save_client_enrollment("C", [], "env", spatial_embeddings=spatial(1), spatial_origin="scan")
     storage._reset()
     storage.open_company(COMPANY)
@@ -965,7 +965,7 @@ def test_a_long_company_file_is_read_only_in_part(people, isolated_storage):
 
 def test_a_failed_registration_leaves_no_company_folder(isolated_storage):
     ok, msg = storage.create_company("Acme", "Alice A", "alice", "short")
-    assert not ok and "12 characters" in msg
+    assert not ok and "15 characters" in msg
     assert storage.is_first_run() and storage.current_company() is None
     assert not company_dir(isolated_storage, "acme").exists()
     assert storage.create_company("Acme", "Alice A", "alice", PW_A)[0]           # the name is free again
@@ -1112,11 +1112,11 @@ def test_a_folder_left_by_a_crash_does_not_block_the_vault_name(isolated_storage
     with open(os.path.join(storage._companies_dir(), "acme", "signatures.db"), "wb") as f:
         f.write(b"half-made")
     assert storage.list_companies() == []
-    ok, msg = storage.create_company("Acme", "Ann Owner", "ann", "ann-password-1")
+    ok, msg = storage.create_company("Acme", "Ann Owner", "ann", "ann-password-1-long")
     assert ok, msg
     assert storage.list_companies() == ["Acme"]
 
 
 def test_a_listed_vault_still_blocks_its_name(people):
-    ok, msg = storage.create_company(storage.current_company(), "X Y", "xy", "xy-password-1")
+    ok, msg = storage.create_company(storage.current_company(), "X Y", "xy", "xy-password-1-long")
     assert not ok and "already exists" in msg

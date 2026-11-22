@@ -2,7 +2,8 @@
 
     python bundle/check_bundle.py dist/SigVerify
 
-1. layout: the two weights and the icon are where config/settings.py and src/gui/app.py look.
+1. layout: the two weights, the icon, the common-password list and VERSION are where
+   config/settings.py, src/gui/app.py and src/app_version.py look.
 2. start: the shipped app runs for 30 s with --debug, offscreen, on an empty data folder,
    without exiting and without a Traceback in debug.log. It does not catch a weight that
    fails to load (warm-up hides that error); the layout check and the manual test cover it.
@@ -15,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 REQUIRED = ["models/weights/spatial_cnn.pth", "models/weights/temporal_lstm.pth",
-            "src/gui/assets/signature_icon.png"]
+            "src/gui/assets/signature_icon.png", "src/database/common_passwords.txt", "VERSION"]
 
 
 def layout(dist) -> None:

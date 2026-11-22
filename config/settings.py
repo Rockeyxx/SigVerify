@@ -12,6 +12,9 @@ MODEL_WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "models", "weights")
 # of the corpora and writer partition it was trained on.
 SPATIAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
 TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
+# The app version is APP_VERSION plus the commits since this line last changed (src/app_version.py).
+# Change it by hand for a minor or major release (1.1, 2.0); the last number then starts at 0.
+APP_VERSION = "1.0"
 # Release tag of the two shipped weights above; both are byte-identical to that
 # release's assets. Storage saves it beside every template, and a template whose
 # tag differs was embedded by other weights and needs re-enrolment. Bump it
@@ -261,7 +264,13 @@ MAX_REFERENCES = 8
 # Each employee's login password unlocks the data key of the template store (one key slot
 # per employee), so a password is the only thing between a copied database and the
 # templates. scrypt makes each guess slow; length makes the space of guesses large.
-MIN_PASSWORD_LENGTH = 12
+# NIST SP 800-63B: the password is the only factor, so at least 15 characters, no rules on
+# capitals, digits or symbols, and refuse passwords that are common. The rule applies when a
+# password is set or changed; a password set under an older rule still logs in.
+MIN_PASSWORD_LENGTH = 15
+COMMON_PASSWORDS_FILE = os.path.join(PROJECT_ROOT, "src", "database", "common_passwords.txt")
+# A generated password: this many characters drawn with secrets from letters and digits.
+GENERATED_PASSWORD_LENGTH = 20
 # A probe whose embedding hash was already accepted for the same client within this many
 # days is refused as a replay. Two real signings never give identical embeddings; a
 # replayed file does. Enrolment is about a year before the next visit, so the window
