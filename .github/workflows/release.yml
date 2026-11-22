@@ -26,7 +26,8 @@ jobs:
         # 22.04, not latest: an AppImage runs only on systems with a glibc at least as new as
         # the build system's. Move to the oldest supported image when GitHub retires 22.04.
         os: [windows-latest, ubuntu-22.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}  # skylos: ignore[SKY-D295] the matrix lists GitHub-hosted images only, never self-hosted
+    timeout-minutes: 60  # torch install and PyInstaller take about 15 minutes
     permissions:
       contents: read
     defaults:
@@ -38,6 +39,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ env.TAG }}
+          fetch-depth: 0             # the app version counts commits (src/app_version.py)
           persist-credentials: false
 
       - name: Set up Python
@@ -86,6 +88,7 @@ jobs:
   attach:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
