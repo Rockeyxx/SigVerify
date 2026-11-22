@@ -11,8 +11,8 @@ from tests.vault_file import edit_live, on_disk
 
 SHIPPED_KDF_N = DatabaseManager.KDF_N   # read at import, before the autouse fixture lowers it
 MODEL = "test-model-v1"
-PW_A = "alice-password-1"
-PW_B = "bob-password-22"
+PW_A = "alice-password-1-long"
+PW_B = "bob-password-22-long"
 
 
 @pytest.fixture(autouse=True)
@@ -238,24 +238,58 @@ def test_the_backup_is_created_private_and_never_over_a_file(db, tmp_path):
 
 
 def test_new_password_rewraps_the_slot(db, db_path):
-    a = db.create_employee("A", "a", "old-password-1")
+    a = db.create_employee("A", "a", "old-password-1-long")
     before = slots(db_path, db._dek)
-    db.update_employee(a, "a", "A", "a", "new-password-2", current_password="old-password-1")
+    db.update_employee(a, "a", "A", "a", "new-password-2-long", current_password="old-password-1-long")
     after = slots(db_path, db._dek)
     assert [r for r in after if r[0] == "employee"] != [r for r in before if r[0] == "employee"]
-    assert db.authenticate_employee("a", "old-password-1")[0] is None
-    assert db.authenticate_employee("a", "new-password-2")[0] is not None
+    assert db.authenticate_employee("a", "old-password-1-long")[0] is None
+    assert db.authenticate_employee("a", "new-password-2-long")[0] is not None
 
 
-def test_short_passwords_are_refused(db):
-    with pytest.raises(ValueError, match="at least"):
-        db.create_employee("A", "a", "short")
+def test_passwords_under_15_characters_are_refused(db):
+    fourteen = "abcdefghijklmn"
+    with pytest.raises(ValueError, match="at least 15"):
+        db.create_employee("A", "a", fourteen)
     a = db.create_employee("A", "a", PW_A)
-    with pytest.raises(ValueError, match="at least"):
-        db.update_employee(a, "a", "A", "a", "short", current_password=PW_A)
-    with pytest.raises(ValueError, match="at least"):
-        db.reset_password(a, "a", "short")
+    with pytest.raises(ValueError, match="at least 15"):
+        db.update_employee(a, "a", "A", "a", fourteen, current_password=PW_A)
+    with pytest.raises(ValueError, match="at least 15"):
+        db.reset_password(a, "a", fourteen)
     assert db.authenticate_employee("a", PW_A)[0] is not None
+
+
+@pytest.mark.parametrize("common", ["iloveyouforever", "PasswordPassword", "1qaz2wsx3edc4rfv"])
+def test_common_passwords_are_refused_whatever_the_case(db, common):
+    with pytest.raises(ValueError, match="too common"):
+        db.create_employee("A", "a", common)
+
+
+def test_a_long_passphrase_needs_no_capitals_digits_or_symbols(db):
+    assert db.create_employee("A", "a", "correct horse battery staple")
+
+
+def test_a_password_set_under_the_old_rule_still_logs_in(db, monkeypatch):
+    import src.database.db_manager as dbm
+    rule = dbm.MIN_PASSWORD_LENGTH
+    monkeypatch.setattr(dbm, "MIN_PASSWORD_LENGTH", 12)
+    db.create_employee("A", "a", "twelve-chars")
+    monkeypatch.setattr(dbm, "MIN_PASSWORD_LENGTH", rule)
+    assert db.authenticate_employee("a", "twelve-chars")[0] is not None
+
+
+def test_password_problem_names_what_is_missing():
+    from src.database.db_manager import password_problem
+    assert "at least 15" in password_problem("short")
+    assert "too common" in password_problem("passwordpassword")
+    assert password_problem("correct horse battery staple") is None
+
+
+def test_generated_passwords_meet_the_rule_and_differ():
+    from src.database.db_manager import generate_password, password_problem
+    first, second = generate_password(), generate_password()
+    assert password_problem(first) is None and len(first) >= 20
+    assert first != second
 
 
 # ------------------------------------------- own account only (account takeover)
@@ -275,9 +309,9 @@ def test_a_new_password_needs_the_current_one(db, db_path):
     a = db.create_employee("A", "a", PW_A)
     before = slots(db_path, db._dek)
     with pytest.raises(PermissionError, match="current password"):
-        db.update_employee(a, "a", "A", "a", "new-password-2")
+        db.update_employee(a, "a", "A", "a", "new-password-2-long")
     with pytest.raises(PermissionError, match="incorrect"):
-        db.update_employee(a, "a", "A", "a", "new-password-2", current_password="wrong-password-9")
+        db.update_employee(a, "a", "A", "a", "new-password-2-long", current_password="wrong-password-9")
     assert slots(db_path, db._dek) == before
     assert db.authenticate_employee("a", PW_A)[0] is not None
 

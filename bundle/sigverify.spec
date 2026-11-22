@@ -14,6 +14,7 @@ datas = [
     (os.path.join(ROOT, "models", "weights", "spatial_cnn.pth"), os.path.join("models", "weights")),
     (os.path.join(ROOT, "models", "weights", "temporal_lstm.pth"), os.path.join("models", "weights")),
     (ICON, os.path.join("src", "gui", "assets")),
+    (os.path.join(ROOT, "src", "database", "common_passwords.txt"), os.path.join("src", "database")),
 ]
 
 a = Analysis([os.path.join(SPECPATH, "launch.py")], pathex=[ROOT], datas=datas)
