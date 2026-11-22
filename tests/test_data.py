@@ -1056,5 +1056,5 @@ class TestSplitRecordChannels:
     def test_mismatched_mode_is_refused(self, tmp_path):
         w = self._save(tmp_path, "dt_tilt1")
         with pytest.raises(ValueError, match="dt_tilt1"):
-            check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt0")
-        assert check_split_against_record(w, ["x"], ["c"], temporal_channels="dt_tilt1")
+            check_split_against_record(w, ["c"], temporal_channels="dt_tilt0")
+        assert check_split_against_record(w, ["c"], temporal_channels="dt_tilt1")

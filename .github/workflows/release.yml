@@ -93,7 +93,8 @@ jobs:
 
   attach:
     needs: [tag, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # A partly failed build (one platform's runner refused) still attaches the files that were built.
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

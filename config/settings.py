@@ -144,6 +144,9 @@ RENDER_PEN_UP_PRESSURE = 1e-4           # Pressure at or below this is not touch
 RENDER_PEN_UP_DT_RATIO = 3.0            # A gap this many times the median period is a lift
 
 # ─── Temporal ensemble (SignatureService use_temporal_ensemble=True) ──
+# Not used: the app runs the single shipped temporal weight, and the ensemble is never
+# packaged (owner's decision, 22 November 2026; tests/test_packaging.py checks the
+# installer). New releases need not carry the six seed weights. Kept for research only.
 # Averaging these six checkpoints' embeddings measured 4.82% EER against 6.92%
 # for a single member, on 120 unseen DeepSignDB writers under one shared K=5
 # draw. Averaging their per-model SCORES instead reaches 4.53%, but that cannot
@@ -368,7 +371,7 @@ NFI_FUSION_WRITERS = ("nfi_002", "nfi_008", "nfi_016", "nfi_018", "nfi_024", "nf
 # session later and from 8.42% to 6.04% at the same sitting.
 VERIFICATION_SIGNINGS = 1
 
-# Step-up verification, off until the GUI can show "Sign again" (AGENTS.md). One signing of each
+# Step-up verification (AGENTS.md); the GUI handles "Sign again", the setting stays off. One signing of each
 # kind first: a fused score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is
 # rejected, and anything between asks for one more signing of each kind, whose mean with the first
 # must reach STEP_UP_TWO. Fused decisions only, with VERIFICATION_SIGNINGS left at 1. Calibrated on

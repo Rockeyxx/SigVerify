@@ -64,7 +64,7 @@ class ScoreBar(QWidget):
         self._score, self._threshold, self._genuine = score, threshold, genuine
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # skylos: ignore Qt calls this override by name, with this signature
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()

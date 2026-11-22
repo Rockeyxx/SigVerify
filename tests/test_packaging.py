@@ -128,6 +128,24 @@ def test_debug_flag_is_removed_before_qt_sees_it(tmp_path):
     assert "ARGV ['SigVerify', '-x']" in (tmp_path / "debug.log").read_text()
 
 
+def test_the_installer_ships_the_two_shipped_weights_and_no_ensemble():
+    """The six-seed temporal ensemble is not used (owner, 22 November 2026): never packaged."""
+    import re
+    spec = (REPO / "bundle" / "sigverify.spec").read_text()
+    assert set(re.findall(r'"([\w.-]+\.pth)"', spec)) == {"spatial_cnn.pth", "temporal_lstm.pth"}
+
+
+@pytest.mark.parametrize("code_from_test", [0, 1])
+def test_self_test_passes_the_kit_and_exits_with_its_result_without_starting_the_app(tmp_path, code_from_test):
+    code = ("import launch\n"
+            "def start(): print('APP STARTED')\n"
+            f"def self_test(args): print('KIT', args); return {code_from_test}\n"
+            "launch.run(['SigVerify', '--self-test', 'C:/kit'], start, self_test)\n")
+    result = _run_launch(tmp_path, code)
+    assert result.returncode == code_from_test
+    assert "KIT ['C:/kit']" in result.stdout and "APP STARTED" not in result.stdout
+
+
 # ------------------------------------------------------------------ checks on the built package
 
 from bundle import check_bundle  # noqa: E402
@@ -186,3 +204,6 @@ def test_every_merge_to_main_builds_a_prerelease_named_after_the_app_version():
     assert re.search(r"push:\s*\n\s*branches:\s*\[main\]", text)
     assert "app_version()" in text and "gh release create" in text and "--prerelease" in text
     assert "needs.tag.outputs.tag" in text            # build and attach use the tag that job made
+    # One platform failing (the Windows runner refused for billing) still attaches the other's file.
+    attach_if = re.search(r"\n  attach:\n(?:.*\n)*?    if: (.*)\n", text).group(1)
+    assert "needs.build.result == 'failure'" in attach_if

@@ -218,7 +218,7 @@ class DrawingCanvas(QWidget):
             self.current_display_stroke = []
             self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # skylos: ignore Qt calls this override by name, with this signature
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         # Paint the signing box itself: a plain QWidget subclass ignores a stylesheet background,

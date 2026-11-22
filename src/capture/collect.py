@@ -3,11 +3,14 @@
 The GUI owns the model call, the database and the score; this returns raw trajectories only,
 with the operating system and the tablet name read from the system.
 """
+import platform
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QHBoxLayout, QInputDialog, QLabel, QPushButton, QVBoxLayout
 
 from config.settings import CAPTURE_NO_DRIVER
 from src.capture import tablet
+from src.capture.pen_input import wintab_installed
 from src.capture.tablet import SignatureCaptureWidget
 from src.gui.styles import ACCENT, ACCENT_DARK, PRIMARY_LIGHT, STYLE
 
@@ -16,6 +19,7 @@ TEXT = {
         "title": "Sign on the tablet",
         "counter": "Signature {i} of {n}",
         "hint": "Sign inside the box, then press I approve or Redo.",
+        "no_tablet": "No tablet found. Plug it in, or choose Paper image only.",
         "done": "Thank you, {n}/{n} done.",
         "btn_approve": "I approve", "btn_redo": "Redo",
         "btn_confirm": "Confirm", "btn_restart": "Start over",
@@ -26,6 +30,7 @@ TEXT = {
         "title": "وقّع على الجهاز اللوحي",
         "counter": "التوقيع {i} من {n}",
         "hint": "وقّع داخل المربع، ثم اضغط «أوافق» أو «إعادة».",
+        "no_tablet": "لم يُعثر على جهاز لوحي. صِله، أو اختر «Paper image only».",
         "done": "شكرًا لك، اكتمل {n} من {n}.",
         "btn_approve": "أوافق", "btn_redo": "إعادة",
         "btn_confirm": "تأكيد", "btn_restart": "البدء من جديد",
@@ -84,6 +89,9 @@ class CollectDialog(QDialog):
         layout.addWidget(self.capture)
         layout.addWidget(self.done)
         layout.addLayout(end)
+        # Linux and Wintab list every tablet; Windows without the driver lists none, though
+        # Windows Ink may still work, so there an empty list says nothing (G34).
+        self._no_tablet = not self.capture.tablets and (platform.system() != "Windows" or wintab_installed())
         self._retranslate()
 
     @property
@@ -154,7 +162,7 @@ class CollectDialog(QDialog):
         for label in (self.counter, self.done, self.capture.label):
             label.setLayoutDirection(direction)
             label.setAlignment(Qt.AlignLeading | Qt.AlignVCenter)   # right in Arabic
-        self.capture.label.setText(self._t("hint"))
+        self.capture.label.setText(self._t("no_tablet" if self._no_tablet else "hint"))
         self._show_stage()
 
 

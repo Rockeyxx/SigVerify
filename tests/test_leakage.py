@@ -148,24 +148,24 @@ class TestSplitRecord:
 
     def test_matching_partition_passes(self, tmp_path):
         weights = self._record(tmp_path, ["a", "b"], ["c"], ["d", "e"])
-        assert check_split_against_record(weights, train_ids=["b", "a"], test_ids=["e", "d"]) is not None
+        assert check_split_against_record(weights, test_ids=["e", "d"]) is not None
 
     def test_scoring_a_writer_the_checkpoint_trained_on_raises(self, tmp_path):
         weights = self._record(tmp_path, ["a", "b"], ["c"], ["d", "e"])
         with pytest.raises(ValueError, match="trained on"):
-            check_split_against_record(weights, train_ids=["c", "d"], test_ids=["a", "e"])
+            check_split_against_record(weights, test_ids=["a", "e"])
 
     def test_a_different_held_out_set_raises_even_without_a_leak(self, tmp_path):
         weights = self._record(tmp_path, ["a", "b"], ["c"], ["d", "e"])
         # "c" was validation, not training: no leak, but not the documented test set either.
         with pytest.raises(ValueError, match="held-out"):
-            check_split_against_record(weights, train_ids=["a", "b"], test_ids=["c", "d", "e"])
+            check_split_against_record(weights, test_ids=["c", "d", "e"])
         # An explicit --writers narrowing is allowed to score a subset.
-        assert check_split_against_record(weights, train_ids=["a", "b"], test_ids=["d"],
+        assert check_split_against_record(weights, test_ids=["d"],
                                           require_same_test=False) is not None
 
     def test_checkpoint_without_a_record_is_not_checked(self, tmp_path):
-        assert check_split_against_record(str(tmp_path / "old.pth"), train_ids=["a"], test_ids=["b"]) is None
+        assert check_split_against_record(str(tmp_path / "old.pth"), test_ids=["b"]) is None
 
     def test_record_stores_the_input_size_and_a_mismatch_refuses_to_score(self, tmp_path):
         """
@@ -179,14 +179,14 @@ class TestSplitRecord:
                           input_size=(110, 78))
         assert load_split_record(weights)["input_size"] == [110, 78]
         with pytest.raises(ValueError, match="input size"):
-            check_split_against_record(weights, train_ids=["a"], test_ids=["c"], input_size=(220, 155))
-        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"],
+            check_split_against_record(weights, test_ids=["c"], input_size=(220, 155))
+        assert check_split_against_record(weights, test_ids=["c"],
                                           input_size=(110, 78)) is not None
 
     def test_record_without_an_input_size_is_scored_at_the_config_size(self, tmp_path):
         weights = self._record(tmp_path, ["a"], ["b"], ["c"])   # pre-2026-09-19 record shape
         assert "input_size" not in load_split_record(weights) or load_split_record(weights)["input_size"] is None
-        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"], input_size=(220, 155)) is not None
+        assert check_split_against_record(weights, test_ids=["c"], input_size=(220, 155)) is not None
 
 
 class TestRecipeRecord:
@@ -198,13 +198,13 @@ class TestRecipeRecord:
         save_split_record(weights, ["a"], ["b"], ["c"], data_dirs=["data/x"], split_seed=42, max_gap_ms=200.0)
         assert load_split_record(weights)["max_gap_ms"] == 200.0
         with pytest.raises(ValueError, match="MAX_GAP_MS"):
-            check_split_against_record(weights, train_ids=["a"], test_ids=["c"], max_gap_ms=100.0)
-        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"], max_gap_ms=200.0) is not None
+            check_split_against_record(weights, test_ids=["c"], max_gap_ms=100.0)
+        assert check_split_against_record(weights, test_ids=["c"], max_gap_ms=200.0) is not None
 
     def test_old_record_without_the_field_is_accepted(self, tmp_path):
         weights = str(tmp_path / "t.pth")
         save_split_record(weights, ["a"], ["b"], ["c"], data_dirs=["data/x"], split_seed=42)
-        assert check_split_against_record(weights, train_ids=["a"], test_ids=["c"], max_gap_ms=100.0) is not None
+        assert check_split_against_record(weights, test_ids=["c"], max_gap_ms=100.0) is not None
 
     def test_gap_env_parser(self):
         assert max_gap_ms_from_env(None, 100.0) == 100.0

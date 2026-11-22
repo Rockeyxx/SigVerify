@@ -268,7 +268,7 @@ class RegisterScreen(QWidget):
         self.createButton.clicked.connect(self._handle_register)
         content.addWidget(self.createButton)
 
-        self.restoreButton = QPushButton("I already have a vault: restore it from a backup")
+        self.restoreButton = QPushButton("Restore a vault from a backup")
         self.restoreButton.setProperty("role", "ghost")
         self.restoreButton.clicked.connect(self._handle_restore)
         content.addWidget(self.restoreButton, alignment=Qt.AlignHCenter)

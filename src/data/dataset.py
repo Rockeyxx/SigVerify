@@ -371,7 +371,7 @@ def load_split_record(weights_path):
         return json.load(fh)
 
 
-def check_split_against_record(weights_path, train_ids, test_ids, require_same_test=True,
+def check_split_against_record(weights_path, test_ids, require_same_test=True,
                                input_size=SPATIAL_INPUT_SIZE, max_gap_ms=None,
                                temporal_channels=None):
     """Check that evaluation split matches the record saved during training.
