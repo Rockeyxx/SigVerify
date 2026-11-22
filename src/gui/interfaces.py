@@ -60,7 +60,8 @@ def _prepare_image(path: str, temp_files: list) -> str:
     delete them in a `finally` (the originals are never touched).
     """
     cleaned_path = crop_to_ink(path)
-    temp_files.append(cleaned_path)
+    if os.path.abspath(cleaned_path) != os.path.abspath(path):   # never delete the employee's own file
+        temp_files.append(cleaned_path)
 
     try:
         cleaned_path.encode("ascii")

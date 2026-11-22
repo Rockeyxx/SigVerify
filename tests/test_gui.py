@@ -154,6 +154,16 @@ def test_verify_deletes_temp_images_even_when_it_raises(monkeypatch, temp_images
     assert temp_images and not any(os.path.exists(p) for p in temp_images)
 
 
+def test_the_employees_own_image_is_never_deleted_even_if_the_crop_hands_it_back(service, tmp_path,
+                                                                               monkeypatch):
+    original = tmp_path / "scan.png"
+    original.write_bytes(b"x")
+    monkeypatch.setattr(interfaces, "crop_to_ink", lambda path: path)
+    interfaces.verify_client([_b64(512)], "scan", str(original))
+    interfaces.enroll_client([str(original)])
+    assert original.exists()
+
+
 # ------------------------------------------------------------------ enroll_client
 def test_enroll_paper_and_pen_together(service, temp_images):
     k = NUM_ENROLLMENT_REFERENCES
