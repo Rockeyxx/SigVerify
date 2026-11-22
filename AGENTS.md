@@ -833,6 +833,12 @@ Types: feat, fix, docs, style, refactor, test, chore, perf
 Scopes: models, data, database, capture, gui, config, scripts
 ```
 
+The app version is `APP_VERSION` in `config/settings.py` (major.minor) plus the number of
+commits since that line last changed (`src/app_version.py`), shown on the login screen and
+baked into the package as `VERSION`. Never write the last number by hand; change
+`APP_VERSION` only for a minor or major release (`1.1`, `2.0`), and the count starts at 0.
+`MODEL_VERSION` is separate: it names the weights, not the app.
+
 ---
 
 ## Run-to-run variance and significance testing

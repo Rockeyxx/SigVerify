@@ -31,6 +31,8 @@ If it does not open, the system is missing FUSE. Install `fuse3` (Arch:
 The first screen is **Create a vault**. A vault is one encrypted database with its
 own owner, members and signers. Enter the vault name (your company or branch),
 then the owner's full name, a User ID and a password.
+If you already have a vault from another computer, choose **I already have a vault:
+restore it from a backup** instead (see Backup and restore below).
 
 Passwords are not stored anywhere. If the owner and every member forget their
 passwords, the enrolled signatures cannot be recovered and every signer must
