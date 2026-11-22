@@ -881,7 +881,7 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     assert isinstance(screen, app_module.RegisterScreen)
     labels = [label.text() for label in screen.findChildren(QtWidgets.QLabel)]
     assert "Create a vault" in labels and storage.ADMIN_WARNING in labels
-    assert "Create Vault" in _buttons(screen) and "I already have a vault: restore it from a backup" in _buttons(screen)
+    assert "Create Vault" in _buttons(screen) and "Restore a vault from a backup" in _buttons(screen)
     assert "Back to login" not in _buttons(screen)            # nothing to go back to on a first run
 
     _register(screen, "", "Alice A", "alice", "alice-password-1")
