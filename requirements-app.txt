@@ -1,0 +1,15 @@
+# Only what the packaged app needs to run (issue #42). The installer build installs this
+# file and nothing else from the project, so research libraries cannot end up in the package.
+# tests/test_packaging.py fails if the app imports a library that is not listed here.
+# The lower bounds follow requirements.txt; that file stays the full development list.
+#
+# Install torch from the CPU index FIRST, then this file:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-app.txt
+torch>=2.0.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+PyQt5>=5.15.0
+cryptography>=41.0.0
+scipy>=1.10.0

@@ -18,6 +18,10 @@ TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
 # whenever either shipped weight changes (ship-model-release step 5). CI downloads
 # the weights of this release, so it always tests what ships.
 MODEL_VERSION = "v0.10.0"
+# SHA-256 of the two weights on the MODEL_VERSION release. The installer build stops if a
+# downloaded weight differs, so update both whenever MODEL_VERSION changes.
+SPATIAL_WEIGHTS_SHA256 = "d4c52c9401d5b1633ddedc266cb7c7d210a79fc536f501da4c4b7a324b1480bf"
+TEMPORAL_WEIGHTS_SHA256 = "231f99568ddd4684e9cf61240f960d52b11fb2340c47d662a923eb296cf6b0b1"
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 
 # Root data directories. `data/` is gitignored — local download is required; no datasets are checked into git.

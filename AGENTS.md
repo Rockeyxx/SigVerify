@@ -76,7 +76,7 @@ them, even if they appear in the literature review or older drafts:
 | Inference RAM ceiling           | ≤ 4 GB                                            |
 | End-to-end verification latency | < 3.0 s, Enter to fused result (see below)        |
 | Execution                       | Local only — no cloud, no dedicated GPU           |
-| Platform support                | Windows + Arch Linux (x86_64 and ARM64)           |
+| Platform support                | Windows + Arch Linux (x86_64)                     |
 | Native build steps              | None — all dependencies must have prebuilt wheels |
 
 The latency budget starts when the user presses Enter after submitting
@@ -88,8 +88,8 @@ imports, the model loads and the first forward pass happen before Enter. Keep on
 `SignatureService` for the whole session, because a second instance loads the models
 again. The budget must stay well under 3.0 s, because the front end needs time too.
 `tools/profile_latency.py` reports it on its first row and `tests/test_latency.py`
-asserts it off CI. Measured on an 8-core laptop CPU: 0.5 s from Enter (0.8 s on 2
-cores, 1.7 s on one), and 1.35 s to start the app, 1.0 s of it importing PyTorch,
+asserts it off CI. Measured on an 8-core laptop CPU: 0.52 s from Enter (0.8 s on 2
+cores, 1.7 s on one), and 1.40 s to start the app, 1.14 s of it importing PyTorch,
 reported but not budgeted (1.9 s on the first launch after a reboot). A `verify()` against
 stored references takes 0.08 s (0.28 s on one core); never quote it as the budget.
 
@@ -779,6 +779,16 @@ cryptography, matplotlib, scikit-learn, Pillow, scipy, sqlite3 (stdlib)
 tqdm, pytest
 ```
 
+**Allowed for building the installer only** (`requirements-build.txt`, never imported by `src/`):
+
+```
+pyinstaller
+```
+
+The installer installs `requirements-app.txt`, the libraries the app imports and nothing
+else. Add a new `src/` import to it in the same commit; `tests/test_packaging.py` fails
+otherwise.
+
 **Not allowed:**
 
 - No vendor signature-pad SDKs
@@ -801,6 +811,7 @@ tqdm, pytest
 | `config/`       | Centralized hyperparameters and constants               | Runtime logic                           |
 | `assets/screenshots/` | Hand-made screenshots shown in the README, for every team | Generated figures. Never put screenshots in `docs/` (gitignored) |
 | `results/`      | Figures written by code through `RESULTS_DIR`           | Hand-made images                        |
+| `bundle/`       | Installer build: PyInstaller recipe, `--debug` launcher, weight check, Windows and AppImage scripts | App logic. Never imported by `src/` |
 
 ---
 

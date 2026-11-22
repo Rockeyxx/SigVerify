@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SigVerify
+Comment=Local signature verification from paper scans and pen tablets
+Exec=SigVerify
+Icon=sigverify
+Categories=Office;
+Terminal=false
