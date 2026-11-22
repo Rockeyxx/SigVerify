@@ -27,7 +27,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
+
 
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_FORGERY_ATTEMPTS,  # noqa: E402
                              CAMPAIGN_GENUINE_PER_MODALITY, CAMPAIGN_PRACTICE_SIGNINGS,
