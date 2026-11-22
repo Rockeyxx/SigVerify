@@ -1186,6 +1186,9 @@ def test_bobs_clients_page_lists_alices_client_and_the_last_verification(app, al
     page.refresh("bob")
     assert page.table.rowCount() == 1 and page.table.item(0, 0).text() == "c"
     assert page.table.item(0, 3).text() == alices != "Never"
+    expires = storage.get_client("c")["spatial_sets"]["scan"]["expires_at"][:10]
+    assert page.table.horizontalHeaderItem(4).text() == "References Expire"
+    assert page.table.item(0, 4).text() == expires
 
 
 def test_dashboard_mine_and_company_counts_differ(app, alice_bob):

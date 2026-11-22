@@ -390,6 +390,7 @@ def authenticate_employee(username: str, password: str) -> tuple:
     if emp is None:
         return False, None, "User ID not found" if reason == "not_found" else "Incorrect password"
     _session = emp
+    _get_db().purge_expired(emp["id"])   # the vault is unlocked only now
     return True, _public_employee(emp), ""
 
 
@@ -451,6 +452,9 @@ def _set_to_gui(found):
         # Embedded by other weights (any row of the set): ask for re-enrolment.
         "stale": any(v != MODEL_VERSION for v in found["model_versions"]),
         "capture_device": found["capture_device"],
+        "expires_at": found["expires_at"],
+        # Past TEMPLATE_RETENTION_DAYS: the next login deletes it (ISO/IEC 24745).
+        "expired": datetime.fromisoformat(found["expires_at"]) <= datetime.now(),
     }
 
 
@@ -460,7 +464,8 @@ def _client_to_gui(rec: dict) -> dict:
     "scan" set, or the "render" set when there is no scan set). New keys:
       spatial_sets: {"scan": {...}, "render": {...}}  (a missing origin is absent)
       temporal_set: {...} or None
-    each set = {"embeddings": [base64], "model_version", "enrolled_at", "stale", "capture_device"}.
+    each set = {"embeddings": [base64], "model_version", "enrolled_at", "stale", "capture_device",
+                "expires_at", "expired"}.
     """
     return {
         "display_name": rec["display_name"],
@@ -707,6 +712,10 @@ def _same_device(stored: dict, current: dict) -> bool:
     return all(norm(stored, k) == norm(current, k) for k in ("device_model", "os"))
 
 
+def _expired_message(what: str, found: dict) -> str:
+    return f"The {what} expired on {found['expires_at'][:10]}. Enrol the signer again."
+
+
 def check_references(client_id: str, spatial_origin: str = None, use_pen: bool = False,
                      capture_device: dict = None) -> list:
     """
@@ -714,6 +723,7 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
     (empty list = go ahead):
       * a set the visit uses was embedded by other weights (model_version differs from
         MODEL_VERSION): scores against it mean nothing, the client must re-enrol it;
+      * a set the visit uses is past its retention date (expired, deleted at the next login);
       * the pen set was signed on another tablet model or operating system than this
         signing (capture_device): enrol and verify on the same device model (AGENTS.md).
     A pen set stored without capture_device (enrolled before it was recorded) is not checked.
@@ -724,6 +734,8 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
     problems = []
     if spatial_origin is not None:
         found = record["spatial_sets"].get(spatial_origin)
+        if found and found["expired"]:
+            problems.append(_expired_message(f"{spatial_origin} references", found))
         if found and found["stale"]:
             problems.append(
                 f"The {spatial_origin} references were made by another model version "
@@ -731,6 +743,8 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
                 f"Ask the owner to re-enrol the signer's paper signatures.")
     pen = record["temporal_set"]
     if use_pen and pen:
+        if pen["expired"]:
+            problems.append(_expired_message("pen references", pen))
         if pen["stale"]:
             problems.append(
                 f"The pen references were made by another model version "

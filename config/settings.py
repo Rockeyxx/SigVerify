@@ -256,6 +256,10 @@ NUM_ENROLLMENT_REFERENCES = 5
 # added after a Genuine verification, oldest added dropped first. The measured arms held 6 to 8
 # (AGENTS.md); nothing beyond 8 was measured. The GUI storage and the database both read this.
 MAX_REFERENCES = 8
+# ISO/IEC 24745: a reference set is deleted this many days after it was enrolled (at the next
+# login). Added references do not renew it; re-enrolling does. Verification comes about a year
+# after enrolment, so the limit must stay well above 365. Changing it moves every set's expiry.
+TEMPLATE_RETENTION_DAYS = 730
 
 # ─── Template store (src/database, src/gui/storage.py) ───────────────
 # Each employee's login password unlocks the data key of the template store (one key slot
