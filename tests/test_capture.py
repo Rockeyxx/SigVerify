@@ -15,11 +15,6 @@ from src.capture.tablet import SignatureCaptureWidget  # noqa: E402
 from src.data.pen_stream import strokes_to_trajectory  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def _event(kind, x, y, pressure, ts, xtilt=0, ytilt=0):
     ev = QTabletEvent(kind, QPointF(x, y), QPointF(x, y), QTabletEvent.Stylus, QTabletEvent.Pen,
                       pressure, xtilt, ytilt, 0.0, 0.0, 0, Qt.NoModifier, 1, Qt.LeftButton, Qt.LeftButton)

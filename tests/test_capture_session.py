@@ -82,11 +82,6 @@ from PyQt5.QtCore import QEvent, QPointF, Qt  # noqa: E402
 from PyQt5.QtGui import QTabletEvent  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def _event(kind, x, y, pressure, ts):
     ev = QTabletEvent(kind, QPointF(x, y), QPointF(x, y), QTabletEvent.Stylus, QTabletEvent.Pen,
                       pressure, 0, 0, 0.0, 0.0, 0, Qt.NoModifier, 1, Qt.LeftButton, Qt.LeftButton)

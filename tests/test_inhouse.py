@@ -19,11 +19,6 @@ from tools.capture_session import (append_manifest, ink_path, signature_path,  #
                                    write_raw_events)
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def _events(n=40, t0=1000.0):
     """A plain stroke as the canvas logs it: (t_ms, kind, x, y, p, xtilt, ytilt, inside)."""
     kinds = [int(QEvent.TabletPress)] + [int(QEvent.TabletMove)] * (n - 1)

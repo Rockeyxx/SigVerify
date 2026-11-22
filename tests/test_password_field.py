@@ -14,11 +14,6 @@ from src.gui.password_field import PasswordField, new_password_helpers  # noqa: 
 Password, Normal = QtWidgets.QLineEdit.Password, QtWidgets.QLineEdit.Normal
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def test_the_eye_shows_and_hides_the_text(app):
     field = PasswordField("Password")
     assert field.echoMode() == Password and field.placeholderText() == "Password"

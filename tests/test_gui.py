@@ -234,11 +234,6 @@ def test_enrolment_count_comes_from_settings():
 
 
 # ------------------------------------------------------------------ panels
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 @pytest.fixture
 def empty_db(tmp_path, monkeypatch):
     """A new install: no account yet."""
