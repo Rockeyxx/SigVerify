@@ -18,6 +18,7 @@ SigVerify checks whether a signature is genuine or a skilled forgery, on your ow
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
   - [Download and install](#download-and-install)
+  - [What the installer does](#what-the-installer-does)
   - [Run from source](#run-from-source)
   - [What the app takes](#what-the-app-takes)
   - [GUI](#gui)
@@ -132,9 +133,21 @@ Download the file for your system from the [Releases page](https://github.com/Ro
 - The Windows installer is not code-signed yet, so Windows may show "Windows protected your PC". Click **More info**, then **Run anyway**.
 - Tablet on Windows: install the XPPen driver before enrolling anyone, and keep it. Linux needs no driver.
 - Your data stays in the `.sigverify` folder in your home folder; updating or uninstalling the app does not touch it.
-
 - To test an installed copy, build the test kit with `python tools/make_test_kit.py`, unzip it on that computer and run `run_test.bat` (Windows) or `run_test.sh` (Linux). The app runs its whole-system test with a made-up signer and writes `SigVerify-test-results.txt`.
+
 The [user guide](USER_GUIDE.md) covers first start, enrolment, verification, backup, error messages and uninstalling.
+
+### What the installer does
+
+| Step | Windows installer | Linux AppImage |
+| --- | --- | --- |
+| Where it goes | `%LOCALAPPDATA%\Programs\SigVerify`, for the current user only (no administrator) | Nowhere: the file runs where it is |
+| Update | Deletes the old version's libraries, then copies the new ones | Replace the file |
+| Shortcuts | Start menu: **SigVerify** and **SigVerify (debug)** | None (AppImageLauncher can add one) |
+| Uninstall | Settings, Apps: removes the program folder | Delete the file |
+| Your data | Never touched: vaults stay in `.sigverify` in your home folder | Same |
+
+It downloads nothing and installs no driver. The app folder it copies holds Python, the libraries in `requirements-app.txt` (PyTorch CPU, NumPy, OpenCV, Pillow, PyQt5, cryptography, SciPy), the two weights (SHA-256 checked when the installer is built), and only the code the app imports: `src/gui/`, `src/verification.py`, `src/models/`, `src/capture/`, `src/database/db_manager.py`, `src/data/` (the input gates and pen normalisation shared with training) and `config/settings.py`. `scripts/`, `tools/`, `tests/` and datasets are left out.
 
 ### Run from source
 
@@ -178,7 +191,7 @@ removes members, resets passwords, and makes or restores backups. Every password
 a show/hide button, and new passwords can be generated. [USER_GUIDE.md](USER_GUIDE.md)
 has the steps.
 
-The screenshots come from the packaged app, with a made-up demo signer signed on a tablet.
+The screenshots come from the app, with a made-up demo signer signed on a tablet.
 
 | Create a vault | Login |
 | :---: | :---: |
@@ -237,7 +250,7 @@ data/
 ├── utsig/                  # Scans, UTSig (115 writers, Persian)
 ├── svc2004_task2/          # Pen, SVC2004 Task 2 (40 writers, with pressure)
 ├── sigcomp2011/            # Pen, SigComp2011 (Dutch and Chinese)
-├── sigcomp2009_clean/      # Scan + pen pairs, SigComp2009 / NFI (evaluation only)
+├── sigcomp2009_dl/extracted/  # Scan + pen pairs, SigComp2009 / NFI (evaluation only): genuines/, forgeries/
 └── biosecurid_sonof/       # Scan + pen pairs, BiosecurID-SONOF (licensed, evaluation only)
 ```
 
@@ -251,7 +264,7 @@ All numbers use the shipped weights on CPU, writers the weights never trained on
 
 ### Accuracy of the whole system
 
-Paper and tablet recorded for the same people, scored as the app scores them:
+Paper and tablet recorded for the same people, fused as the app fuses them:
 
 | Collection | Writers | Paper alone EER | Tablet alone EER | **Fused EER** | Fused FAR / FRR at $\tau = 0.7807$ |
 | --- | :-: | :-: | :-: | :-: | :-: |
@@ -259,7 +272,7 @@ Paper and tablet recorded for the same people, scored as the app scores them:
 | BiosecurID-SONOF (Wacom + scans) | 132 | 22.89% ± 0.48 | 6.11% ± 0.26 | **5.06% ± 0.20** | 2.53% / 10.17% |
 | SigComp2009 / NFI | 14 | 22.79% ± 1.19 | 3.90% ± 1.11 | **3.40% ± 0.56** | 2.23% / 6.92% |
 
-The in-house row is the deployment tablet: 18 writers, 125 genuine checks and 36 skilled forgeries, references are each writer's first 5 signings. The public rows are mean ± SD over 10 random draws of 5 references. $\alpha = 0.4$ was chosen on SONOF and $\tau$ at the in-house EER point; NFI took no part in either.
+The in-house row is the deployment tablet: 18 writers, 125 genuine checks and 36 skilled forgeries, references are each writer's first 5 signings, run through the app's own enrol and verify calls. The public rows are scored on the model directly: their scans are black ink, which the app's photo crop refuses (blue pen only), and they are mean ± SD over 10 random draws of 5 references. $\alpha = 0.4$ was chosen on SONOF and $\tau$ at the in-house EER point; NFI took no part in either.
 
 ### Each input on its own corpora
 
@@ -301,7 +314,7 @@ Published SVC2004 and DeepSignDB results use a threshold per writer or align the
 | Standard                 | What it covers here                                                       |    Status     |
 | ------------------------ | ------------------------------------------------------------------------- | :-----------: |
 | **ISO/IEC 23053:2022**   | Writer-independent splits, a split record shipped with every weight, reproducible training | **Met** |
-| **IEEE 730-2014**        | Configuration control, deviation log, audit log of every verification and account change; no whole-system test yet (#43) | **Partial** |
+| **IEEE 730-2014**        | Configuration control, deviation log, audit log of every verification and account change; a whole-system test runs the app's screens on the shipped weights from enrolment to the logged decision | **Met** |
 | **ISO/IEC 24745:2022**   | Only embeddings stored, encrypted; re-enrolment when the model changes; each reference set deleted 2 years after enrolment | **Met** |
 | **ISO/IEC 9075-1:2023**  | Relational SQLite schema: members, key slots, signers, enrolments, audit log | **Met** |
 | **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of the whole vault file, keys wrapped per member (scrypt) | **Met** |

@@ -121,6 +121,9 @@ uninstalling the app does not touch this folder.
 | Already has references. Only the owner can replace them | Ask the owner to re-enrol the signer |
 | This database was made by an older version of the app | Move the folder named in the message somewhere else and start again; signers must enrol again |
 | Log in first: the signature data is locked | Log in again |
+| The vault file is damaged or was changed; it cannot be opened | Move the vault's folder (in `.sigverify/companies/`) somewhere else, then use Restore a vault from a backup on the first screen with your latest backup |
+| This vault is open in another window of the app | Close the other window, then log in |
+| Model weights not found | Install the app again (the installer holds the weights); from source, run `python bundle/fetch_weights.py` |
 | The password must have at least 15 characters | Use a longer password, or press Generate password |
 | This password is too common | Choose another one, or press Generate password |
 | Windows: `MSVCP140.dll` or `VCRUNTIME140.dll` was not found | Install the Microsoft Visual C++ Redistributable (x64) from Microsoft's website, then start the app again |

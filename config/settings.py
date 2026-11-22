@@ -371,7 +371,7 @@ NFI_FUSION_WRITERS = ("nfi_002", "nfi_008", "nfi_016", "nfi_018", "nfi_024", "nf
 # session later and from 8.42% to 6.04% at the same sitting.
 VERIFICATION_SIGNINGS = 1
 
-# Step-up verification, off until the GUI can show "Sign again" (AGENTS.md). One signing of each
+# Step-up verification (AGENTS.md); the GUI handles "Sign again", the setting stays off. One signing of each
 # kind first: a fused score of at least STEP_UP_ACCEPT is accepted, one below STEP_UP_REJECT is
 # rejected, and anything between asks for one more signing of each kind, whose mean with the first
 # must reach STEP_UP_TWO. Fused decisions only, with VERIFICATION_SIGNINGS left at 1. Calibrated on

@@ -459,6 +459,7 @@ The verification engine provides three explicit operational modes:
 | --- | --- | --- |
 | **`"unimodal"`** | `probe_trajectory` + `reference_temporal`<br>*OR*<br>`probe_image` + `reference_spatial` | Runs single-branch verification (`spatial_only` or `temporal_only`). Flagged as `degraded: True` because it relies on one modality. |
 | **`"temporal-multi"`** | `probe_trajectory` + `reference_temporal` + `reference_spatial` | **Single-action digitizer verification.** The user signs once on the tablet. The engine extracts the temporal embedding, auto-renders the spatial stroke image ($1.8\text{ ms}$), extracts the spatial embedding, and evaluates late fusion. Routing: `multimodal`. |
+| **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
 
 **A spatial probe is scored only against references of the same origin.** Measured
 on 20 paired SigComp2011 writers: rendered probe against rendered references 22.9%
@@ -478,7 +479,6 @@ spatial call with mismatched references raises. **The database therefore stores
 tag differs from the running one must be re-enrolled). A user who
 must be verified both by tablet and by scan enrolls through both paths and holds
 two spatial reference sets.
-| **`"multimodal"`** | `probe_image` + `probe_trajectory` + `reference_spatial` + `reference_temporal` | **Dual physical verification.** Paper scan/photo + tablet trajectory evaluated together under late fusion. Routing: `multimodal`. |
 
 **Several signings at verification (a toggle for the GUI).** `config.settings.VERIFICATION_SIGNINGS`
 (default 1) is how many signings of each kind the app asks for at verification; the GUI may
@@ -491,7 +491,7 @@ accept on the better of two signings: a forger would get two tries. Measured 202
 K = 5, 140 BiosecureDS2 writers enrolled at one sitting: two signings took EER from 16.06%
 to 13.70% a session later and from 8.42% to 6.04% at the same sitting.
 
-**Step-up verification (a contract for the GUI team; off until the GUI handles it).** With
+**Step-up verification (a contract for the GUI team; built in the GUI, kept off by the in-house result in `config/settings.py`).** With
 `config.settings.VERIFICATION_STEP_UP = True`, a verification that fuses paper and tablet
 (routing `multimodal`) can return a third decision, `SIGN_AGAIN` (`"Sign again"`, import it
 from `src.verification`), besides `"Genuine"` and `"Forged"`. The flow:
@@ -510,9 +510,9 @@ Rules:
 - On `"Sign again"`, show a neutral request to sign once more. Never show the score or say how
   close the signing was: a forger would learn how near they came.
 - Log one verification event per visit, with its final verdict; `"Sign again"` is not a verdict.
-  Today `src/gui/verification_page.py` (around line 150) styles every decision other than `"Genuine"`
-  as a rejection and logs it, and `src/gui/dashboard_page.py` counts `"Genuine"` events: change both
-  before turning the setting on.
+  `src/gui/verification_page.py` shows the neutral request, logs nothing for it and sends both
+  signings on the second round; `storage.append_verification_log` also drops a `"Sign again"`.
+  `tests/test_whole_system.py` checks it on the shipped weights.
 - A signing that fails its input gate is a capture retry, as in the rule above, not a step. If a
   kind is dropped, the other kind decides alone at its own threshold, with no step-up.
 - Keep `VERIFICATION_SIGNINGS = 1` while step-up is on. It applies to fused decisions only,
@@ -618,11 +618,11 @@ Cite **exactly** these five standards and no others:
 
 | Standard                 | Application                                                 |
 | ------------------------ | ----------------------------------------------------------- |
-| **IEEE 730**             | Configuration control, deviation log, audit log             |
+| **IEEE 730-2014**        | Configuration control, deviation log, audit log, whole-system test |
 | **ISO/IEC 23053:2022**   | Writer-independent data splits, documented training config  |
 | **ISO/IEC 24745:2022**   | Only derived embeddings persisted, never raw biometric data; time-limited retention |
 | **ISO/IEC 9075-1:2023**  | Structured relational SQLite schema                         |
-| **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of stored embedding payloads         |
+| **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of the whole vault file              |
 
 Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 
@@ -722,8 +722,8 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   `enrolled_by` is recorded and never used to block. Every enrolment, re-enrolment and
   deletion, and every refused attempt, goes to the audit log with the member.
 - **Data after capture.** The database stores embeddings only, never an image, an
-  image path or a trajectory. Templates have no
-  expiry date: a signer's templates are removed only when the owner deletes the signer.
+  image path or a trajectory. A signer's templates are removed when the owner deletes
+  the signer, or when their set expires (see "Reference sets expire" above).
 - **Replay check.** Each verification row stores the SHA-256 of each probe embedding
   (never the embedding). A probe equal to one of the signer's stored references (an
   enrolment scan given again), a probe whose hash was already accepted for the same
