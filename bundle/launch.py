@@ -3,6 +3,8 @@
     SigVerify            starts the app
     SigVerify --debug    also shows every error (a console window on Windows) and saves it to
                          debug.log in the data folder, so a failed start can be seen and sent
+    SigVerify --self-test KIT    runs the whole-system test on a test kit (tools/make_test_kit.py)
+                                 and writes SigVerify-test-results.txt into it (issue #43)
 
 The Windows package has no console, so without --debug an error has nowhere to go. The CI
 start check runs the shipped app with --debug and reads debug.log.
@@ -35,7 +37,14 @@ def _start_app():
     main()
 
 
-def run(argv, start=_start_app):
+def _self_test(kit_args):
+    from src.self_test import main
+    return main(kit_args)
+
+
+def run(argv, start=_start_app, self_test=_self_test):
+    if "--self-test" in argv:
+        sys.exit(self_test(argv[argv.index("--self-test") + 1:]))
     if "--debug" not in argv:
         start()
         return

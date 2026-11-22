@@ -135,6 +135,17 @@ def test_the_installer_ships_the_two_shipped_weights_and_no_ensemble():
     assert set(re.findall(r'"([\w.-]+\.pth)"', spec)) == {"spatial_cnn.pth", "temporal_lstm.pth"}
 
 
+@pytest.mark.parametrize("code_from_test", [0, 1])
+def test_self_test_passes_the_kit_and_exits_with_its_result_without_starting_the_app(tmp_path, code_from_test):
+    code = ("import launch\n"
+            "def start(): print('APP STARTED')\n"
+            f"def self_test(args): print('KIT', args); return {code_from_test}\n"
+            "launch.run(['SigVerify', '--self-test', 'C:/kit'], start, self_test)\n")
+    result = _run_launch(tmp_path, code)
+    assert result.returncode == code_from_test
+    assert "KIT ['C:/kit']" in result.stdout and "APP STARTED" not in result.stdout
+
+
 # ------------------------------------------------------------------ checks on the built package
 
 from bundle import check_bundle  # noqa: E402

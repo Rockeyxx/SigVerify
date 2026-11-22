@@ -133,6 +133,7 @@ Download the file for your system from the [Releases page](https://github.com/Ro
 - Tablet on Windows: install the XPPen driver before enrolling anyone, and keep it. Linux needs no driver.
 - Your data stays in the `.sigverify` folder in your home folder; updating or uninstalling the app does not touch it.
 
+- To test an installed copy, build the test kit with `python tools/make_test_kit.py`, unzip it on that computer and run `run_test.bat` (Windows) or `run_test.sh` (Linux). The app runs its whole-system test with a made-up signer and writes `SigVerify-test-results.txt`.
 The [user guide](USER_GUIDE.md) covers first start, enrolment, verification, backup, error messages and uninstalling.
 
 ### Run from source
