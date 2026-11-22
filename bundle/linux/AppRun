@@ -1,0 +1,4 @@
+#!/bin/sh
+# AppImage entry point: start the packaged app with the user's arguments (for example --debug).
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/SigVerify/SigVerify" "$@"
