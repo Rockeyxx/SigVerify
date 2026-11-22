@@ -139,6 +139,7 @@ class VerificationPanel(QWidget):
 
         self.probeFileLabel = QLabel("No file selected")
         self.probeFileLabel.setProperty("role", "muted")
+        self.probeFileLabel.setWordWrap(True)
         layout.addWidget(self.probeFileLabel)
 
         self.signPenButton = QPushButton("Sign on Tablet")
@@ -147,6 +148,7 @@ class VerificationPanel(QWidget):
 
         self.penStatusLabel = QLabel("No pen signature yet")
         self.penStatusLabel.setProperty("role", "muted")
+        self.penStatusLabel.setWordWrap(True)
         layout.addWidget(self.penStatusLabel)
 
         self.verifyButton = QPushButton("Verify")
@@ -169,11 +171,13 @@ class VerificationPanel(QWidget):
 
         self.scoreCaption = QLabel("")
         self.scoreCaption.setProperty("role", "muted")
+        self.scoreCaption.setWordWrap(True)
         self.scoreCaption.setVisible(False)
         layout.addWidget(self.scoreCaption)
 
         self.modalityStateLabel = QLabel("")
         self.modalityStateLabel.setProperty("role", "muted")
+        self.modalityStateLabel.setWordWrap(True)
         layout.addWidget(self.modalityStateLabel)
 
         self.degradedModeIndicator = QLabel("")
@@ -236,8 +240,7 @@ class VerificationPanel(QWidget):
         self.selected_image_path = None
         self.probeFileLabel.setText("No file selected")
         self.confirmButton.setVisible(False)
-        self.scoreBar.setVisible(False)
-        self.scoreCaption.setVisible(False)
+        self._show_idle_message("Awaiting verification...")   # the last result was another visit's
         self.selectProbeButton.setText("Select Probe Image")
         self.signPenButton.setText("Sign on Tablet")
 

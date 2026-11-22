@@ -510,8 +510,8 @@ Rules:
 - On `"Sign again"`, show a neutral request to sign once more. Never show the score or say how
   close the signing was: a forger would learn how near they came.
 - Log one verification event per visit, with its final verdict; `"Sign again"` is not a verdict.
-  Today `src/gui/verification.py` (around line 150) styles every decision other than `"Genuine"`
-  as a rejection and logs it, and `src/gui/dashboard.py` counts `"Genuine"` events: change both
+  Today `src/gui/verification_page.py` (around line 150) styles every decision other than `"Genuine"`
+  as a rejection and logs it, and `src/gui/dashboard_page.py` counts `"Genuine"` events: change both
   before turning the setting on.
 - A signing that fails its input gate is a capture retry, as in the rule above, not a step. If a
   kind is dropped, the other kind decides alone at its own threshold, with no step-up.

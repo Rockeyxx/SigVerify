@@ -28,6 +28,7 @@ class ClientsPage(QWidget):
 
         subtitle = QLabel("Double-click a row to open that signer in Enrollment")
         subtitle.setProperty("role", "muted")
+        subtitle.setWordWrap(True)   # it set the page's minimum width
         layout.addWidget(subtitle)
 
         self.table = QTableWidget()

@@ -1,5 +1,5 @@
 """
-dashboard.py — Bento-style Home + Stats screen (own row and company row)
+dashboard_page.py — Bento-style Home + Stats screen (own row and company row)
 """
 
 import math
@@ -187,10 +187,12 @@ class DashboardScreen(QWidget):
 
         self.welcomeLabel = QLabel("Welcome back")
         self.welcomeLabel.setProperty("role", "hero-title")
+        self.welcomeLabel.setWordWrap(True)   # a long name must not widen the window
         layout.addWidget(self.welcomeLabel)
 
         subtitle = QLabel("Here's a snapshot of your own and the vault's verification activity")
         subtitle.setProperty("role", "muted")
+        subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         layout.addSpacing(20)

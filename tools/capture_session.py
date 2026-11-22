@@ -28,6 +28,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+
 from config.settings import (CAMPAIGN_BREAK_AFTER, CAMPAIGN_FORGERY_ATTEMPTS,  # noqa: E402
                              CAMPAIGN_GENUINE_PER_MODALITY, CAMPAIGN_PRACTICE_SIGNINGS,
                              INHOUSE_DIR, SHEET_DPI, SHEET_GRID, SHEET_MARGIN)
@@ -40,6 +41,26 @@ from PyQt5.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, 
 from src.capture.ink import ink_box, ink_crop  # noqa: E402,F401  (ink_box: tests)
 from src.capture.pen_input import PEN_PLATFORM, choose_pen_input  # noqa: E402
 from src.capture.tablet import SignatureCaptureWidget  # noqa: E402
+
+def imread(path):
+    """cv2.imread that also reads a path with non-ASCII characters (a Windows Desktop folder
+    named in Arabic, for example): cv2.imread returns None there without an error. The file
+    is read as raw uint8 bytes and decoded. None when it is missing or not an image."""
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+
+
+def imwrite(path, image):
+    """cv2.imwrite for any path (see imread): encode in memory, then write the bytes.
+    The format follows the file extension, as with cv2.imwrite."""
+    ok, encoded = cv2.imencode(Path(path).suffix or ".png", image)
+    if ok:
+        encoded.tofile(str(path))
+    return bool(ok)
+
 
 PARTICIPANT = re.compile(r"^P\d{2,3}$")
 RAW_FIELDS = ["t_ms", "kind", "x", "y", "pressure", "xtilt", "ytilt", "inside"]
@@ -285,10 +306,10 @@ def save_ink(path, root):
     """Write ink_path(path) from the raw box. Returns False, and leaves no ink file, when no
     signature is found."""
     _check_inside(root, ink_path(path)).unlink(missing_ok=True)
-    crop = ink_crop(cv2.imread(str(path)))
+    crop = ink_crop(imread(str(path)))
     if crop is None:
         return False
-    cv2.imwrite(str(ink_path(path)), crop)
+    imwrite(str(ink_path(path)), crop)
     return True
 
 
@@ -323,20 +344,33 @@ def pdf_pages(path, dpi=SHEET_DPI):
                            check=True, capture_output=True)
         except subprocess.CalledProcessError as exc:
             raise ValueError(f"cannot read {Path(path).name}") from exc
-        return [cv2.imread(str(p)) for p in sorted(Path(folder).glob("page*.png"))]
+        return [imread(str(p)) for p in sorted(Path(folder).glob("page*.png"))]
+
+
+def at_sheet_dpi(page, dpi=SHEET_DPI):
+    """A page scanned finer than the sheet's DPI, shrunk to it (an A4 page's short side is
+    8.27 in). A 1200 DPI scan has 16x the pixels: cutting and cropping it took most of a
+    minute and froze the window, for detail the model resizes away anyway."""
+    short = int(8.27 * dpi)
+    h, w = page.shape[:2]
+    if min(h, w) <= short:
+        return page
+    scale = short / min(h, w)
+    return cv2.resize(page, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
 
 
 def read_sheets(paths):
-    """The scanned pages of these files, as images: an image is one page, a PDF is all of its."""
+    """The scanned pages of these files, as images: an image is one page, a PDF is all of its.
+    Every page comes back at the sheet's DPI or coarser."""
     pages = []
     for path in paths:
         if Path(path).suffix.lower() == ".pdf":
             pages += pdf_pages(path)
-        elif (image := cv2.imread(str(path))) is not None:
+        elif (image := imread(str(path))) is not None:
             pages.append(image)
         else:
             raise ValueError(f"cannot read {Path(path).name}")
-    return pages
+    return [at_sheet_dpi(page) for page in pages]
 
 
 def signing_order(pages):
@@ -362,7 +396,7 @@ def make_sheet(path, dpi=SHEET_DPI):
         page = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         page.save(str(path), save_all=True, append_images=[page.copy()], resolution=dpi)
     else:
-        cv2.imwrite(str(path), img)
+        imwrite(str(path), img)
 
 
 class CaptureSession(QWidget):
@@ -598,7 +632,7 @@ class CaptureSession(QWidget):
         no_ink = []
         for crop, (path, role, index, attempt) in missing:
             _check_inside(self.root, path).parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(path), crop)
+            imwrite(str(path), crop)
             self._manifest(path, "paper", role, index=index, attempt=attempt)
             if not save_ink(path, self.root):
                 no_ink.append(path.stem)
@@ -626,11 +660,11 @@ class CaptureSession(QWidget):
         """Put the image of one signature in place of an imported box, under the same name.
         The one deliberate overwrite in this tool: the operator chose it."""
         path = Path(path)
-        image = cv2.imread(str(image_path))
+        image = imread(str(image_path))
         if image is None:
             raise ValueError(f"cannot read {image_path}")
         _, role, index, attempt = next(t for t in self.paper_saved if t[0] == path)
-        cv2.imwrite(str(_check_inside(self.root, path)), image)
+        imwrite(str(_check_inside(self.root, path)), image)
         remove_manifest_rows(self.root, [path.relative_to(self.root)])
         self._manifest(path, "paper", role, index=index, attempt=attempt)
         found = save_ink(path, self.root)
@@ -787,11 +821,11 @@ class CaptureSession(QWidget):
                    else f"{index:02d}") for _, role, index, attempt in self.paper_saved]
         tiles = []
         for p, *_ in self.paper_saved:
-            img = cv2.imread(str(ink_path(p) if ink_path(p).exists() else p))
+            img = imread(str(ink_path(p) if ink_path(p).exists() else p))
             tiles.append(img if img is not None else np.full((120, 240, 3), 255, np.uint8))
         self._preview(tiles, labels, highlight=i)
-        raw = cv2.imread(str(path))
-        ink = cv2.imread(str(ink_path(path))) if ink_path(path).exists() else None
+        raw = imread(str(path))
+        ink = imread(str(ink_path(path))) if ink_path(path).exists() else None
         big = np.hstack([_tile(raw, 420, 260, "scan"),
                          _tile(ink, 420, 260, "ink crop (model sees)" if ink is not None
                                else "no signature found")])

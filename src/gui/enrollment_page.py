@@ -131,6 +131,7 @@ class EnrollmentPanel(QWidget):
         section2 = QLabel(f"IMAGE REFERENCES ({REQUIRED_IMAGE_REFERENCES} photos, "
                           "or none for a tablet-only signer)")
         section2.setProperty("role", "section")
+        section2.setWordWrap(True)   # it set the page's minimum width
         layout.addWidget(section2)
 
         self.selectImageButton = QPushButton("Select Reference Image")
@@ -139,6 +140,7 @@ class EnrollmentPanel(QWidget):
 
         self.imageFileLabel = QLabel("No file selected")
         self.imageFileLabel.setProperty("role", "muted")
+        self.imageFileLabel.setWordWrap(True)
         layout.addWidget(self.imageFileLabel)
 
         self.addImageButton = QPushButton("Add Image Reference")
@@ -164,6 +166,7 @@ class EnrollmentPanel(QWidget):
 
         section3 = QLabel(f"PEN REFERENCES ({REQUIRED_DYNAMIC_REFERENCES} signings on the tablet)")
         section3.setProperty("role", "section")
+        section3.setWordWrap(True)
         layout.addWidget(section3)
 
         self.captureDynamicButton = QPushButton("Capture Pen Signatures")
@@ -172,6 +175,7 @@ class EnrollmentPanel(QWidget):
 
         self.dynamicCountLabel = QLabel("")
         self.dynamicCountLabel.setProperty("role", "muted")
+        self.dynamicCountLabel.setWordWrap(True)
         layout.addWidget(self.dynamicCountLabel)
 
         section4 = QLabel("ACTIONS")
@@ -469,6 +473,7 @@ class EnrollmentPanel(QWidget):
             self.dynamic_references = []
             self.pen_signatures = []
             self.loaded_client = None
+            self.clientStatusLabel.setText("")   # it still described the deleted signer
             self._apply_permissions()
             self._refresh_image_list()
             self._update_counts()

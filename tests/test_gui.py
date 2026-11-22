@@ -16,7 +16,7 @@ QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
 
 from config.settings import NUM_ENROLLMENT_REFERENCES  # noqa: E402
 from src.database.db_manager import DatabaseManager, PASSPHRASE_ENV_VAR  # noqa: E402
-from src.gui import enrollment, interfaces, storage, verification, workers  # noqa: E402
+from src.gui import enrollment_page, interfaces, storage, verification_page, workers  # noqa: E402
 from tests.vault_file import on_disk  # noqa: E402
 
 
@@ -200,9 +200,9 @@ def test_confirmed_fused_visit_embeds_paper_and_pen(service, temp_images):
 
 def test_visit_signings_pairs_first_signing_first():
     t1, t2 = _trajectory(1), _trajectory(2)
-    assert verification.visit_signings(["a", "b"], [t1, t2]) == [("a", t1), ("b", t2)]
-    assert verification.visit_signings("a", None) == [("a", None)]
-    assert verification.visit_signings(None, t1) == [(None, t1)]
+    assert verification_page.visit_signings(["a", "b"], [t1, t2]) == [("a", t1), ("b", t2)]
+    assert verification_page.visit_signings("a", None) == [("a", None)]
+    assert verification_page.visit_signings(None, t1) == [(None, t1)]
 
 
 # ------------------------------------------------------------------ messages and log
@@ -229,8 +229,8 @@ def test_pen_gate_message_is_not_the_photo_advice():
 
 
 def test_enrolment_count_comes_from_settings():
-    assert enrollment.REQUIRED_IMAGE_REFERENCES == NUM_ENROLLMENT_REFERENCES
-    assert enrollment.REQUIRED_DYNAMIC_REFERENCES == NUM_ENROLLMENT_REFERENCES
+    assert enrollment_page.REQUIRED_IMAGE_REFERENCES == NUM_ENROLLMENT_REFERENCES
+    assert enrollment_page.REQUIRED_DYNAMIC_REFERENCES == NUM_ENROLLMENT_REFERENCES
 
 
 # ------------------------------------------------------------------ panels
@@ -284,13 +284,13 @@ class _Signal:
 @pytest.fixture
 def fake_workers(monkeypatch):
     FakeWorker.made = []
-    monkeypatch.setattr(verification, "VerifyWorker", FakeWorker)
-    monkeypatch.setattr(enrollment, "EnrollWorker", FakeWorker)
+    monkeypatch.setattr(verification_page, "VerifyWorker", FakeWorker)
+    monkeypatch.setattr(enrollment_page, "EnrollWorker", FakeWorker)
     return FakeWorker.made
 
 
 def _panel(employee="alice"):
-    panel = verification.VerificationPanel()
+    panel = verification_page.VerificationPanel()
     panel.set_current_employee(employee)
     return panel
 
@@ -317,6 +317,23 @@ def test_panel_forgets_the_probe_image_when_the_client_changes(app, db):
     panel.clientIdInput.setText("b")
     assert panel.selected_image_path is None
     assert panel.probeFileLabel.text() == "No file selected"
+
+
+@pytest.mark.parametrize("change", ["modality", "client"])
+def test_panel_clears_the_last_result_when_the_modality_or_client_changes(app, db, fake_workers, change):
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    panel = _panel()
+    panel.clientIdInput.setText("c")
+    panel._pending_client_id = "c"
+    panel._pending_images, panel._pending_trajectories = "probe.png", _trajectory()
+    panel._on_verify_success(dict(RESULT))
+    assert panel.resultDisplay.text() == RESULT["decision"]
+    if change == "modality":
+        panel.modalitySelector.setCurrentIndex(1)
+    else:
+        panel.clientIdInput.setText("d")
+    assert panel.resultDisplay.text() == "Awaiting verification..."
+    assert panel.scoreBar.isHidden() and panel.scoreCaption.isHidden()
 
 
 def test_panel_pen_only_client_needs_pen_mode(app, db, fake_workers):
@@ -536,7 +553,7 @@ def test_enrolment_tablet_button_and_tablet_only_save(app, db, fake_workers, mon
                 "device_model": "XPPen", "qt_platform": "windows"}
     import src.capture.collect as collect
     monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: captured)
-    panel = enrollment.EnrollmentPanel()
+    panel = enrollment_page.EnrollmentPanel()
     panel.set_current_employee("alice")
     assert panel.captureDynamicButton.isEnabled()
     panel.clientIdInput.setText("c")
@@ -556,7 +573,7 @@ def test_enrolment_tablet_button_and_tablet_only_save(app, db, fake_workers, mon
 def test_enrolment_closed_tablet_window_changes_nothing(app, db, monkeypatch):
     import src.capture.collect as collect
     monkeypatch.setattr(collect, "collect_signatures", lambda count, parent=None: None)
-    panel = enrollment.EnrollmentPanel()
+    panel = enrollment_page.EnrollmentPanel()
     panel.pen_signatures = ["kept"]
     panel.capture_pen_signatures()
     assert panel.pen_signatures == ["kept"]
@@ -567,7 +584,7 @@ def test_enrolment_delete_refused_shows_why_and_keeps_the_form(app, alice_bob, m
     assert storage.authenticate_employee("bob", "bob-password-1")[0]
     storage.save_client_enrollment("c", [], "bob", spatial_embeddings=[_b64(512)])
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a: QtWidgets.QMessageBox.Yes)
-    panel = enrollment.EnrollmentPanel()
+    panel = enrollment_page.EnrollmentPanel()
     panel.set_current_employee("bob")
     panel.clientIdInput.setText("c")
     panel.dynamic_references = ["kept"]
@@ -576,8 +593,19 @@ def test_enrolment_delete_refused_shows_why_and_keeps_the_form(app, alice_bob, m
     assert panel.dynamic_references == ["kept"] and storage.client_exists("c")
 
 
+def test_enrolment_delete_clears_the_deleted_signers_status(app, db, monkeypatch):
+    storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512)])
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a: QtWidgets.QMessageBox.Yes)
+    panel = _enrol_panel("alice")
+    _load(panel, "c")
+    assert panel.clientStatusLabel.text().startswith("Loaded existing signer 'c'")
+    panel.delete_client()
+    assert not storage.client_exists("c")
+    assert panel.clientStatusLabel.text() == ""
+
+
 def _enrol_panel(username):
-    panel = enrollment.EnrollmentPanel()
+    panel = enrollment_page.EnrollmentPanel()
     panel.set_current_employee(username, is_admin=(username == "alice"))
     return panel
 
@@ -795,7 +823,7 @@ def test_enrolment_storage_refusal_is_shown_not_a_success(app, alice_bob, monkey
 from PyQt5.QtCore import QTimer  # noqa: E402
 from src.gui import app as app_module, employees_page, profile_page, sidebar  # noqa: E402
 from src.gui.clients_page import ClientsPage  # noqa: E402
-from src.gui.dashboard import DashboardScreen  # noqa: E402
+from src.gui.dashboard_page import DashboardScreen  # noqa: E402
 
 
 @pytest.fixture
@@ -848,7 +876,7 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     assert screen.messageLabel.text() == "⚠ Please fill in all fields" and storage.is_first_run()
     _register(screen, "Acme", "Alice A", "alice", "alice-password-1")
     assert window.current_employee == {"full_name": "Alice A", "username": "alice", "is_admin": True}
-    assert window.content_stack.currentWidget() is window.dashboard_screen
+    assert window.content_stack.current_page() is window.dashboard_screen
     assert storage.list_companies() == ["Acme"] and storage.current_company() == "Acme"
     assert window.sidebar.companyLabel.text() == "Acme"
 
@@ -1056,7 +1084,7 @@ def test_backup_then_restore_returns_to_login(db, make_window, tmp_path, monkeyp
     _login(window, "alice", "alice-password-1")
     window.sidebar.go_employees.emit()
     page = window.employees_page
-    assert window.content_stack.currentWidget() is page
+    assert window.content_stack.current_page() is page
 
     monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
     page.backupButton.click()
@@ -1066,7 +1094,7 @@ def test_backup_then_restore_returns_to_login(db, make_window, tmp_path, monkeyp
 
     _answer_restore(monkeypatch, backup, "alice", "wrong-password-1")
     page.restoreButton.click()
-    assert page.statusLabel.text().startswith("⚠ ") and window.content_stack.currentWidget() is page
+    assert page.statusLabel.text().startswith("⚠ ") and window.content_stack.current_page() is page
 
     _answer_restore(monkeypatch, backup, "alice", "alice-password-1")
     page.restoreButton.click()
@@ -1202,3 +1230,93 @@ def test_employees_page_shows_last_backup_and_last_delete(app, alice_bob, tmp_pa
     assert "Last signer deletion: client_x at " in page.lastDeleteLabel.text()
     assert "by alice" in page.lastDeleteLabel.text()
 
+
+
+# ------------------------------------------------------------------ small screens (issue #23, item 25)
+from PyQt5.QtCore import QPoint, QRect  # noqa: E402
+
+SCREENS = [(1024, 700), (1366, 768)]
+PAGES = ["dashboard", "enrolment", "verification", "clients", "employees", "profile"]
+INPUTS = (QtWidgets.QAbstractButton, QtWidgets.QLineEdit, QtWidgets.QComboBox,
+          QtWidgets.QAbstractItemView)
+LONG_MESSAGE = "This message is far longer than any window is wide. " * 8
+
+
+@pytest.fixture
+def window(alice_bob, make_window):
+    """Alice (admin) is logged in; the signer 'c' has paper and pen references."""
+    storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
+    win = make_window()
+    win._handle_login_success(storage.current_employee())
+    win.show()
+    yield win
+    win.close()
+
+
+def _open_page(win, name):
+    if name == "enrolment":
+        win._open_client_in_enrollment("c")
+        return win.enrollment_panel
+    if name == "clients":
+        win._open_clients_page()
+        return win.clients_page
+    if name == "employees":
+        win._open_employees_page()
+        return win.employees_page
+    page = {"dashboard": win.dashboard_screen, "verification": win.verification_panel,
+            "profile": win.profile_page}[name]
+    win.content_stack.show_page(page)
+    return page
+
+
+def _reachable(app, area, widget):
+    """The widget is in view, or scrolling its page's area brings all of it into view."""
+    viewport = area.viewport()
+
+    def in_view():
+        return viewport.rect().contains(QRect(widget.mapTo(viewport, QPoint(0, 0)), widget.size()))
+    if in_view():
+        return True
+    area.ensureWidgetVisible(widget, 0, 0)
+    app.processEvents()
+    return in_view()
+
+
+@pytest.mark.parametrize("size", SCREENS)
+@pytest.mark.parametrize("name", PAGES)
+def test_every_page_fits_a_small_screen_and_every_control_is_reachable(app, window, name, size):
+    width, height = size
+    window.resize(width, height)
+    page = _open_page(window, name)
+    app.processEvents()
+    assert window.width() <= width and window.height() <= height     # the page did not force it bigger
+    area = window.content_stack.area_of(page)
+    controls = [w for w in page.findChildren(INPUTS) if w.isVisible() and w.isEnabled()]
+    assert controls or name == "dashboard"                          # the dashboard has none
+    unreachable =[f"{type(w).__name__} {getattr(w, 'text', lambda: '')()!r}"
+                   for w in controls if not _reachable(app, area, w)]
+    assert unreachable == []
+
+
+@pytest.mark.parametrize("name, label", [("enrolment", "statusLabel"), ("verification", "resultDisplay"),
+                                         ("profile", "statusLabel"), ("employees", "statusLabel")])
+def test_a_long_message_wraps_instead_of_widening_the_page(app, window, name, label):
+    window.resize(*SCREENS[0])
+    page = _open_page(window, name)
+    getattr(page, label).setText(LONG_MESSAGE)
+    app.processEvents()
+    area = window.content_stack.area_of(page)
+    assert window.width() <= SCREENS[0][0] and area.horizontalScrollBar().maximum() == 0
+
+
+def test_bob_loading_a_signer_he_cannot_change_keeps_the_page_inside_the_window(app, window):
+    storage.logout()
+    ok, bob, _ = storage.authenticate_employee("bob", "bob-password-1")
+    assert ok
+    window._handle_login_success(bob)
+    window.resize(*SCREENS[0])
+    page = _open_page(window, "enrolment")
+    app.processEvents()
+    assert "Only the owner can replace these" in page.clientStatusLabel.text()
+    area = window.content_stack.area_of(page)
+    assert window.width() <= SCREENS[0][0] and area.horizontalScrollBar().maximum() == 0
