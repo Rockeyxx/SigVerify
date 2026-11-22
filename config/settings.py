@@ -144,6 +144,9 @@ RENDER_PEN_UP_PRESSURE = 1e-4           # Pressure at or below this is not touch
 RENDER_PEN_UP_DT_RATIO = 3.0            # A gap this many times the median period is a lift
 
 # ─── Temporal ensemble (SignatureService use_temporal_ensemble=True) ──
+# Not used: the app runs the single shipped temporal weight, and the ensemble is never
+# packaged (owner's decision, 22 November 2026; tests/test_packaging.py checks the
+# installer). New releases need not carry the six seed weights. Kept for research only.
 # Averaging these six checkpoints' embeddings measured 4.82% EER against 6.92%
 # for a single member, on 120 unseen DeepSignDB writers under one shared K=5
 # draw. Averaging their per-model SCORES instead reaches 4.53%, but that cannot

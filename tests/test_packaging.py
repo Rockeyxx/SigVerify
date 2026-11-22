@@ -128,6 +128,13 @@ def test_debug_flag_is_removed_before_qt_sees_it(tmp_path):
     assert "ARGV ['SigVerify', '-x']" in (tmp_path / "debug.log").read_text()
 
 
+def test_the_installer_ships_the_two_shipped_weights_and_no_ensemble():
+    """The six-seed temporal ensemble is not used (owner, 22 November 2026): never packaged."""
+    import re
+    spec = (REPO / "bundle" / "sigverify.spec").read_text()
+    assert set(re.findall(r'"([\w.-]+\.pth)"', spec)) == {"spatial_cnn.pth", "temporal_lstm.pth"}
+
+
 # ------------------------------------------------------------------ checks on the built package
 
 from bundle import check_bundle  # noqa: E402
