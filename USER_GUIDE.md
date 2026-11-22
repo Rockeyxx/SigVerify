@@ -77,6 +77,10 @@ refuses a pen signature from a different tablet or system and says so.
 2. Add 5 photos of the person's signature (blue pen on white paper, phone held
    steady and close), 5 signatures on the tablet, or both.
 3. Only the owner can replace a set the signer already has.
+4. References are kept for 2 years. The **Signers** page shows when each signer's
+   first set expires. At the first login after that date the app deletes the expired
+   set (and the signer, if no set is left) and records it in the log. Enrol the signer
+   again to keep verifying them.
 
 ## Verify a signature
 
@@ -112,6 +116,7 @@ uninstalling the app does not touch this folder.
 | The pen signature could not be used (too short or not recorded properly) | Sign again on the tablet, inside the box, in one go |
 | The pen references were signed on another tablet or system | Sign on the same tablet model and system as at enrolment, or ask the owner to re-enrol the pen signatures |
 | The references were made by another model version | Ask the owner to re-enrol that signer (a new app version changed the model) |
+| The references expired on a date | The 2-year limit has passed. Enrol the signer again |
 | Refused: this signing was already used (replay) | The same signing was submitted twice. Sign again |
 | Already has references. Only the owner can replace them | Ask the owner to re-enrol the signer |
 | This database was made by an older version of the app | Move the folder named in the message somewhere else and start again; signers must enrol again |

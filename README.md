@@ -301,7 +301,7 @@ Published SVC2004 and DeepSignDB results use a threshold per writer or align the
 | ------------------------ | ------------------------------------------------------------------------- | :-----------: |
 | **ISO/IEC 23053:2022**   | Writer-independent splits, a split record shipped with every weight, reproducible training | **Met** |
 | **IEEE 730-2014**        | Configuration control, deviation log, audit log of every verification and account change; no whole-system test yet (#43) | **Partial** |
-| **ISO/IEC 24745:2022**   | Only embeddings stored, encrypted; re-enrolment when the model changes; no time-limited retention yet (#59) | **Partial** |
+| **ISO/IEC 24745:2022**   | Only embeddings stored, encrypted; re-enrolment when the model changes; each reference set deleted 2 years after enrolment | **Met** |
 | **ISO/IEC 9075-1:2023**  | Relational SQLite schema: members, key slots, signers, enrolments, audit log | **Met** |
 | **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of the whole vault file, keys wrapped per member (scrypt) | **Met** |
 

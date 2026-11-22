@@ -69,6 +69,7 @@ from config.settings import (
     MIN_PASSWORD_LENGTH,
     REPLAY_WINDOW_DAYS,
     SPATIAL_EMBEDDING_DIM,
+    TEMPLATE_RETENTION_DAYS,
     TEMPORAL_EMBEDDING_DIM,
 )
 
@@ -138,6 +139,7 @@ EVENT_PASSWORD_RESET = "password reset"
 EVENT_EMPLOYEE_REMOVED = "employee removed"
 EVENT_PROFILE_CHANGED = "profile changed"
 EVENT_BACKUP = "backup"
+EVENT_EXPIRED = "references expired"
 
 
 # The audit columns that say what happened: two rows equal in all of them are the same
@@ -164,6 +166,11 @@ class VaultInUseError(RuntimeError):
 def _now_local() -> str:
     """Local ISO timestamp without timezone, the format the GUI has always stored."""
     return datetime.now().isoformat(timespec="seconds")
+
+
+def expiry_of(enrolled_at: str) -> datetime:
+    """ISO/IEC 24745: when a set enrolled at `enrolled_at` is deleted."""
+    return datetime.fromisoformat(enrolled_at) + timedelta(days=TEMPLATE_RETENTION_DAYS)
 
 
 def probe_fingerprint(embedding) -> str:
@@ -1032,6 +1039,7 @@ class DatabaseManager:
             "model_version": enrolled[0][2],
             "model_versions": sorted({r[2] for r in rows}),
             "enrolled_at": enrolled[0][3],
+            "expires_at": expiry_of(enrolled[0][3]).isoformat(timespec="seconds"),
             "capture_device": None if device is None else json.loads(device),
         }
 
@@ -1199,6 +1207,36 @@ class DatabaseManager:
                            WHERE user_id = ? AND modality = ? AND spatial_origin IS ? AND source = 'added'
                            ORDER BY id ASC LIMIT ?)""",
                     (user_id, modality, spatial_origin, excess))
+
+    def purge_expired(self, employee_id: int) -> None:
+        """
+        ISO/IEC 24745: delete every reference set past expiry_of() its enrolment date, and a
+        signer left with no set. One audit row per signer, logged under `employee_id` (the
+        login that ran the purge). A set's date is its first enrolled row, as _fetch_set reads
+        it, so added references never renew it. Writes the vault only when something expired.
+        """
+        now = datetime.now()
+        with self._read() as conn:
+            firsts = conn.execute(
+                """SELECT e.user_id, u.display_name, e.modality, e.spatial_origin,
+                          COALESCE(e.enrolled_at, e.created_at)
+                   FROM enrollments e JOIN users u ON u.user_id = e.user_id
+                   WHERE e.id IN (SELECT COALESCE(MIN(CASE WHEN source = 'enroll' THEN id END), MIN(id))
+                                  FROM enrollments GROUP BY user_id, modality, spatial_origin)""").fetchall()
+        expired = [f[:4] for f in firsts if expiry_of(f[4]) <= now]
+        if not expired:
+            return
+        with self._transaction() as conn:
+            changes = {}
+            for user_id, name, modality, origin in expired:
+                conn.execute("DELETE FROM enrollments WHERE user_id = ? AND modality = ? AND spatial_origin IS ?",
+                             (user_id, modality, origin))
+                changes.setdefault((user_id, name), []).append(f"{origin or 'pen'} set")
+            for (user_id, name), sets in changes.items():
+                if conn.execute("SELECT 1 FROM enrollments WHERE user_id = ?", (user_id,)).fetchone() is None:
+                    conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+                    sets.append("signer removed")
+                self._log_event(conn, EVENT_EXPIRED, user_id, name, employee_id, sets)
 
     # ------------------------------------------------------------------ read
     def get_references(self, user_id: str, modality: str, spatial_origin: str = None,

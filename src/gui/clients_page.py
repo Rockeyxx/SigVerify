@@ -32,9 +32,9 @@ class ClientsPage(QWidget):
         layout.addWidget(subtitle)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(
-            ["Signer Name", "Enrolled On", "References", "Last Verification"]
+            ["Signer Name", "Enrolled On", "References", "Last Verification", "References Expire"]
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -62,6 +62,9 @@ class ClientsPage(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(enrolled_at))
             self.table.setItem(row, 2, QTableWidgetItem(f"scan {n_scan} · pen {n_pen}"))
             self.table.setItem(row, 3, QTableWidgetItem(last_verification))
+            sets = [*client["spatial_sets"].values(), client["temporal_set"]]
+            expires = min((s["expires_at"] for s in sets if s), default="—")   # the first set to go
+            self.table.setItem(row, 4, QTableWidgetItem(expires[:10]))
 
     def _on_row_double_clicked(self, row, column):
         name_item = self.table.item(row, 0)

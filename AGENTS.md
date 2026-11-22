@@ -620,7 +620,7 @@ Cite **exactly** these five standards and no others:
 | ------------------------ | ----------------------------------------------------------- |
 | **IEEE 730**             | Configuration control, deviation log, audit log             |
 | **ISO/IEC 23053:2022**   | Writer-independent data splits, documented training config  |
-| **ISO/IEC 24745:2022**   | Only derived embeddings persisted, never raw biometric data |
+| **ISO/IEC 24745:2022**   | Only derived embeddings persisted, never raw biometric data; time-limited retention |
 | **ISO/IEC 9075-1:2023**  | Structured relational SQLite schema                         |
 | **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of stored embedding payloads         |
 
@@ -655,11 +655,21 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
   crash leaves no stale lock.
 - **Never persist raw images or raw coordinate streams** — only derived
   embeddings (ISO/IEC 24745)
+- **Reference sets expire (ISO/IEC 24745).** A set (scan, render or pen) expires
+  `TEMPLATE_RETENTION_DAYS` (`config/settings.py`, 730) after its first enrolled row's
+  `enrolled_at`; the expiry is computed, never stored. Re-enrolling a set renews it;
+  confirmed references added after a verification never do, so no template is older than
+  the limit. Every login runs `DatabaseManager.purge_expired()`: each expired set is deleted,
+  a signer left with no set is deleted too, and one `references expired` audit row per signer
+  names the sets and the member whose login ran it. `check_references()` refuses a set that
+  expired while the app was open. Keep the limit well above 365 days (verification comes
+  about a year after enrolment). Lowering it moves every set's expiry, and the next login
+  deletes every set past the new limit.
 - Audit log: record every verification event — `User ID, Timestamp,
   Modality State, Similarity Score, Decision`, plus `routing`, `degraded`, `reasons`,
   `model_version` and `threshold`, queryable by the owner after login, through the app
   and `tools/view_database.py`. Enrolments, re-enrolments,
-  deletions, every refused re-enrolment, deletion, replay or verification (stale set, other
+  deletions, every expired set purged at login, every refused re-enrolment, deletion, replay or verification (stale set, other
   tablet), every account change (`employee added`, `password reset`,
   `employee removed`, `profile changed`, never the password itself) and every `backup` are
   logged too, each with its member. Only `verify` rows count as verifications.

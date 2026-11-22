@@ -4,12 +4,12 @@ import os
 import shutil
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
 
-from config.settings import MAX_REFERENCES
+from config.settings import MAX_REFERENCES, TEMPLATE_RETENTION_DAYS
 from src.database.db_manager import PASSPHRASE_ENV_VAR, DatabaseManager, probe_fingerprint
 from src.gui import storage
 from tests.test_database import OLD_B, _make_v4
@@ -18,7 +18,8 @@ from tests.vault_file import edit_file, edit_live, on_disk
 CLIENT_KEYS = {"display_name", "enrolled_by", "dynamic_references",
                "spatial_embeddings", "spatial_origin", "enrolled_at", "updated_at",
                "spatial_sets", "temporal_set"}
-SET_KEYS = {"embeddings", "model_version", "enrolled_at", "stale", "capture_device"}
+SET_KEYS = {"embeddings", "model_version", "enrolled_at", "stale", "capture_device",
+            "expires_at", "expired"}
 LOG_KEYS = {"client_key", "client_display_name", "decision", "confidence",
             "modality_state", "employee", "timestamp",
             "routing", "degraded", "reasons", "model_version", "threshold", "event"}
@@ -582,6 +583,65 @@ def test_stale_references_are_not_verified_against(people, monkeypatch):
     assert len(problems) == 2 and all("re-enrol" in p for p in problems)
     assert "scan" in problems[0] and "pen" in problems[1]
     assert storage.check_references("c", None, use_pen=False) == []   # nothing used, nothing to check
+
+
+# ------------------------------------------- template retention (ISO/IEC 24745, #59)
+def backdate(origin_sql, days_ago, source=None):
+    """Move one set's rows `days_ago` days into the past (origin_sql: "spatial_origin = 'scan'"
+    or "modality = 'temporal'"); source narrows to 'enroll' or 'added' rows."""
+    when = (datetime.now() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    extra = f" AND source = '{source}'" if source else ""
+    with edit_live(storage._get_db()) as conn:
+        conn.execute(f"UPDATE enrollments SET enrolled_at = ? WHERE {origin_sql}{extra}", (when,))
+
+
+def test_a_set_expires_retention_days_after_enrolment_and_reenrolment_renews_it(people):
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")
+    found = storage.get_client("c")["spatial_sets"]["scan"]
+    assert (datetime.fromisoformat(found["expires_at"]) - datetime.fromisoformat(found["enrolled_at"])
+            == timedelta(days=TEMPLATE_RETENTION_DAYS)) and not found["expired"]
+    backdate("spatial_origin = 'scan'", TEMPLATE_RETENTION_DAYS + 1)
+    assert storage.get_client("c")["spatial_sets"]["scan"]["expired"]
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(base=50), spatial_origin="scan")
+    assert not storage.get_client("c")["spatial_sets"]["scan"]["expired"]
+
+
+def test_expired_sets_are_purged_at_login_and_each_deletion_is_logged(people):
+    storage.save_client_enrollment("Half", pen(), "alice", spatial_embeddings=spatial(), spatial_origin="scan")
+    storage.save_client_enrollment("Gone", [], "alice", spatial_embeddings=spatial(base=20), spatial_origin="scan")
+    with edit_live(storage._get_db()) as conn:
+        conn.execute("UPDATE enrollments SET enrolled_at = ? WHERE user_id = 'gone' OR spatial_origin = 'scan'",
+                     ((datetime.now() - timedelta(days=TEMPLATE_RETENTION_DAYS + 1)).isoformat(),))
+    assert storage.client_exists("gone")                    # nothing deleted before a login
+    storage.logout()
+    login("bob", PW_B)                                       # any employee's login purges
+    half = storage.get_client("half")
+    assert half["spatial_sets"] == {} and len(half["temporal_set"]["embeddings"]) == 5
+    assert not storage.client_exists("gone")                 # no set left: the signer goes too
+    expired = [(e["client_key"], e["employee"], e["reasons"]) for e in storage.get_audit_log()
+               if e["event"] == "references expired"]
+    assert sorted(expired) == [("gone", "bob", ["scan set", "signer removed"]), ("half", "bob", ["scan set"])]
+    storage.logout()
+    login("alice", PW_A)                                     # a second login finds nothing more
+    assert len([e for e in storage.get_audit_log() if e["event"] == "references expired"]) == 2
+
+
+def test_an_added_reference_does_not_renew_its_set(people):
+    storage.save_client_enrollment("C", [], "alice", spatial_embeddings=spatial(), spatial_origin="scan")
+    assert storage.add_confirmed_reference("c", b64(512, 99), "alice")
+    backdate("spatial_origin = 'scan'", TEMPLATE_RETENTION_DAYS + 1, source="enroll")
+    assert storage.get_client("c")["spatial_sets"]["scan"]["expired"]
+    storage.logout()
+    login("alice", PW_A)
+    assert not storage.client_exists("c")                    # the young added row went with its set
+
+
+def test_verification_against_an_expired_set_is_refused(people):
+    storage.save_client_enrollment("C", pen(), "alice", spatial_embeddings=spatial(), spatial_origin="scan")
+    backdate("modality = 'temporal'", TEMPLATE_RETENTION_DAYS + 1)     # expired while the app was open
+    assert storage.check_references("c", "scan", use_pen=False) == []
+    problems = storage.check_references("c", "scan", use_pen=True)
+    assert len(problems) == 1 and "pen references expired" in problems[0] and "enrol" in problems[0].lower()
 
 
 def test_a_pen_signing_from_another_tablet_or_system_is_refused(people):
