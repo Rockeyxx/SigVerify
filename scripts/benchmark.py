@@ -323,7 +323,7 @@ def main(argv=None):
         print(f"Restricted to {len(test_ids)} explicitly requested held-out writers")
 
     # Ensure evaluation partition matches the checkpoint's split record.
-    record = check_split_against_record(args.weights, train_ids, test_ids,
+    record = check_split_against_record(args.weights, test_ids,
                                         require_same_test=not args.writers,
                                         max_gap_ms=MAX_GAP_MS,
                                         temporal_channels=getattr(args, "temporal_channels", None))

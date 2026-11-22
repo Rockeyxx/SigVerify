@@ -8,7 +8,7 @@ from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame
 
 import src.gui.storage as storage
-from src.gui.styles import ACCENT, BORDER, TEXT_LIGHT, TEXT_MUTED
+from src.gui.styles import ACCENT, BORDER, TEXT_LIGHT
 
 
 class ProgressRing(QWidget):
@@ -22,7 +22,7 @@ class ProgressRing(QWidget):
         self.percentage = max(0, min(100, value))
         self.update()  # يطلب إعادة الرسم
 
-    def paintEvent(self, event):
+    def paintEvent(self, event):  # skylos: ignore Qt calls this override by name, with this signature
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(10, 10, self.width() - 20, self.height() - 20)

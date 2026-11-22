@@ -137,7 +137,7 @@ def run_qt(rows, meta, scale):
                 self.update()
             e.accept()
 
-        def paintEvent(self, _):
+        def paintEvent(self, _):  # skylos: ignore Qt calls this override by name, with this signature
             qp = QPainter(self)
             qp.fillRect(self.rect(), Qt.white)
             qp.setPen(QPen(Qt.darkGray, 3))
@@ -147,12 +147,12 @@ def run_qt(rows, meta, scale):
                 qp.drawPoint(d)
 
     class Window(QWidget):
-        def keyPressEvent(self, e):
+        def keyPressEvent(self, e):  # skylos: ignore Qt calls this override by name, with this signature
             if e.key() == Qt.Key_Space:
                 plan["skip"] = True
 
     class Proximity(QWidget):  # proximity events go to the application, not the widget
-        def eventFilter(self, obj, e):
+        def eventFilter(self, obj, e):  # skylos: ignore Qt calls this override by name, with this signature
             if e.type() in (QEvent.TabletEnterProximity, QEvent.TabletLeaveProximity):
                 log(e)
             return False

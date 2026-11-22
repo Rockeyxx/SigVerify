@@ -891,7 +891,7 @@ def main(argv=None):
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
     # Ensure evaluation partition matches the checkpoint's split record.
-    record = check_split_against_record(args.weights, train_ids, test_ids, max_gap_ms=MAX_GAP_MS)
+    record = check_split_against_record(args.weights, test_ids, max_gap_ms=MAX_GAP_MS)
     print("Split record: matches the checkpoint" if record else
           "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")
     if record and record.get("input_size"):
