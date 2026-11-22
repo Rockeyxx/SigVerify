@@ -5,11 +5,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue)]()
 
-> **Senior Design Project (EE 499)** — Department of Electrical and Computer Engineering, King Abdulaziz University (KAU), Jeddah, Saudi Arabia — Team 06
+> **Senior Design Project (EE 499)**, Department of Electrical and Computer Engineering, King Abdulaziz University (KAU), Jeddah, Saudi Arabia. Team 06.
 
-A multimodal signature verification system built with dual Siamese deep neural networks. It verifies signatures using both **offline** (scanned images) and **online** (dynamic tablet pen strokes) inputs, combining their scores via late fusion to detect genuine signatures and skilled forgeries.
-
-This document covers installation, quickstart, project structure, evaluation benchmarks, and architectural comparisons.
+SigVerify checks whether a signature is genuine or a skilled forgery, on your own computer. It reads a scan or photo of the paper signature, the pen movement recorded on a tablet, or both, and combines the two into one decision. Nothing leaves the machine.
 
 ---
 
@@ -17,32 +15,23 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 - [Architecture](#architecture)
 - [Features](#features)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-  - [Running the Application](#running-the-application)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+  - [Download and install](#download-and-install)
+  - [Run from source](#run-from-source)
+  - [What the app takes](#what-the-app-takes)
   - [GUI](#gui)
-  - [Input Specifications](#input-specifications)
-  - [Enrollment and Decision](#enrollment-and-decision)
-  - [Model Weights & GitHub Releases](#model-weights--github-releases)
+  - [Enrollment and decision](#enrollment-and-decision)
+  - [Model weights](#model-weights)
 - [Training](#training)
-  - [Datasets & Local Directory Layout](#datasets--local-directory-layout)
+  - [Datasets and local directory layout](#datasets-and-local-directory-layout)
 - [Evaluation](#evaluation)
-  - [Results vs Published Literature](#results-vs-published-literature)
-  - [Temporal Branch — Extended Pre-Training with DeepSignDB](#temporal-branch--extended-pre-training-with-deepsigndb)
-  - [Datasets and Device Targets](#datasets-and-device-targets)
-  - [Evaluation Figures & Benchmark Metrics](#evaluation-figures--benchmark-metrics)
-  - [Operating Point & Confusion Matrices](#operating-point--confusion-matrices)
-  - [ROC and DET Curves](#roc-and-det-curves)
-- [Database & Capture Layer](#database--capture-layer)
-  - [Database](#database)
-  - [Signature Capture](#signature-capture)  
-- [Standards & Compliance](#standards--compliance)
+  - [Accuracy of the whole system](#accuracy-of-the-whole-system)
+  - [Each input on its own corpora](#each-input-on-its-own-corpora)
+  - [Compared with published systems](#compared-with-published-systems)
+- [Standards](#standards)
 - [Hardware](#hardware)
 - [References](#references)
-  - [How the Reference Architecture Differs](#how-the-reference-architecture-differs)
-  - [Bibliography](#bibliography)
 - [Team](#team)
 - [License](#license)
 - [Acknowledgments](#acknowledgments)
@@ -53,13 +42,13 @@ This document covers installation, quickstart, project structure, evaluation ben
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Probe Signature Input                    │
-│              (Image / Dynamic / Both)                       │
+│                    Probe signature input                    │
+│              (scan / tablet signature / both)               │
 └──────────┬──────────────────────────────┬───────────────────┘
            │                              │
            ▼                              ▼
 ┌─────────────────────┐      ┌─────────────────────────┐
-│   Spatial Branch    │      │    Temporal Branch      │
+│   Spatial branch    │      │    Temporal branch      │
 │   Siamese CNN       │      │    Siamese LSTM         │
 │                     │      │                         │
 │  [1, 1, 155, 220]   │      │  [1, L, 4] (X,Y,P,dt)   │
@@ -71,137 +60,109 @@ This document covers installation, quickstart, project structure, evaluation ben
            │                              │
            └──────────┬───────────────────┘
                       ▼
-         ┌──────────────────────┐
-         │   Late Fusion        │
-         │                      │
+         ┌─────────────────────────┐
+         │   Late fusion           │
+         │                         │
          │  S = α·S_sp + (1-α)·S_t │
-         │  S ≥ τ → Genuine     │
-         │  S < τ → Forged      │
-         └──────────┬───────────┘
+         │  S ≥ τ → Genuine        │
+         │  S < τ → Forged         │
+         └──────────┬──────────────┘
                     ▼
          [Genuine/Forged, match score vs τ]
 ```
 
-**Single-Modality Fallback:** When only one input modality is provided, the system automatically routes to that branch ($\alpha = 1.0$ for spatial image verification, $\alpha = 0.0$ for temporal trajectory verification).
+With only one input, the app uses that branch alone ($\alpha = 1$ for a scan, $\alpha = 0$ for a tablet signature).
 
 ---
 
 ## Features
 
-**Implemented and Measured — Machine Learning Pipeline:**
-
-- **Dual-Modality Architecture** — Combines spatial visual representations (offline scanned images) with kinematic stroke dynamics (online tablet trajectories).
-- **Late-Fusion Engine** — Weighted score fusion with automatic single-modality fallback (`src/models/siamese.py`).
-- **Few-Shot Enrollment Scoring** — Probes matched against the nearest of $K=5$ stored reference embeddings (`src/verification.py`).
-- **Writer-Independent Evaluation** — Strict held-out-writer partitioning per ISO/IEC 23053:2022 with comprehensive EER, FAR, FRR, and DET metrics (`scripts/benchmark.py`, `scripts/evaluate.py`).
-- **Ultra-Low Latency Inference** Fast CPU execution (0.5 s from pressing Enter to the fused result with 5 scan and 5 pen references, 0.08 s per check against stored references, after a 1.35 s app start that loads the models) and light memory footprint (~0.39 GB RAM), well within embedded budgets (< 3.0 s, ≤ 4 GB).
-- **Cross-Platform Compatibility** Runs natively on Windows and Linux (x86_64 and ARM64) without native build toolchains.
-
-**Application Layer:**
-
-`src/gui/`, `src/capture/` and `src/database/` are working code. Tests cover the tablet capture (`tests/test_capture.py`, `tests/test_collect.py`), the database (`tests/test_database.py`, `tests/test_database_security.py`), the GUI's storage adapter (`tests/test_storage_gui_api.py`) and the GUI screens (`tests/test_gui.py`: first run, login and logout, the Members page, backup and restore, enrolment permissions, vault-wide verification, stale, tablet and replay refusals, the dashboard and signers page). That file runs the screens offscreen with a fake model, so nothing yet tests the whole system, real model included, from enrolment to a logged decision. For what this does and does not demonstrate, see [Standards & Compliance](#standards--compliance).
-
-- **PyQt5 Desktop Interface** (`src/gui/`) Member accounts (owner-managed), signer enrolment and verification from paper photos, tablet signatures, or both fused. Verification runs the model on CPU through `SignatureService` (`src/verification.py`). See [GUI](#gui).
-- **Digitizer Tablet Capture** (`src/capture/`) Records the XPPen Deco 640 through Qt tablet events on Linux and Windows. On Windows it uses the tablet driver's Wintab input when the driver is installed, and Windows Ink otherwise.
-- **Encrypted Biometric Store** (`src/database/`) SQLite store in `~/.sigverify/companies/<company>/`, one encrypted database per vault. Each template is encrypted with AES-256-GCM under a random data key. That key is stored only in wrapped copies, one per member, each wrapped with a key derived (scrypt) from that member's login password, so logging in is what unlocks the data. No key file and no password is kept on disk. The whole database file is encrypted and authenticated: a copied file reveals only the members' User IDs and the file format, not a name, a signer or an audit row, and a file changed by even one byte refuses to open. In use the database lives only in memory, and every save rewrites the encrypted file atomically. One app instance opens a vault at a time. Register creates a vault, and the person registering is its owner: only the owner adds members, resets a forgotten password, deletes a signer or replaces a signer's references. Only embeddings are stored. The audit log, readable by the owner after login, records every verification, enrolment, re-enrolment, deletion, refused attempt, account change and backup, and an encrypted backup can be copied out and restored. **Passwords are not stored anywhere. If the owner and every member forget their passwords, the enrolled signatures cannot be recovered and every signer must enrol again.**
+- **Two inputs, one decision.** A Siamese CNN reads the scan, a Siamese LSTM reads the pen movement, and late fusion combines their scores.
+- **Five references, no retraining.** A new signer enrols with 5 signatures; each check is matched against the nearest of them.
+- **Writer-independent.** One model for everyone, tested only on writers it never saw in training (ISO/IEC 23053:2022).
+- **Fast on a normal CPU.** 0.52 s from pressing Enter to the fused result with 5 paper and 5 tablet references, 0.08 s per check against stored references, 0.35 GB of RAM (budget: 3 s and 4 GB). No GPU and no network.
+- **Encrypted vaults.** Only embeddings are stored, never images or pen data, in an AES-256-GCM encrypted database unlocked by each member's password.
+- **One download per system.** A Windows installer and a Linux AppImage (x86_64), no Python needed.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-├── AGENTS.md                    # Contributor & AI agent directives (hard architectural rules)
-├── DATASET_LICENSES.md          # Dataset licenses, redistribution terms, and restrictions
+├── AGENTS.md                    # Rules and contracts for contributors and AI agents
+├── DATASET_LICENSES.md          # Dataset licences and redistribution terms
 ├── LICENSE                      # MIT License
-├── README.md                    # Project documentation, quickstart & benchmark summary
-├── requirements.txt             # Python dependencies
+├── README.md
+├── USER_GUIDE.md                # How to install and use the app
+├── requirements.txt             # Development dependencies (training, tests)
+├── requirements-app.txt         # What the installed app needs, nothing else
+├── requirements-build.txt       # Installer build tool (PyInstaller)
 ├── pyproject.toml               # Makes the repo installable (pip install -e . --no-deps)
-├── Signature_Verification_Pipeline.ipynb   # Interactive pipeline demo notebook (outputs stripped)
+├── Signature_Verification_Pipeline.ipynb   # Pipeline demo notebook (outputs stripped)
 ├── config/
-│   └── settings.py              # Central hyperparameters, paths, and decision thresholds
+│   └── settings.py              # Every constant: paths, thresholds, hyperparameters
 ├── src/
-│   ├── verification.py          # Multimodal verification engine & quality gates
-│   ├── models/
-│   │   └── siamese.py           # SpatialSiamese (CNN), TemporalSiamese (LSTM), Loss, Fusion
-│   ├── data/
-│   │   ├── dataset.py           # Preprocessing, quality gate, pair generation, splits
-│   │   ├── parsers.py           # Loaders for CEDAR, BHSig260, UTSig, SVC2004, SigComp2011
-│   │   └── features.py          # Kinematic feature extraction (deltas, accelerations)
-│   ├── database/                # Encrypted SQLite store
-│   │   └── db_manager.py
-│   ├── capture/                 # Tablet capture, signing window, ink crop for photos
-│   │   ├── collect.py
-│   │   ├── ink.py
-│   │   ├── pen_input.py
-│   │   └── tablet.py
-│   └── gui/                     # PyQt5 member app: login, enrolment, verification
-│       ├── app.py               # Entry point: python -m src.gui.app
-│       ├── enrollment_page.py
-│       ├── verification_page.py
-│       ├── interfaces.py        # The GUI's only route to the model
-│       └── storage.py           # The GUI's only route to the database
-├── scripts/
-│   ├── train.py                 # Training entry point (spatial, temporal, or joint)
-│   ├── evaluate.py              # Evaluation, threshold calibration, figure generation
-│   └── benchmark.py             # Held-out writer benchmark & Cohen's d regression harness
-├── tools/                       # Capture campaign, tablet probe, latency, release reproduction
-│   └── research/                # Tools of closed experiments, kept so their results can be rerun
-├── models/weights/              # PyTorch .pth weight checkpoints (distributed via GitHub Releases)
-├── results/                     # Generated ROC, DET, and confusion matrix figures
-└── tests/                       # Automated test suite (unit, regression, and integration tests)
+│   ├── verification.py          # SignatureService: enrol, verify, fuse
+│   ├── models/siamese.py        # SpatialSiamese (CNN), TemporalSiamese (LSTM), fusion
+│   ├── data/                    # Preprocessing, input gates, dataset parsers
+│   ├── database/db_manager.py   # Encrypted SQLite vault
+│   ├── capture/                 # Tablet capture and the signing window
+│   └── gui/                     # PyQt5 app (entry point: python -m src.gui.app)
+├── bundle/                      # Installer build: PyInstaller recipe, --debug launcher, checks
+├── scripts/                     # train.py, evaluate.py, benchmark.py
+├── tools/                       # Latency profile, release reproduction, capture campaign
+├── models/weights/              # .pth weights (from GitHub Releases)
+├── results/                     # Figures written by code
+└── tests/                       # Automated tests
 ```
 
 ---
 
-## Getting Started
+## Getting started
 
-### Prerequisites
+### Download and install
 
-- Python 3.11 or newer (the encrypted vault uses `sqlite3` serialize / deserialize)
-- `pip` package manager
+Download the file for your system from the [Releases page](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases). No Python is needed.
 
-### Installation
+| System | File | How |
+| --- | --- | --- |
+| Windows 10/11, 64-bit | `SigVerify-vX.Y.Z-setup.exe` | Run it, then start SigVerify from the Start menu. No administrator password is needed. |
+| Linux, 64-bit (tested on Arch) | `SigVerify-vX.Y.Z-x86_64.AppImage` | Mark it executable (`chmod +x`), then double-click it. |
+
+- The Windows installer is not code-signed yet, so Windows may show "Windows protected your PC". Click **More info**, then **Run anyway**.
+- Tablet on Windows: install the XPPen driver before enrolling anyone, and keep it. Linux needs no driver.
+- Your data stays in the `.sigverify` folder in your home folder; updating or uninstalling the app does not touch it.
+
+The [user guide](USER_GUIDE.md) covers first start, enrolment, verification, backup, error messages and uninstalling.
+
+### Run from source
+
+For development and training. Python 3.11 or newer.
 
 ```bash
 git clone https://github.com/Rockeyxx/Signature-Verification-ML-EE499.git
 cd Signature-Verification-ML-EE499
 
-python -m venv venv
-source venv/bin/activate        # On Linux / macOS
-# venv\Scripts\activate         # On Windows
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
+# CPU torch from its own index first, then the rest
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
-pip install -e . --no-deps      # once: lets every script and tool import the project
+pip install -e . --no-deps
+
+python bundle/fetch_weights.py   # the two shipped weights, checked by SHA-256 (needs the gh CLI)
+python -m src.gui.app
 ```
 
-### Running the Application
+### What the app takes
 
-```bash
-# Score a branch on held-out writers under the few-shot enrollment protocol (K=5)
-python scripts/benchmark.py --branch temporal \
-    --weights models/weights/temporal_lstm.pth --temporal-channels dt \
-    --data-dir data/svc2004_task2 data/sigcomp2011 --enroll 5
+| Input | At enrolment | At verification | Requirement |
+| --- | --- | --- | --- |
+| Paper signature | 5 photos or scans | 1 | Blue pen on white paper; the app crops to the ink and refuses a photo that is too small or too blurry |
+| Tablet signature | 5 signings | 1 | XPPen Deco 640 (or a tablet meeting [Hardware](#hardware)); the same tablet model and operating system for enrolment and verification |
 
-# Regenerate ROC, DET, and confusion matrix plots
-python scripts/evaluate.py --branch spatial \
-    --weights models/weights/spatial_cnn.pth \
-    --data-dir data/cedar data/bhsig260 data/utsig --output-dir results
-
-# Profile CPU latency and RAM footprint
-python tools/profile_latency.py --branch fused
-
-# Test your own signature images against the shipped spatial model
-python tools/verify_my_signature.py --crop \
-    --references mine/ref1.jpg mine/ref2.jpg mine/ref3.jpg \
-    --probes mine/genuine.jpg mine/forged.jpg
-```
-
----
-
-### Input Specifications
-
-- **Spatial Branch (Offline):** Single-channel grayscale images formatted to `[1, 1, 155, 220]`. Inverted pixel polarity (ink high, background 0), divided by 255. Bounding box quality gate requires `min(w, h) >= 64 px` and Laplacian variance `≥ 50.0`.
-- **Temporal Branch (Online):** Trajectory tensors formatted to `[1, L, 4]` containing $(X, Y, P, dt)$. Coordinates $X$ and $Y$ are z-scored per signature; pressure $P$ is scaled to $[0.0, 1.0]$; $dt$ represents elapsed time between consecutive points (clipped at 100 ms and normalized to $[0.0, 1.0]$).
+A signer can enrol with paper only, tablet only, or both. With both, each check uses paper, tablet or both, and both together is the most accurate.
 
 ### GUI
 
@@ -210,7 +171,7 @@ member-facing interface for enrollment and verification.
 
 **Member workflow** (the app says vault, owner, member and signer; the code still calls them company, admin, employee and client, as in `storage.create_company` and the folder `companies/`):
 
-1. **First start, vaults and login** — On the first start the screen is
+1. **First start, vaults and login**: On the first start the screen is
    Create a vault: vault name, then the owner's full name, User ID and
    password, or restore a vault from a backup. Each vault has its own
    encrypted database, owner, members and signers, and cannot see another
@@ -220,14 +181,14 @@ member-facing interface for enrollment and verification.
    Logging out locks the signature data again. A database made by an older
    version of the app is refused with a message; move that vault's folder away
    and enrol again.
-2. **Enrollment** — Enter a signer ID. The page looks the signer up across the
+2. **Enrollment**: Enter a signer ID. The page looks the signer up across the
    vault and shows which sets exist (scan N, pen N). A new signer is enrolled
    with 5 reference photos of their signature (blue pen on white paper), 5
    signings on the tablet, or both. Only embeddings are stored, so View works
    only for photos picked in the current session. Any member can add a set the
    signer lacks. Only the owner can replace a set the signer already has, after
    a confirmation that picking 5 photos again is a re-enrolment.
-3. **Verification** — Enter a claimed signer ID (any signer in the vault),
+3. **Verification**: Enter a claimed signer ID (any signer in the vault),
    choose paper + pen, paper only, or pen only, give the photo and/or sign on
    the tablet, and receive the decision with its match score drawn against the
    decision threshold. The match score is a similarity, not a probability. The
@@ -237,15 +198,15 @@ member-facing interface for enrollment and verification.
    logged and is not a verdict. When the result is Genuine from paper and pen
    together, the member can confirm the person's identity to add that visit to
    the signer's references.
-4. **Dashboard** — Landing screen after login with a "Mine" row (your own
+4. **Dashboard**: Landing screen after login with a "Mine" row (your own
    numbers), a "Vault" row, and the recent vault activity with the member
    named: signers enrolled this month, total enrolled signers, total
    verifications run, and a live genuine-rate indicator.
-5. **Signers** — A table of every signer in the vault (enrollment date,
+5. **Signers**: A table of every signer in the vault (enrollment date,
    references as "scan N · pen N", most recent verification). Double-click a row
    to open the signer on the enrollment page.
-6. **Profile** — Your own name and password. A new password needs the current one.
-7. **Members (owner only)** — Add a member, reset a forgotten password,
+6. **Profile**: Your own name and password. A new password needs the current one.
+7. **Members (owner only)**: Add a member, reset a forgotten password,
    remove a member, back up the encrypted database, and restore a backup
    (after which you log in again). A restore keeps a copy of the live database
    beside it first.
@@ -279,382 +240,189 @@ database (`src/database/db_manager.py`).
 python -m src.gui.app
 ```
 
-#### The `dt` Channel
+### Enrollment and decision
 
-`dt` is the time interval between consecutive sampled points, the fourth channel of the input tensor `[X, Y, Pressure, dt]`. It stays near 10 ms while the pen is down and jumps at pen lifts.
+Verification compares a new signature with the signer's enrolled references:
 
-The shipped weights were trained with `dt`, so it stays in the capture contract, but its measured advantage did not come from pen timing. Over six paired seeds the 4-channel model reads 8.97% pooled EER against 10.45% for `[X, Y, Pressure]`. That gain came from training noise: SVC2004 timestamps are read as float32 in training, which rounds most of its 10 ms steps to 8, 12 or 16 ms. **Retrained on exact timestamps, the 4-channel model reads 11.76%, no better than 3 channels.** Training keeps the float32 read (`TEMPORAL_TRAIN_FLOAT32_PARSE` in `config/settings.py`) so the shipped weights reproduce exactly; evaluation and the tablet use exact timestamps.
-
----
----
-
-### Enrollment and Decision
-
-Verification evaluates a probe against an enrolled gallery using nearest-reference matching:
-
-| Parameter                 | Value                                                                | Configuration Constant                                      |
+| Parameter                 | Value                                                                | Configuration constant                                      |
 | ------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------- |
 | References per user ($K$) | **5**                                                                | `NUM_ENROLLMENT_REFERENCES = 5`                             |
-| Matching Rule             | Nearest Reference: $d_{min} = \min_{i} \|e_{probe} - e_{ref, i}\|_2$ | `_nearest_reference_score`                                  |
-| Similarity Score          | $S = \frac{1}{1 + d_{min}}$                                          | —                                                           |
-| Decision Threshold        | Spatial $\tau = 0.8387$, Temporal $\tau = 0.7900$                    | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
+| Matching rule             | Nearest reference: $d_{min} = \min_{i} \|e_{probe} - e_{ref, i}\|_2$ | `_nearest_reference_score`                                  |
+| Similarity score          | $S = \frac{1}{1 + d_{min}}$                                          |                                                             |
+| Decision threshold        | Paper alone $\tau = 0.8387$, tablet alone $\tau = 0.7900$            | `SPATIAL_DECISION_THRESHOLD`, `TEMPORAL_DECISION_THRESHOLD` |
 | Fusion                    | $S = 0.4\,S_{spatial} + 0.6\,S_{temporal}$, fused $\tau = 0.7807$    | `ALPHA_DEFAULT`, `DECISION_THRESHOLD`                       |
 
-More enrolled references give better accuracy without retraining, but the gain gets small after $K=5$. We swept $K$ from 1 to 15 with `benchmark.py --enroll K`, 10 draws each. Spatial pooled EER goes from 11.71% ($K=1$) to 8.72% ($K=5$), 7.86% ($K=10$) and 7.82% ($K=15$). These spatial numbers come from the previous spatial weight, not the one shipped now. Temporal EER goes from 13.72% ($K=1$) to 7.81% ($K=5$), 6.99% ($K=10$) and 6.31% ($K=15$). Both curves are almost flat after $K=10$. The app uses $K=5$.
+The match score is a similarity, not a probability.
 
----
+### Model weights
 
-### Model Weights & GitHub Releases
-
-Compiled PyTorch weight checkpoints (`.pth` files) are tracked outside Git via `.gitignore` to keep the repository compact:
-
-- **Pre-trained Weights Distribution:** Official release weights (`spatial_cnn.pth` and `temporal_lstm.pth`) are hosted on **[GitHub Releases](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases)**.
-- **Optional accuracy tier:** six `temporal_dt_s4{2..7}.pth` checkpoints. Enabling
-  them via `SignatureService(use_temporal_ensemble=True)` averages their
-  embeddings and lowers temporal EER from **8.83% to 6.94%** on DeepSignDB
-  Evaluation (372 held-out writers, 25 draws, winning 25/25). Costs 6x inference
-  — about 32 ms against the 3.0 s budget. The service **raises** if any member is
-  missing rather than quietly running one model.
-- **Local Placement:** Download the compiled weights from the release page and place them into `models/weights/`:
-  ```
-  models/weights/
-  ├── spatial_cnn.pth
-  └── temporal_lstm.pth
-  ```
-
-> **DeepSignDB Licensing Notice:** Weights trained on DeepSignDB (`DONT_SHIP_*.pth`) are strictly restricted to local academic research under DeepSignDB license clause 4.4 (commercial redistribution restriction). The publicly distributed weights are trained exclusively on open academic datasets (CEDAR, BHSig260, UTSig, SVC2004, and SigComp2011).
+The installers already contain the weights. From source, `python bundle/fetch_weights.py` downloads `spatial_cnn.pth` and `temporal_lstm.pth` from the release named by `MODEL_VERSION` in `config/settings.py` and checks their SHA-256. What every file of a release is, and how it was measured, is in that release's notes on the [Releases page](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases).
 
 ---
 
 ## Training
 
-Train models from scratch across single or multiple datasets using writer-independent splits (70% train / 15% val / 15% test):
+Train from scratch on one or more datasets, with writer-independent splits (70% train, 15% validation, 15% test):
 
 ```bash
-# Train spatial branch (offline images)
+# Spatial branch (scans)
 python scripts/train.py --branch spatial \
     --data-dir data/cedar data/bhsig260 data/utsig \
     --epochs 100 --batch-size 32 --seed 42
 
-# Train temporal branch (online pen trajectories)
+# Temporal branch (pen trajectories)
 python scripts/train.py --branch temporal --temporal-channels dt \
     --data-dir data/svc2004_task2 data/sigcomp2011 \
     --epochs 100 --batch-size 32 --seed 42
 ```
 
-### Datasets & Local Directory Layout
+### Datasets and local directory layout
 
-Organize downloaded datasets in the `./data` directory according to the following layout (dataset directory names automatically determine the corresponding parser in `src/data/parsers.py`):
+Put downloaded datasets in `./data`; the folder name selects the parser in `src/data/parsers.py`:
 
 ```
 data/
-├── cedar/                  # Offline CEDAR (55 writers)
-│   ├── writer_01/
-│   │   ├── original_1_1.png ... original_1_24.png  (Genuine)
-│   │   └── forged_1_1.png   ... forged_1_24.png    (Skilled forgeries)
-│   └── ...
-├── bhsig260/               # Offline BHSig260 (260 writers)
-│   ├── Bengali/
-│   └── Hindi/
-├── utsig/                  # Offline UTSig (115 writers, Persian script)
-├── svc2004_task1/          # Online SVC2004 Task 1 (40 writers, 4 columns, no pressure)
-├── svc2004_task2/          # Online SVC2004 Task 2 (40 writers, 7 columns, real pressure)
-├── MOBISIG/                # Online MOBISIG (83 writers) — mobile / touch proxy
-└── sigcomp2011/            # Online SigComp2011 (84 writers, Dutch & Chinese)
-    ├── trainingSet/OnlineSignatures/{Dutch,Chinese}/
-    └── Testdata_SigComp2011/SigComp11-Onlinetestset/{Dutch,Chinese}/
+├── cedar/                  # Scans, CEDAR (55 writers)
+├── bhsig260/               # Scans, BHSig260 (260 writers): Bengali/, Hindi/
+├── utsig/                  # Scans, UTSig (115 writers, Persian)
+├── svc2004_task2/          # Pen, SVC2004 Task 2 (40 writers, with pressure)
+├── sigcomp2011/            # Pen, SigComp2011 (Dutch and Chinese)
+├── sigcomp2009_clean/      # Scan + pen pairs, SigComp2009 / NFI (evaluation only)
+└── biosecurid_sonof/       # Scan + pen pairs, BiosecurID-SONOF (licensed, evaluation only)
 ```
 
-Refer to [DATASET_LICENSES.md](DATASET_LICENSES.md) for terms of use, licensing, and acquisition details.
+Terms of use and how to obtain each dataset: [DATASET_LICENSES.md](DATASET_LICENSES.md).
 
 ---
 
 ## Evaluation
 
-### Results vs Published Literature
+All numbers use the shipped weights on CPU, writers the weights never trained on, 5 enrolled references, and the references and the checked signature from the same sitting. EER is the error rate where false accepts equal false rejects; FAR and FRR are measured at the shipped threshold. Skilled forgeries are made by other people who practised the signature.
 
-Each published result sits beside this project measured under the same protocol, on writers the shipped weights never trained on, on CPU. One-reference rows score isolated pairs, and DeepSignDB rows use the dataset's official comparison lists; each is one EER over every trial, as those protocols define it. $K=5$ rows are mean $\pm$ standard deviation over 10 random enrollment draws (seed 42).
+### Accuracy of the whole system
 
-| Dataset                 | Protocol                                                   | Published EER | Source | This project                  |
-| ----------------------- | ---------------------------------------------------------- | :-----------: | :----: | :---------------------------: |
-| **CEDAR**               | Writer-independent, 1 reference                            |     0.00%     |  [1]   |             0.00%             |
-| **CEDAR**               | Writer-independent, 1 reference                            |     3.51%     |  [10]  |             0.00%             |
-| **CEDAR**               | Writer-dependent SVM on CNN features, $K=12$               |     4.63%     |  [2]   |  0.00% $\pm$ 0.00% ($K=5$) §  |
-| **BHSig260 Bengali**    | Writer-independent, 1 reference                            |    13.89%     |  [1]   |            11.10%             |
-| **BHSig260 Bengali**    | Writer-independent, 1 reference                            |     6.12%     |  [10]  |            11.10%             |
-| **BHSig260 Hindi**      | Writer-independent, 1 reference                            |    15.36%     |  [1]   |             5.94%             |
-| **BHSig260 Hindi**      | Writer-independent, 1 reference                            |     6.68%     |  [10]  |             5.94%             |
-| **UTSig (Persian)**     | Writer-dependent SVM, Persian transfer learning, $K=10$    |     9.80%     |  [3]   | 26.34% $\pm$ 2.17% ($K=5$) §  |
-| **UTSig (Persian)**     | Writer-dependent SVM, Persian transfer learning, $K=5$     |    11.16%     |  [3]   |    26.34% $\pm$ 2.17% §      |
-| **UTSig (Persian)**     | Writer-dependent DMML on HOG features, $K=12$              |    17.45%     |  [4]   | 26.34% $\pm$ 2.17% ($K=5$) §  |
-| **UTSig (Persian)**     | Writer-dependent SVM on geometric features, $K=12$         |    29.71%     |  [5]   | 26.34% $\pm$ 2.17% ($K=5$) §  |
-| **SVC2004 Task 2**      | $K=5$, skilled forgeries, writer-specific thresholds       |     1.39%     |  [12]  | 13.69% $\pm$ 2.25% (global threshold) |
-| **SVC2004 Task 2**      | $K=5$, skilled forgeries, competition winner               |     2.89%     |  [6]   |      13.69% $\pm$ 2.25%       |
-| **SVC2004 Task 2**      | Writer-independent Siamese CNN, 35 train / 5 test writers  |   77.00% acc  |  [7]   |      13.69% $\pm$ 2.25%       |
-| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 4 references            |     2.44%     |  [12]  |           13.57% ‖            |
-| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 4 references            |     2.54%     |  [11]  |           13.57% ‖            |
-| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 4 references            |     3.30%     |  [15]  |           13.57% ‖            |
-| **DeepSignDB (stylus)** | Official lists, skilled forgeries, 1 reference             |     4.20%     |  [15]  |           16.33% ‖            |
-| **DeepSignDB (stylus)** | Official lists, random forgeries, 4 references             |     0.60%     |  [15]  |            6.50% ‖            |
-| **SigComp2011 Dutch**   | Multi-system competition benchmark                         | _Competition_ |  [8]   |  4.11% $\pm$ 1.03% ($K=5$)    |
-| **SigComp2011 Chinese** | Multi-system competition benchmark                         | _Competition_ |  [8]   |  5.28% $\pm$ 0.85% ($K=5$)    |
-| **MOBISIG (Touch)**     | DTW with user-specific thresholds                          |     5.81%     |  [9]   |           21.26% †            |
-| **MOBISIG (Touch)**     | Global features with global threshold                      |    14.31%     |  [9]   |           21.26% †            |
+Paper and tablet recorded for the same people, scored as the app scores them:
 
-§ _This project is writer-independent: one model for everyone, nothing fitted per user. No writer-dependent result exists here, so the closest protocol, $K=5$, is shown._
+| Collection | Writers | Paper alone EER | Tablet alone EER | **Fused EER** | Fused FAR / FRR at $\tau = 0.7807$ |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| In-house, XPPen Deco 640 + phone and flatbed paper | 18 | 25.70% | 7.18% | **1.79%** | 2.78% / 1.60% |
+| BiosecurID-SONOF (Wacom + scans) | 132 | 22.89% ± 0.48 | 6.11% ± 0.26 | **5.06% ± 0.20** | 2.53% / 10.17% |
+| SigComp2009 / NFI | 14 | 22.79% ± 1.19 | 3.90% ± 1.11 | **3.40% ± 0.56** | 2.23% / 6.92% |
 
-‖ _Shipped temporal weights, never trained on DeepSignDB, on the three pen-tablet sub-databases they can load (MCYT, BiosecurID and BiosecureDS2, 372 writers). The published figures cover all five sub-databases. Published 4-reference scores average the four comparisons; this project scores the nearest reference._
+The in-house row is the deployment tablet: 18 writers, 125 genuine checks and 36 skilled forgeries, references are each writer's first 5 signings. The public rows are mean ± SD over 10 random draws of 5 references. $\alpha = 0.4$ was chosen on SONOF and $\tau$ at the in-house EER point; NFI took no part in either.
 
-$\dagger$ _Note: MOBISIG figures reflect a separate touchscreen evaluation model. The primary shipped temporal weights are trained exclusively on digitizer pen corpora (SVC2004 Task 2 + SigComp2011)._
+### Each input on its own corpora
 
-#### Analysis of Protocol Differences & Accuracy Gaps
+Each branch alone, on the held-out test writers of its own training corpora (the split record shipped with each weight), mean ± SD over 10 draws of 5 references:
 
-- **UTSig Protocol Gap:** Published results achieving 9–17% EER on UTSig rely on **writer-dependent** training (training per-user classifiers with $K=10$ to $12$ references). In our strictly writer-independent, few-shot enrollment setup, Persian signatures exhibit complex stroke loops that yield 26.34% EER.
-- **SVC2004 Intrinsic Hardness:** Published SVC2004 benchmarks below 3% utilize _a posteriori_ user-specific thresholds. Under a global threshold, SVC2004 is intrinsically challenging: DTW alignment confirms an intra-genuine distance ratio of 1.44 (vs 1.61 for Dutch) and a median forgery separation $z$-score of 1.37 (vs 2.23 for Dutch).
-- **SigComp2011 Target Tier:** On true pen digitizers (SigComp2011 Dutch), our temporal model achieves **4.11% EER**, satisfying the $\le 5\%$ target for pen-tablet hardware.
-- **Fusion weight and threshold come from a separate paired set.** Fused numbers are measured only where the scan and the pen recording come from the same signing: SigComp2009 / NFI (14 writers) and BiosecurID-SONOF (132 writers). SigComp2011's scan and pen forgeries carry different forger codes, so they cannot be paired and are not used for fusion. $\alpha = 0.4$ was chosen on SONOF; measured on SONOF writers that took no part in choosing it, the fused EER is 5.17%, just above the 5% target. Our own capture campaign (18 writers on the XPPen tablet, one sitting, 36 skilled forgeries; genuine paper of P01 to P09 through a phone document-scanner app, of P10 to P23 on a flatbed scanner at 300 dpi, every forgery through the phone app) supports the same $\alpha$, and its EER point sets the shipped $\tau = 0.7807$. That threshold trades genuine refusals for fewer accepted forgeries on the public sets: SONOF FAR 2.53%, FRR 10.17%; NFI FAR 2.23%, FRR 6.92%. On NFI, a different collection that took no part either, fusion beats the pen alone on skilled forgeries (temporal alone 3.90% → fused 3.40%) and almost halves random-forgery errors (2.47% → 1.27%).
-- **Time between enrolment and use costs accuracy.** All numbers here draw the references and the probe from the same pool of sessions. On BiosecurID-SONOF, enrolling on one occasion and verifying on later ones raises the fused EER from 5.06% to 7.93%, almost all through genuine signatures being refused. References taken on three different occasions bring it to 6.68%.
-- **Corpus matters when quoting temporal EER.** The ensemble reads **2.61%** on the 10-writer SigComp pen-tablet cohort and **6.94%** on DeepSignDB Evaluation's 372 writers. Both are honest; they measure different populations. Quote the corpus with the number. On DeepSignDB's official lists, where the references come from one session and the probe from a later one, the shipped single model reads **13.57%** and the ensemble **11.11%** (skilled forgeries, 4 references).
+| Input | Corpus | Writers | EER | Pooled EER |
+| --- | --- | :-: | :-: | :-: |
+| Paper | CEDAR | 8 | 0.00% ± 0.00 | 0.00% |
+| Paper | BHSig260 Hindi | 23 | 3.47% ± 0.90 | 3.34% |
+| Paper | BHSig260 Bengali | 16 | 6.82% ± 1.10 | 6.89% |
+| Paper | UTSig (Persian) | 18 | 26.34% ± 2.17 | 27.65% |
+| **Paper** | **All four** | **65** | **7.46% ± 0.46** | **7.72%** |
+| Tablet | SigComp2011 Dutch | 15 | 4.11% ± 1.03 | 4.18% |
+| Tablet | SigComp2011 Chinese | 6 | 5.28% ± 0.85 | 5.23% |
+| Tablet | SVC2004 Task 2 | 10 | 13.69% ± 2.25 | 14.92% |
+| **Tablet** | **All three** | **31** | **7.79% ± 0.63** | **7.92%** |
 
----
+Pooled EER puts every draw's scores together under one threshold.
 
-### Temporal Branch Extended Pre-Training with DeepSignDB
+### Compared with published systems
 
-Incorporating DeepSignDB Development's 498 stylus signers (expanding the training pool from 62 to 311 signers) was evaluated on the 3-channel baseline:
+Where a published protocol can be matched:
 
-| Temporal Model                | Train Signers |      Pooled EER       |     SigComp Dutch     |    SigComp Chinese    |        SVC2004         |      BiosecurID       |         MCYT          | Cohen's d |
-| ----------------------------- | :-----------: | :-------------------: | :-------------------: | :-------------------: | :--------------------: | :-------------------: | :-------------------: | :-------: |
-| `xyp` baseline (Open corpora) |      62       |   9.41% $\pm$ 0.64%   |   3.95% $\pm$ 0.93%   |   7.81% $\pm$ 1.34%   |   14.21% $\pm$ 1.53%   |        10.58%         |        13.25%         |   1.633   |
-| **+ DeepSignDB Development**  |    **311**    | **7.57% $\pm$ 0.29%** | **3.54% $\pm$ 0.43%** | **8.01% $\pm$ 1.50%** | **10.93% $\pm$ 1.23%** | **5.35% $\pm$ 0.46%** | **6.34% $\pm$ 0.36%** | **1.737** |
+| Dataset | Protocol (same on both sides) | Published EER | Source | This system |
+| --- | --- | :-: | :-: | :-: |
+| CEDAR (scan) | Writer-independent, 1 reference | 0.00% | [1] | 0.00% |
+| BHSig260 Hindi (scan) | Writer-independent, 1 reference | 6.68% | [2] | 5.94% |
+| BHSig260 Bengali (scan) | Writer-independent, 1 reference | 6.12% | [2] | 11.10% |
+| UTSig (scan) | 5 references (published: a classifier fitted per writer) | 11.16% | [3] | 26.34% ± 2.17 |
+| SVC2004 Task 2 (pen) | 5 references, skilled forgeries | 2.89% | [4] | 13.69% ± 2.25 |
+| DeepSignDB (pen) | Official lists, 4 references, skilled forgeries | 2.54%, 2.44% | [5], [6] | 16.33% |
 
-_Ablation Insight:_ When repeated on top of the 4-channel `dt` model with pinned test writers, scaling training writers 62 $\to$ 394 produced $-0.13$ points difference ($t = 0.28$), demonstrating that temporal verification at this resolution is governed by timing dynamics rather than data volume scarcity.
+Published SVC2004 and DeepSignDB results use a threshold per writer or align the signatures in time; this system uses one global threshold. The only published fused result, on BiosecurID-SONOF [15], enrols from the first session and verifies on later sessions, so it is not in the same-sitting table: 4.91% there, 7.70% for this system under that protocol. Reproduce any release's numbers with `python tools/reproduce_release.py <tag>`.
 
 ---
 
-### Datasets and Device Targets
+## Standards
 
-Target device and its requirement:
-
-| Tier          | Hardware Target          | Primary Dataset Proxy | Modality & Script       |  Target EER  |     Measured EER      |
-| ------------- | ------------------------ | --------------------- | ----------------------- | :----------: | :-------------------: |
-| **Primary**   | XPPen Deco 640 Tablet    | In-house XPPen campaign; BiosecurID-SONOF and SigComp2009 / NFI, paired | Fused (scan + pen), tablet-only fallback | $\le 5.0\%$  | **1.79%** fused on 18 in-house writers, XPPen tablet with phone-app and flatbed paper, one sitting (at the shipped $\alpha = 0.4$, $\tau = 0.7807$: FAR 2.78%, FRR 1.60%, 36 skilled forgeries); 5.17% $\pm$ 0.52% fused on 132 BiosecurID-SONOF writers ($\alpha$ and $\tau$ chosen on the other half of the writers: FAR 5.09%, FRR 5.35%); 3.40% $\pm$ 0.56% fused on 14 NFI writers (at $\tau = 0.7807$: FAR 2.23%, FRR 6.92%); 4.11% $\pm$ 1.03% pen alone on SigComp2011 Dutch |
-
----
-
-### Evaluation Figures & Benchmark Metrics
-
-Shipped weights evaluated on open corpora using `scripts/benchmark.py --enroll 5 --enroll-trials 10 --seed 42`. To reproduce any release's published numbers, run `python tools/reproduce_release.py <tag>` (`--list` shows the releases):
-
-| Branch       | Dataset             | Writers |   Mean $\pm$ SD EER   | Pooled EER | Cohen's d | Random-forgery EER |
-| ------------ | ------------------- | :-----: | :-------------------: | :--------: | :-------: | :----------------: |
-| **Spatial**  | **All Combined**    | **65**  | **7.46% $\pm$ 0.46%** | **7.72%**  | **2.195** | **11.48% $\pm$ 0.29%** |
-| Spatial      | CEDAR               |    8    |   0.00% $\pm$ 0.00%   |   0.00%    |   8.941   | 14.77% $\pm$ 0.75% |
-| Spatial      | BHSig260 Hindi      |   23    |   3.47% $\pm$ 0.90%   |   3.34%    |   2.575   | 10.00% $\pm$ 0.62% |
-| Spatial      | BHSig260 Bengali    |   16    |   6.82% $\pm$ 1.10%   |   6.89%    |   2.185   | 4.45% $\pm$ 0.79% |
-| Spatial      | UTSig               |   18    |  26.34% $\pm$ 2.17%   |   27.65%   |   1.277   | 9.28% $\pm$ 0.68% |
-| **Temporal** | **All Combined**    | **31**  | **7.79% $\pm$ 0.63%** | **7.92%**  | **1.709** | **2.28% $\pm$ 0.35%** |
-| Temporal     | SigComp2011 Dutch   |   15    |   4.11% $\pm$ 1.03%   |   4.18%    |   2.450   | 0.98% $\pm$ 0.42% |
-| Temporal     | SigComp2011 Chinese |    6    |   5.28% $\pm$ 0.85%   |   5.23%    |   1.782   | 3.03% $\pm$ 0.91% |
-| Temporal     | SVC2004 Task 2      |   10    |  13.69% $\pm$ 2.25%   |   14.92%   |   1.505   | 3.82% $\pm$ 1.33% |
-| **Fused**    | **BiosecurID-SONOF, paired, skilled forgeries** | **132** | **5.17% $\pm$ 0.52%** § | n/a ‡ | n/a ‡ | n/a |
-| Fused        | SigComp2009 / NFI, paired, skilled forgeries |   14    |   3.40% $\pm$ 0.56%   |   n/a ‡    |   n/a ‡   | 1.27% $\pm$ 0.42% |
-| Fused        | SigComp2009 / NFI, paired, skilled + random  |   14    |   2.52% $\pm$ 0.64%   |   n/a ‡    |   n/a ‡   | n/a |
-
-‡ Fused rows: shipped weights at $\alpha = 0.4$ on both modalities of the same signing events, writers that are not in any training corpus, 10 enrollment draws. Pooled EER and Cohen's d were not computed for this run. The skilled + random row adds, for each writer, as many random forgeries as that writer has skilled forgeries. NFI took no part in choosing $\alpha$ or $\tau$.
-
-§ SONOF row: $\alpha$ and $\tau$ chosen on 66 writers and measured on the other 66, mean $\pm$ SD over 200 random writer splits. BiosecurID-SONOF is a licensed corpus (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
-
-Random-forgery EER: the impostors are the genuine signatures of the other test writers of the same dataset (never across datasets), scored against the same 5 references and draws as the skilled column.
-
----
-
-### Operating Point & Confusion Matrices
-
-Confusion matrices on the held-out test writers of each branch's own corpora, at the threshold fitted on that branch's validation writers (spatial 0.7637, temporal 0.7900). The shipped paper-alone threshold is `SPATIAL_DECISION_THRESHOLD = 0.8387`, the EER point on the in-house XPPen campaign, where paper alone reads FAR 22.22% and FRR 26.40% (18 writers, 36 skilled forgeries); the pen threshold is unchanged:
-
-> The notebook is committed **without stored cell outputs**. They were 88% of a
-> 843 KB file and made every re-run an unreadable diff. The figures it produces
-> are the ones shown below, tracked under `results/`; regenerate them with
-> `python tools/run_notebook_cells.py`.
-
-|                           Spatial Branch                           |                           Temporal Branch                            |
-| :----------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Confusion matrix, spatial branch](results/confusion_spatial.png) | ![Confusion matrix, temporal branch](results/confusion_temporal.png) |
-
-| Modality     | True Reject | False Accept | True Accept | False Reject |    FAR     |    FRR     |
-| ------------ | ----------: | -----------: | ----------: | -----------: | :--------: | :--------: |
-| **Spatial**  |       1,360 |          110 |       1,181 |          108 | **7.48%**  | **8.38%**  |
-| **Temporal** |         557 |           70 |         548 |           24 | **11.16%** | **4.20%**  |
-
-_Error Complementarity:_ Spatial and temporal modalities exhibit complementary error distributions ($\phi < 0$). Spatial models tend toward false rejections (rejecting genuine variations), while temporal models tend toward false acceptances. Multimodal late fusion effectively balances both operating regimes.
-
----
-
-### ROC and DET Curves
-
-|   Modality   |                 ROC Curve                 |                 DET Curve                 |
-| :----------: | :---------------------------------------: | :---------------------------------------: |
-| **Spatial**  |  ![ROC spatial](results/roc_spatial.png)  |  ![DET spatial](results/det_spatial.png)  |
-| **Temporal** | ![ROC temporal](results/roc_temporal.png) | ![DET temporal](results/det_temporal.png) |
-
----
-## Database & Capture Layer 
-
-### Database
-
-Encrypted embedding storage tested end-to-end — AES-256-GCM encryption,
-decryption, and audit logging all verified successfully via
-`src/database/db_manager.py`.
-
-![Database test result](assets/screenshots/Database_test_success.png)
-![Database encryption](assets/screenshots/Database_encryption.png)
-
-
-Test confirms: encrypted spatial and temporal embeddings match their
-decrypted values, and verification events are correctly recorded in
-the audit log.
-
-### Signature Capture
-
-`src/capture/tablet.py` records the XPPen Deco 640 through PyQt5 tablet events and turns each
-signature into the `[L, 4]` array (x, y, pressure, dt) defined in `AGENTS.md`.
-
-`tools/capture_session.py` is the data collection app built on it. One volunteer, one sitting:
-3 practice signatures (not saved), 12 tablet signatures with a break after 6, then the paper
-sheet. Print the sheet with `python tools/capture_session.py --make-sheet sheet.pdf` (A4, actual
-size, two-sided). Import the scan as a PDF or as images, in any page order: the page with the
-most signatures is taken as the front. The scan is cut into one image per box. Every tablet event, with hover and
-tilt, is saved as CSV. Each paper box is saved in colour, with its ink crop beside it, and the
-operator can delete or replace a box before ending the session. The paper can also be imported
-later. Starting a code, or a forger and volunteer pair, that already has files opens a menu to
-continue the tablet, import or review the paper, redo tablet signatures, or delete. Files go to
-`data/inhouse/`, one manifest row each.
-
-![Capture session, signing on the tablet (example signature)](assets/screenshots/capture_session_signing.png)
-![Capture session, paper import with the ink crops (example signature)](assets/screenshots/capture_session_paper.png)
-
-One full session on Linux (Hyprland, Wayland), one signer:
-
-| Measure | Result |
-| --- | --- |
-| Tablet signatures passing the input gate | 12 of 12 |
-| Tablet report interval, median | 4.0 ms (250 Hz) |
-| Points per signature on the 10 ms grid | 60 to 70 |
-| Paper boxes whose ink crop holds the whole signature | 13 of 13 (phone scan of folded A4; faint strokes show small gaps in 4) |
-
-**Status:** tested on Linux and Windows with the tablet. On Windows the app picks the pen input
-at start: Wintab when the XPPen driver is installed, Windows Ink otherwise; `--pen-api wintab`
-or `--pen-api ink` forces one. The manifest records the OS, the pen input and the tablet model.
-
-| Measure (Windows, Qt 5.15.2) | Wintab (XPPen driver 4.0.21) | Windows Ink | Linux |
-| --- | --- | --- | --- |
-| Report interval, median | 4.0 ms after clock repair (arrives in bursts of 4 every 16 ms) | 4.0 ms | 4.0 ms |
-| Pressure step | 1/16383 | 1/1024 | 1/16384 |
-| Saved session signatures passing the input gate | 12 of 12 | 12 of 12 | 12 of 12 |
-
-The same signer's pressure read about 1.5 times higher on Windows with the driver than on Linux,
-so enrol and verify on one operating system.
-
-## Standards & Compliance
-
-| Standard                 | Application in System Architecture                                       |     Status      |
-| ------------------------ | ------------------------------------------------------------------------ | :-------------: |
-| **ISO/IEC 23053:2022**   | Writer-independent data splits, reproducible training configuration      |     **Met**     |
-| **IEEE 730-2014**        | Configuration management, deviation tracking, verification audit logging |   **Partial**   |
-| **ISO/IEC 24745:2022**   | Biometric template protection (only derived embeddings persisted)        | **Architected** |
-| **ISO/IEC 9075-1:2023**  | Structured relational SQLite database schema                             | **Architected** |
-| **ISO/IEC 18033-1:2021** | Application-layer AES-256-GCM encryption of stored templates             | **Architected** |
-
-Configuration control and the deviation log are in place. `src/database/db_manager.py` now stores encrypted templates and a verification audit log in SQLite, and `tests/test_database_security.py` checks its encryption, but no test yet runs the whole system from enrolment to a logged decision, so IEEE 730-2014 stays Partial. The code behind the three "Architected" rows now exists in `src/database/`; they stay Architected until each one is checked against its standard. Only ISO/IEC 23053:2022 has been demonstrated so far.
+| Standard                 | What it covers here                                                       |    Status     |
+| ------------------------ | ------------------------------------------------------------------------- | :-----------: |
+| **ISO/IEC 23053:2022**   | Writer-independent splits, a split record shipped with every weight, reproducible training | **Met** |
+| **IEEE 730-2014**        | Configuration control, deviation log, audit log of every verification and account change; no whole-system test yet (#43) | **Partial** |
+| **ISO/IEC 24745:2022**   | Only embeddings stored, encrypted; re-enrolment when the model changes; no time-limited retention yet (#59) | **Partial** |
+| **ISO/IEC 9075-1:2023**  | Relational SQLite schema: members, key slots, signers, enrolments, audit log | **Met** |
+| **ISO/IEC 18033-1:2021** | AES-256-GCM encryption of the whole vault file, keys wrapped per member (scrypt) | **Met** |
 
 ---
 
 ## Hardware
 
-Digitizer hardware requirements for deployment:
+Requirements on the tablet and its capture path:
 
-| Specification       | Requirement                                                   | System Handling                                                                                      |
+| Specification       | Requirement                                                   | How the system handles it                                                                            |
 | ------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| **Report Rate**     | $\ge 200\text{ Hz}$                                           | Resampled by timestamp onto a 10 ms grid (100 Hz model rate); never decimated by an integer factor   |
-| **Timestamp**       | One timestamp per sample, monotonic                           | Clock repaired before resampling: a wrapping counter is unwrapped, a burst sharing one timestamp is spread evenly |
-| **Resolution**      | $\ge 2540\text{ LPI}$                                         | Coordinate normalization via per-signature z-score                                                   |
-| **Pressure Levels** | $\ge 1024$ levels, with the maximum reported by the driver    | Scaled to $[0.0, 1.0]$ by the device's reported maximum; flat 1.0 imputation in degraded mode       |
-| **Device Model**    | The same model for enrolment and verification                 | Not supported across models: on the same 65 people, references from one tablet scored another's probes at 13 to 42% EER |
-| **Interface**       | USB HID                                                       | Qt tablet events: Windows (Wintab through the tablet driver, else Windows Ink), Linux                |
-
-Matching specifications do not make tablets interchangeable. Three tablets rated at 200 Hz stamped time three different ways and reported pressure maxima of 833, 1023 and 511, so these rows are requirements on the capture path, not only on the hardware.
+| **Report rate**     | $\ge 200\text{ Hz}$                                           | Resampled by timestamp onto a 10 ms grid (100 Hz model rate)                                         |
+| **Timestamp**       | One timestamp per sample, monotonic                           | A wrapping counter is unwrapped and a burst sharing one timestamp is spread evenly before resampling |
+| **Resolution**      | $\ge 2540\text{ LPI}$                                         | Coordinates normalised per signature (z-score)                                                       |
+| **Pressure levels** | $\ge 1024$ levels, with the maximum reported by the driver    | Scaled to $[0, 1]$ by the reported maximum                                                           |
+| **Device model**    | The same model for enrolment and verification                 | Not supported across models: on the same 65 people, references from one tablet scored another's probes at 13 to 42% EER |
+| **Interface**       | USB HID                                                       | Qt tablet events: Windows (Wintab with the tablet driver, else Windows Ink), Linux                   |
 
 ---
 
 ## References
 
-### How the Reference Architecture Differs
-
-The spatial Siamese CNN was benchmarked directly against the reference architecture of Dey et al. (SigNet) [1]:
-
-| Hyperparameter / Component | Dey et al. SigNet [1]                            | This Project (Shipped Spatial)                            | Rationale & Empirical Impact                            |
-| -------------------------- | ------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------- |
-| **Input Geometry**         | $155 \times 220$, divided by std                 | $155 \times 220$, divided by 255                          | Retains natural pixel contrast with inverted polarity   |
-| **Convolutional Stack**    | $96 \times 11 \times 11 \to 256 \to 384 \to 256$ | $96 \times 11 \times 11 \to 256 \to 384 \to 256$ (`wide`) | Wide trunk improved pooled EER from 12.31% to 11.78%    |
-| **Normalization**          | Local Response Normalization (LRN)               | GroupNorm (`num_groups=32`)                               | GroupNorm avoids batch-size dependency and pair leakage |
-| **Embedding Head**         | FC-1024 (Dropout 0.5) $\to$ FC-128               | $4 \times 4$ Avg+Max Pool (8192) $\to$ FC-512             | FC-1024 head caused metric collapse on 301 writers      |
-| **Dropout Schedule**       | 0.3 after pool 2 & 4; 0.5 after FC               | None (`CONV_DROPOUT = 0.0`)                               | Dropout cost +6.78 EER points due to data scarcity      |
-| **Loss Function**          | Contrastive Loss (Margin 1.0)                    | Contrastive Loss + Hard-Negative Mining                   | Mines challenging impostor pairs dynamically            |
-| **Optimization**           | RMSprop ($10^{-4}$), batch 128                   | Adam ($10^{-3}$, plateau LR schedule), batch 32           | Adam + plateau LR tightened draw variance by 40%        |
-
----
-
 ### Bibliography
 
 #### Methods
 
-1. S. Dey, A. Dutta, J. I. Toledo, S. K. Ghosh, J. Lladós, U. Pal. _SigNet: Convolutional Siamese Network for Writer Independent Offline Signature Verification._ arXiv:1707.02131, 2017. [arXiv:1707.02131](https://arxiv.org/abs/1707.02131)
-2. L. G. Hafemann, R. Sabourin, L. S. Oliveira. _Learning features for offline handwritten signature verification using deep convolutional neural networks._ Pattern Recognition 70:163–176, 2017. doi:10.1016/j.patcog.2017.05.012.
-3. O. Mersa, F. Etaati, S. Masoudnia, B. N. Araabi. _Learning Representations from Persian Handwriting for Offline Signature Verification, a Deep Transfer Learning Approach._ arXiv:1903.06249, 2019. [arXiv:1903.06249](https://arxiv.org/abs/1903.06249)
-4. A. Soleimani, B. N. Araabi, K. Fouladi. _Deep Multitask Metric Learning for Offline Signature Verification._ Pattern Recognition Letters 80:84–90, 2016.
-5. A. Soleimani, K. Fouladi, B. N. Araabi. _UTSig: A Persian offline signature dataset._ IET Biometrics 6(1):1–8, 2017.
-6. D.-Y. Yeung, H. Chang, Y. Xiong, S. George, R. Kashi, T. Matsumoto, G. Rigoll. _SVC2004: First International Signature Verification Competition._ ICBA 2004, LNCS 3072, pp. 16–22, 2004.
-7. C. Sekhar, P. Mukherjee, D. S. Guru, V. Pulabaigari. _OSVNet: Convolutional Siamese Network for Writer Independent Online Signature Verification._ ICDAR 2019. [arXiv:1904.00240](https://arxiv.org/abs/1904.00240)
-8. M. Liwicki, M. I. Malik, C. E. van den Heuvel, X. Chen, C. Berger, R. Stoel, M. Blumenstein, B. Found. _Signature Verification Competition for Online and Offline Skilled Forgeries (SigComp2011)._ ICDAR 2011, pp. 1480–1484, 2011.
-9. M. Antal, L. Z. Szabó, T. Tordai. _Online Signature Verification on MOBISIG Finger-Drawn Signature Corpus._ Mobile Information Systems, vol. 2018, Article ID 3127042, 2018.
-10. F.-H. Huang, H.-M. Lu. _Multiscale Feature Learning Using Co-Tuplet Loss for Offline Handwritten Signature Verification._ 2023. [arXiv:2308.00428](https://arxiv.org/abs/2308.00428)
-11. J. Jiang, S. Lai, L. Jin, Y. Zhu. _DsDTW: Local Representation Learning with Deep Soft-DTW for Dynamic Signature Verification._ IEEE Transactions on Information Forensics and Security 17:2198–2212, 2022.
-12. R. Li, D. Yang. _Online Signature Verification Using Augmented Path Signature and T-Mamba._ 2026. [arXiv:2609.08276](https://arxiv.org/abs/2609.08276)
+1. S. Dey, A. Dutta, J. I. Toledo, S. K. Ghosh, J. Lladós, U. Pal. _SigNet: Convolutional Siamese Network for Writer Independent Offline Signature Verification._ arXiv:1707.02131, 2017.
+2. F.-H. Huang, H.-M. Lu. _Multiscale Feature Learning Using Co-Tuplet Loss for Offline Handwritten Signature Verification._ arXiv:2308.00428, 2023.
+3. O. Mersa, F. Etaati, S. Masoudnia, B. N. Araabi. _Learning Representations from Persian Handwriting for Offline Signature Verification, a Deep Transfer Learning Approach._ arXiv:1903.06249, 2019.
+4. D.-Y. Yeung, H. Chang, Y. Xiong, S. George, R. Kashi, T. Matsumoto, G. Rigoll. _SVC2004: First International Signature Verification Competition._ ICBA 2004, LNCS 3072, pp. 16-22, 2004.
+5. J. Jiang, S. Lai, L. Jin, Y. Zhu. _DsDTW: Local Representation Learning with Deep Soft-DTW for Dynamic Signature Verification._ IEEE Transactions on Information Forensics and Security 17:2198-2212, 2022.
+6. R. Li, D. Yang. _Online Signature Verification Using Augmented Path Signature and T-Mamba._ arXiv:2609.08276, 2026.
 
-#### Datasets & Required Licensure Citations
+#### Datasets
 
 ⚖ marks the references a dataset licence requires citing in any published work that uses that dataset: the four of DeepSignDB clause 4.5 and the one of BiosecurID-SONOF clause 4.4 (see [DATASET_LICENSES.md](DATASET_LICENSES.md)).
 
-13. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and identification using distance statistics._ IJPRAI 18(7):1339–1360, 2004. (CEDAR)
-14. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line signature verification method based on texture features on a large indic-script signature dataset._ DAS 2016, pp. 72–77, 2016. (BHSig260)
-15. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign: Deep On-Line Signature Verification._ IEEE Transactions on Biometrics, Behavior, and Identity Science, 3(2):229–239, 2021. (DeepSignDB)
-16. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235–246, 2010.
-17. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097–1111, 2010.
-18. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395–401, 2003.
-19. ⚖ J. Galbally, M. Diaz-Cabrera, M. A. Ferrer, M. Gomez-Barrero, A. Morales, J. Fierrez. _On-Line Signature Recognition Through the Combination of Real Dynamic Data and Synthetically Generated Static Data._ Pattern Recognition, 48:2921–2934, 2015. (BiosecurID-SONOF)
+7. M. K. Kalera, S. Srihari, A. Xu. _Offline signature verification and identification using distance statistics._ IJPRAI 18(7):1339-1360, 2004. (CEDAR)
+8. S. Pal, A. Alaei, U. Pal, M. Blumenstein. _Performance of an off-line signature verification method based on texture features on a large indic-script signature dataset._ DAS 2016, pp. 72-77, 2016. (BHSig260)
+9. A. Soleimani, K. Fouladi, B. N. Araabi. _UTSig: A Persian offline signature dataset._ IET Biometrics 6(1):1-8, 2017. (UTSig)
+10. M. Liwicki, M. I. Malik, C. E. van den Heuvel, X. Chen, C. Berger, R. Stoel, M. Blumenstein, B. Found. _Signature Verification Competition for Online and Offline Skilled Forgeries (SigComp2011)._ ICDAR 2011, pp. 1480-1484, 2011. (SigComp2011)
+11. ⚖ R. Tolosana, R. Vera-Rodriguez, J. Fierrez, J. Ortega-Garcia. _DeepSign: Deep On-Line Signature Verification._ IEEE Transactions on Biometrics, Behavior, and Identity Science, 3(2):229-239, 2021. (DeepSignDB)
+12. ⚖ J. Fierrez, J. Galbally, et al. _BiosecurID: A Multimodal Biometric Database._ Pattern Analysis and Applications, 13(2):235-246, 2010.
+13. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _The Multi-Scenario Multi-Environment BioSecure Multimodal Database (BMDB)._ IEEE TPAMI, 32(6):1097-1111, 2010.
+14. ⚖ J. Ortega-Garcia, J. Fierrez, et al. _MCYT Baseline Corpus: A Bimodal Biometric Database._ IEE Proc. Vision, Image and Signal Processing, 150(6):395-401, 2003.
+15. ⚖ J. Galbally, M. Diaz-Cabrera, M. A. Ferrer, M. Gomez-Barrero, A. Morales, J. Fierrez. _On-Line Signature Recognition Through the Combination of Real Dynamic Data and Synthetically Generated Static Data._ Pattern Recognition, 48:2921-2934, 2015. (BiosecurID-SONOF)
 
 #### Standards
 
-20. **ISO/IEC 23053:2022** Framework for Artificial Intelligence Systems Using Machine Learning.
-21. **ISO/IEC 24745:2022** Information Technology Security Techniques Biometric Information Protection.
-22. **ISO/IEC 18033-1:2021** Information Security Encryption Algorithms.
-23. **IEEE 730-2014** IEEE Standard for Software Quality Assurance Processes.
+16. **ISO/IEC 23053:2022** Framework for Artificial Intelligence Systems Using Machine Learning.
+17. **ISO/IEC 24745:2022** Information security, cybersecurity and privacy protection: Biometric information protection.
+18. **ISO/IEC 9075-1:2023** Information technology, Database languages SQL, Part 1: Framework.
+19. **ISO/IEC 18033-1:2021** Information security, Encryption algorithms, Part 1: General.
+20. **IEEE 730-2014** IEEE Standard for Software Quality Assurance Processes.
 
 ---
 
 ## Team
 
-**Team 06** — Senior Design Project, Department of Electrical and Computer Engineering, King Abdulaziz University.
+**Team 06**, Senior Design Project, Department of Electrical and Computer Engineering, King Abdulaziz University.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+MIT License, see [LICENSE](LICENSE).
 
 ---
 
 ## Acknowledgments
 
 - King Abdulaziz University, Faculty of Engineering, Department of Electrical and Computer Engineering.
-- Authors of the CEDAR, BHSig260, UTSig, SVC2004, SigComp2011, and DeepSignDB biometric datasets.
+- The authors of the CEDAR, BHSig260, UTSig, SVC2004, SigComp2011, SigComp2009, DeepSignDB and BiosecurID-SONOF datasets.
