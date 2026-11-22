@@ -22,9 +22,10 @@ from src.gui.sidebar import Sidebar
 from src.gui.dashboard_page import DashboardScreen
 from src.gui.clients_page import ClientsPage
 from src.gui.employees_page import EmployeesPage, restore_from_backup
+from src.gui.password_field import PasswordField, new_password_helpers
 from src.gui.profile_page import ProfilePage
 from src.gui.styles import STYLE
-from src.gui.workers import WarmUpWorker, wait_for_workers
+from src.gui.workers import LoginWorker, WarmUpWorker, wait_for_workers
 import src.gui.storage as storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,16 +59,29 @@ def create_icon_label(size=160):
     return icon_label
 
 
-def centered(content_layout):
+def centered(content_layout, max_width=None):
+    """Centres a column. With max_width the column fills the window up to that width, so it
+    shrinks in a narrow window."""
     outer = QVBoxLayout()
     outer.addStretch(1)
     row = QHBoxLayout()
     row.addStretch(1)
-    row.addLayout(content_layout)
+    if max_width:
+        column = QWidget()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        column.setLayout(content_layout)
+        column.setMaximumWidth(max_width)
+        row.addWidget(column, 100)   # takes the space first, the stretches get what is left
+    else:
+        row.addLayout(content_layout)
     row.addStretch(1)
     outer.addLayout(row)
     outer.addStretch(1)
     return outer
+
+
+# Widest the login and create-vault forms get: the longest placeholder fits at the 15 px base text
+FORM_WIDTH = 420
 
 
 class WelcomeScreen(QWidget):
@@ -109,9 +123,8 @@ class LoginScreen(QWidget):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(14)
-        content.setAlignment(Qt.AlignHCenter)
 
-        title = QLabel("Member Login")
+        title = QLabel("Login")
         title.setProperty("role", "hero-title")
         title.setAlignment(Qt.AlignHCenter)
         content.addWidget(title)
@@ -120,34 +133,28 @@ class LoginScreen(QWidget):
         self.companyInput = QComboBox()            # the last vault used is preselected
         self.companyInput.addItems(storage.list_companies())
         self.companyInput.setCurrentText(storage.current_company() or "")
-        self.companyInput.setFixedWidth(260)
         self.companyInput.setHidden(self.companyInput.count() == 1)   # one vault: nothing to pick
-        content.addWidget(self.companyInput, alignment=Qt.AlignHCenter)
+        content.addWidget(self.companyInput)
 
         self.usernameInput = QLineEdit()
         self.usernameInput.setPlaceholderText("User ID")
-        self.usernameInput.setFixedWidth(260)
-        content.addWidget(self.usernameInput, alignment=Qt.AlignHCenter)
+        content.addWidget(self.usernameInput)
 
-        self.passwordInput = QLineEdit()
-        self.passwordInput.setPlaceholderText("Password")
-        self.passwordInput.setEchoMode(QLineEdit.Password)
-        self.passwordInput.setFixedWidth(260)
-        content.addWidget(self.passwordInput, alignment=Qt.AlignHCenter)
+        self.passwordInput = PasswordField("Password")
+        content.addWidget(self.passwordInput)
 
         self.errorLabel = QLabel("")
         self.errorLabel.setWordWrap(True)
-        self.errorLabel.setFixedWidth(420)
         self.errorLabel.setProperty("role", "status-error")
         self.errorLabel.setAlignment(Qt.AlignHCenter)
         content.addWidget(self.errorLabel)
 
-        login_button = QPushButton("Login")
-        login_button.setProperty("role", "primary")
-        login_button.setFixedWidth(260)
-        login_button.setFixedHeight(44)
-        login_button.clicked.connect(self._handle_login)
-        content.addWidget(login_button, alignment=Qt.AlignHCenter)
+        self.loginButton = QPushButton("Login")
+        self.loginButton.setProperty("role", "primary")
+        self.loginButton.setFixedHeight(44)
+        self.loginButton.clicked.connect(self._handle_login)
+        content.addWidget(self.loginButton)
+        self._worker = None
 
         self.registerButton = QPushButton("Create a new vault")
         self.registerButton.setProperty("role", "ghost")
@@ -155,18 +162,31 @@ class LoginScreen(QWidget):
         content.addWidget(self.registerButton, alignment=Qt.AlignHCenter)
 
         self.on_login_success = on_login_success
-        self.setLayout(centered(content))
+        self.setLayout(centered(content, FORM_WIDTH))
 
     def _handle_login(self):
-        username = self.usernameInput.text().strip()
-        password = self.passwordInput.text()
-
-        try:
-            storage.open_company(self.companyInput.currentText())
-            success, employee, message = storage.authenticate_employee(username, password)
-        except storage.StorageError as e:
-            QMessageBox.critical(self, STORAGE_ERROR_TITLE, str(e))
+        if self._worker is not None and self._worker.isRunning():
             return
+        self.loginButton.setEnabled(False)
+        self.loginButton.setText("Logging in...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._worker = LoginWorker(self.companyInput.currentText(), self.usernameInput.text().strip(),
+                                   self.passwordInput.text())
+        self._worker.finished.connect(self._login_done)
+        self._worker.failed.connect(self._login_failed)
+        self._worker.start()
+
+    def _end_busy(self):
+        QApplication.restoreOverrideCursor()
+        self.loginButton.setText("Login")
+        self.loginButton.setEnabled(True)
+
+    def _login_failed(self, message):
+        self._end_busy()
+        QMessageBox.critical(self, STORAGE_ERROR_TITLE, message)
+
+    def _login_done(self, success, employee, message):
+        self._end_busy()
         if not success:
             self._set_label("status-error", f"⚠ {message}")
             return
@@ -193,7 +213,6 @@ class RegisterScreen(QWidget):
         super().__init__()
         content = QVBoxLayout()
         content.setSpacing(14)
-        content.setAlignment(Qt.AlignHCenter)
 
         title = QLabel("Create a vault")
         title.setProperty("role", "hero-title")
@@ -203,52 +222,45 @@ class RegisterScreen(QWidget):
         warning = QLabel(storage.ADMIN_WARNING)
         warning.setProperty("role", "warning")
         warning.setWordWrap(True)
-        warning.setFixedWidth(420)
         warning.setAlignment(Qt.AlignHCenter)
-        content.addWidget(warning, alignment=Qt.AlignHCenter)
+        content.addWidget(warning)
         content.addSpacing(10)
 
         self.companyInput = QLineEdit()
         self.companyInput.setPlaceholderText("Vault name (your company, branch, or your own name)")
-        self.companyInput.setFixedWidth(260)
-        content.addWidget(self.companyInput, alignment=Qt.AlignHCenter)
+        content.addWidget(self.companyInput)
 
         self.fullNameInput = QLineEdit()
         self.fullNameInput.setPlaceholderText("Full Name")
-        self.fullNameInput.setFixedWidth(260)
-        content.addWidget(self.fullNameInput, alignment=Qt.AlignHCenter)
+        content.addWidget(self.fullNameInput)
         self._prefilled = ""                       # the vault name follows Full Name until the user edits it
         self.fullNameInput.textChanged.connect(self._prefill_vault_name)
 
         self.usernameInput = QLineEdit()
         self.usernameInput.setPlaceholderText("User ID")
-        self.usernameInput.setFixedWidth(260)
-        content.addWidget(self.usernameInput, alignment=Qt.AlignHCenter)
+        content.addWidget(self.usernameInput)
 
-        self.passwordInput = QLineEdit()
-        self.passwordInput.setPlaceholderText("Password")
-        self.passwordInput.setEchoMode(QLineEdit.Password)
-        self.passwordInput.setFixedWidth(260)
-        content.addWidget(self.passwordInput, alignment=Qt.AlignHCenter)
+        self.passwordInput = PasswordField("Password")
+        content.addWidget(self.passwordInput)
 
-        self.confirmPasswordInput = QLineEdit()
-        self.confirmPasswordInput.setPlaceholderText("Confirm Password")
-        self.confirmPasswordInput.setEchoMode(QLineEdit.Password)
-        self.confirmPasswordInput.setFixedWidth(260)
-        content.addWidget(self.confirmPasswordInput, alignment=Qt.AlignHCenter)
+        self.confirmPasswordInput = PasswordField("Confirm Password")
+        content.addWidget(self.confirmPasswordInput)
+
+        generate, hint = new_password_helpers(self.passwordInput, self.confirmPasswordInput)
+        hint.setAlignment(Qt.AlignHCenter)
+        content.addWidget(hint)
+        content.addWidget(generate, alignment=Qt.AlignHCenter)
 
         self.messageLabel = QLabel("")
         self.messageLabel.setAlignment(Qt.AlignHCenter)
         self.messageLabel.setWordWrap(True)
-        self.messageLabel.setFixedWidth(420)
-        content.addWidget(self.messageLabel, alignment=Qt.AlignHCenter)
+        content.addWidget(self.messageLabel)
 
         self.createButton = QPushButton("Create Vault")
         self.createButton.setProperty("role", "primary")
-        self.createButton.setFixedWidth(260)
         self.createButton.setFixedHeight(44)
         self.createButton.clicked.connect(self._handle_register)
-        content.addWidget(self.createButton, alignment=Qt.AlignHCenter)
+        content.addWidget(self.createButton)
 
         self.restoreButton = QPushButton("Restore a vault from a backup")
         self.restoreButton.setProperty("role", "ghost")
@@ -263,7 +275,7 @@ class RegisterScreen(QWidget):
 
         self.on_register_success = on_register_success
         self.on_restored = on_restored
-        self.setLayout(centered(content))
+        self.setLayout(centered(content, FORM_WIDTH))
 
     def _prefill_vault_name(self, full_name):
         if self.companyInput.text() == self._prefilled:
@@ -345,7 +357,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Signature Verification System")
-        self.resize(900, 680)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(screen.width() * 0.8), int(screen.height() * 0.8))   # pages scroll when it is small
         self.current_employee = None
         self.startup_failed = False
         try:
@@ -496,6 +509,9 @@ def main():
         # Without its own ID the app is grouped under python.exe, and the taskbar shows Python's icon.
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EE499.Team06.SignatureVerification")
+    # Qt5 draws at 100% unless told to follow the display scaling (Windows laptops run 125-200%)
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = QApplication(sys.argv)
     install_error_dialog()
     app.setWindowIcon(QIcon(ICON_PATH))   # the title bar of every window, dialogs included

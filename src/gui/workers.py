@@ -131,6 +131,26 @@ class VerifyWorker(TrackedThread):
         except Exception as e:
             self.failed.emit(f"Unexpected error: {e}")
 
+class LoginWorker(TrackedThread):
+    """Opens the vault and checks the password: unwrapping a key slot is scrypt, slow by design."""
+    finished = pyqtSignal(bool, object, str)   # emits: storage.authenticate_employee() result
+    failed = pyqtSignal(str)                   # emits: a StorageError, shown in a dialog
+
+    def __init__(self, company: str, username: str, password: str):
+        super().__init__()
+        self.company, self.username, self.password = company, username, password
+
+    def run(self):
+        import src.gui.storage as storage
+        try:
+            storage.open_company(self.company)
+            self.finished.emit(*storage.authenticate_employee(self.username, self.password))
+        except storage.StorageError as e:
+            self.failed.emit(str(e))
+        finally:
+            self.password = None
+
+
 class WarmUpWorker(TrackedThread):
     """Loads both models once when the app opens, so the first verification is fast."""
     done = pyqtSignal()

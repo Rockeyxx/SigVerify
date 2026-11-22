@@ -259,7 +259,7 @@ def db(empty_db):
 @pytest.fixture
 def alice_bob(db):
     """Alice is the admin (logged in); she added the employee Bob."""
-    assert storage.register_employee("Bob B", "bob", "bob-password-1")[0]
+    assert storage.register_employee("Bob B", "bob", "bob-password-1-long")[0]
 
 
 class FakeWorker:
@@ -459,7 +459,7 @@ def test_replay_check_fails_loudly_when_the_model_returns_no_probe_embeddings(ap
 def test_bob_verifies_alices_client_and_the_log_row_has_bob_and_the_details(app, alice_bob, fake_workers):
     storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _panel("bob")
     panel.clientIdInput.setText("c")
     panel.selected_image_path = "probe.png"
@@ -581,7 +581,7 @@ def test_enrolment_closed_tablet_window_changes_nothing(app, db, monkeypatch):
 
 def test_enrolment_delete_refused_shows_why_and_keeps_the_form(app, alice_bob, monkeypatch):
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     storage.save_client_enrollment("c", [], "bob", spatial_embeddings=[_b64(512)])
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a: QtWidgets.QMessageBox.Yes)
     panel = enrollment_page.EnrollmentPanel()
@@ -619,7 +619,7 @@ def test_enrolment_non_admin_adds_paper_to_a_pen_only_client(app, alice_bob):
     k = NUM_ENROLLMENT_REFERENCES
     storage.save_client_enrollment("c", [_b64(128, i) for i in range(k)], "alice")
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _enrol_panel("bob")
     _load(panel, "c")
     assert panel.selectImageButton.isEnabled() and panel.addImageButton.isEnabled()
@@ -637,7 +637,7 @@ def test_enrolment_non_admin_adds_paper_to_a_pen_only_client(app, alice_bob):
 def test_enrolment_non_admin_cannot_replace_a_paper_set(app, alice_bob):
     storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(5)])
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _enrol_panel("bob")
     _load(panel, "c")
     assert not panel.selectImageButton.isEnabled() and not panel.addImageButton.isEnabled()
@@ -646,7 +646,7 @@ def test_enrolment_non_admin_cannot_replace_a_paper_set(app, alice_bob):
 
 def test_enrolment_new_client_is_open_to_everyone(app, alice_bob):
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _enrol_panel("bob")
     _load(panel, "new")
     assert panel.selectImageButton.isEnabled() and panel.captureDynamicButton.isEnabled()
@@ -656,7 +656,7 @@ def test_enrolment_new_client_is_open_to_everyone(app, alice_bob):
 def test_enrolment_lookup_is_company_wide(app, alice_bob):
     storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, 1)])
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _enrol_panel("bob")
     _load(panel, "c")
     assert panel.clientStatusLabel.text().startswith("Loaded existing signer")
@@ -727,7 +727,7 @@ def test_enrolment_confirmation_follows_the_id_being_saved_not_the_last_load(app
 def test_enrolment_editing_the_id_after_load_reapplies_permissions(app, alice_bob):
     storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(5)])
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _enrol_panel("bob")
     _load(panel, "c")
     assert not panel.selectImageButton.isEnabled()
@@ -810,7 +810,7 @@ def test_enrolment_save_uses_what_was_captured_when_save_was_pressed(app, db, fa
 def test_enrolment_storage_refusal_is_shown_not_a_success(app, alice_bob, monkeypatch):
     storage.save_client_enrollment("c", [], "alice", spatial_embeddings=[_b64(512, i) for i in range(5)])
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     panel = _enrol_panel("bob")                  # opened as a new client by mistake: a race
     panel._pending_client_id = "c"
     panel._on_enroll_success({"embeddings": [_b64(512, 7)], "dynamic_embeddings": [],
@@ -852,6 +852,13 @@ def _login(window, username, password):
     window.login_screen.usernameInput.setText(username)
     window.login_screen.passwordInput.setText(password)
     window.login_screen._handle_login()
+    _finish_login(window)
+
+
+def _finish_login(window):
+    """Wait for the login worker, then deliver its queued signals to the GUI thread."""
+    window.login_screen._worker.wait()
+    QtWidgets.QApplication.processEvents()
 
 
 def _register(screen, company, full_name, username, password):
@@ -1008,7 +1015,7 @@ def test_logout_locks_the_signature_data(db, make_window):
 def test_sidebar_shows_employees_to_the_admin_only(alice_bob, make_window):
     storage.logout()
     window = make_window()
-    _login(window, "bob", "bob-password-1")
+    _login(window, "bob", "bob-password-1-long")
     bar = window.sidebar
     assert bar.employeesButton.isHidden()
     bar.toggle_collapse()
@@ -1067,15 +1074,17 @@ def test_employees_page_add_reset_remove_change_only_that_account(app, alice_bob
     assert storage.find_employee("carol") is None and page.table.rowCount() == 2
 
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0] is False
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0] is False
     assert storage.authenticate_employee("bob", "bob-new-password-1")[0]
     assert storage.authenticate_employee("alice", "alice-password-1")[0]
 
 
 def _answer_restore(monkeypatch, path, username, password, company=None):
     monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
-    answers = iter(([(company, True)] if company else []) + [(username, True), (password, True)])
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: next(answers))
+    if company:
+        monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: (company, True))
+    from src.gui import employees_page
+    monkeypatch.setattr(employees_page, "ask_backup_owner", lambda parent: (username, password))
 
 
 def test_backup_then_restore_returns_to_login(db, make_window, tmp_path, monkeypatch):
@@ -1172,7 +1181,7 @@ def _alice_client_and_one_bob_verification():
     storage.save_client_enrollment("c", [_b64(128)], "alice", spatial_embeddings=[_b64(512)])
     storage.append_verification_log("c", "Genuine", 90.0, "multimodal", "alice")
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     storage.append_verification_log("c", "Forged", 20.0, "multimodal", "bob")
 
 
@@ -1181,7 +1190,7 @@ def test_bobs_clients_page_lists_alices_client_and_the_last_verification(app, al
     storage.append_verification_log("c", "Genuine", 90.0, "multimodal", "alice")   # only Alice verifies
     alices = storage.get_last_verification_for_client("c")["timestamp"]
     storage.logout()
-    assert storage.authenticate_employee("bob", "bob-password-1")[0]
+    assert storage.authenticate_employee("bob", "bob-password-1-long")[0]
     page = ClientsPage()
     page.refresh("bob")
     assert page.table.rowCount() == 1 and page.table.item(0, 0).text() == "c"
@@ -1311,7 +1320,7 @@ def test_a_long_message_wraps_instead_of_widening_the_page(app, window, name, la
 
 def test_bob_loading_a_signer_he_cannot_change_keeps_the_page_inside_the_window(app, window):
     storage.logout()
-    ok, bob, _ = storage.authenticate_employee("bob", "bob-password-1")
+    ok, bob, _ = storage.authenticate_employee("bob", "bob-password-1-long")
     assert ok
     window._handle_login_success(bob)
     window.resize(*SCREENS[0])
@@ -1320,3 +1329,143 @@ def test_bob_loading_a_signer_he_cannot_change_keeps_the_page_inside_the_window(
     assert "Only the owner can replace these" in page.clientStatusLabel.text()
     area = window.content_stack.area_of(page)
     assert window.width() <= SCREENS[0][0] and area.horizontalScrollBar().maximum() == 0
+
+
+def test_every_password_field_has_the_eye_and_every_new_password_has_generate(db, make_window):
+    from src.gui.employees_page import BackupOwnerDialog
+    from src.gui.password_field import PasswordField
+    storage.logout()
+    window = make_window()
+    _login(window, "alice", "alice-password-1")
+    screens = (window.login_screen, window.register_screen, window.employees_page, window.profile_page,
+               BackupOwnerDialog(None))
+    for screen in screens:
+        fields = [f for f in screen.findChildren(QtWidgets.QLineEdit) if f.echoMode() == QtWidgets.QLineEdit.Password]
+        assert fields and all(isinstance(f, PasswordField) for f in fields), type(screen).__name__
+    for screen in (window.register_screen, window.employees_page, window.profile_page):
+        assert "Generate password" in _buttons(screen), type(screen).__name__
+    assert _buttons(window.employees_page).count("Generate password") == 2   # add a member, reset
+
+
+def test_the_login_title_reads_login(empty_db, make_window):
+    labels = [label.text() for label in make_window().login_screen.findChildren(QtWidgets.QLabel)]
+    assert "Login" in labels and "Member Login" not in labels
+
+
+def test_the_side_menu_is_painted_a_different_shade_from_the_page(app):
+    from PyQt5.QtGui import QColor
+    from src.gui.styles import PRIMARY, PRIMARY_DARK, STYLE
+    window = QtWidgets.QWidget()                             # as in the app: a child of the styled window
+    window.setStyleSheet(STYLE)
+    window.resize(600, 700)
+    menu = sidebar.Sidebar()
+    menu.setParent(window)
+    menu.resize(sidebar.Sidebar.EXPANDED_WIDTH, 700)
+    image = window.grab().toImage()
+    empty = image.pixelColor(menu.width() // 2, 500)        # between Profile and Logout: background only
+    assert empty == QColor(PRIMARY) and empty != QColor(PRIMARY_DARK)
+
+
+def test_login_runs_off_the_gui_thread_and_shows_it_is_working(db, make_window, monkeypatch):
+    import threading
+    storage.logout()
+    window = make_window()
+    seen = {}
+    gate = threading.Event()
+    real = storage.authenticate_employee
+
+    def slow_check(username, password):
+        seen["thread"] = threading.current_thread()
+        gate.wait(5)
+        return real(username, password)
+
+    monkeypatch.setattr(storage, "authenticate_employee", slow_check)
+    screen = window.login_screen
+    screen.usernameInput.setText("alice")
+    screen.passwordInput.setText("alice-password-1")
+    screen.loginButton.click()
+    assert not screen.loginButton.isEnabled() and screen.loginButton.text() == "Logging in..."
+    assert QtWidgets.QApplication.overrideCursor().shape() == app_module.Qt.WaitCursor
+    screen.loginButton.click()                                 # a second press starts nothing
+    gate.set()
+    _finish_login(window)
+    assert seen["thread"] is not threading.main_thread()
+    assert window.current_employee["username"] == "alice"
+    assert screen.loginButton.isEnabled() and screen.loginButton.text() == "Login"
+    assert QtWidgets.QApplication.overrideCursor() is None
+
+
+def test_a_wrong_password_and_a_storage_error_keep_their_messages_after_the_worker(db, make_window, dialogs,
+                                                                                  monkeypatch):
+    storage.logout()
+    window = make_window()
+    _login(window, "alice", "wrong-password-1")
+    assert window.login_screen.errorLabel.text().startswith("⚠ ") and window.current_employee is None
+
+    def broken(_company):
+        raise storage.StorageError("The vault file could not be read")
+
+    monkeypatch.setattr(storage, "open_company", broken)
+    _login(window, "alice", "alice-password-1")
+    assert dialogs[-1][2] == "The vault file could not be read"
+    assert window.login_screen.loginButton.isEnabled() and QtWidgets.QApplication.overrideCursor() is None
+
+
+def test_high_dpi_scaling_is_on_before_the_application_is_made(monkeypatch):
+    from PyQt5.QtCore import QCoreApplication, Qt
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    class FakeApplication:
+        setAttribute = staticmethod(QtWidgets.QApplication.setAttribute)
+
+        def __init__(self, _argv):
+            seen["scaling"] = QCoreApplication.testAttribute(Qt.AA_EnableHighDpiScaling)
+            seen["pixmaps"] = QCoreApplication.testAttribute(Qt.AA_UseHighDpiPixmaps)
+            raise Stop
+
+    monkeypatch.setattr("src.capture.pen_input.choose_pen_input", lambda: None)
+    monkeypatch.setattr(app_module, "QApplication", FakeApplication)
+    with pytest.raises(Stop):
+        app_module.main()
+    assert seen == {"scaling": True, "pixmaps": True}
+
+
+def test_the_window_opens_at_most_of_the_screen_not_a_fixed_size(db, make_window):
+    screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+    window = make_window()
+    assert window.width() == int(screen.width() * 0.8) and window.height() == int(screen.height() * 0.8)
+
+
+def test_every_placeholder_on_the_login_and_vault_screens_is_shown_whole(empty_db, make_window):
+    from src.gui.password_field import PasswordField
+    from src.gui.styles import STYLE
+    window = make_window()
+    window.setStyleSheet(STYLE)
+    for screen in (window.login_screen, window.register_screen):
+        for field in screen.findChildren(QtWidgets.QLineEdit):
+            field.ensurePolished()
+            room = field.width() - 2 * 12 - 2 - (32 if isinstance(field, PasswordField) else 0)   # padding, border, eye
+            assert field.fontMetrics().horizontalAdvance(field.placeholderText()) <= room, field.placeholderText()
+
+
+def test_the_base_text_is_15_px():
+    from src.gui.styles import STYLE
+    assert "font-size: 15px;" in STYLE.split("QLabel {")[0]
+
+
+@pytest.mark.parametrize("window_width", [380, 1600])
+def test_the_vault_form_shrinks_in_a_narrow_window_and_stops_growing_in_a_wide_one(empty_db, make_window, app,
+                                                                                window_width):
+    window = make_window()
+    window.show()
+    window.resize(window_width, 800)
+    app.processEvents()
+    field = window.register_screen.passwordInput
+    if window_width < app_module.FORM_WIDTH + 100:
+        assert field.width() < app_module.FORM_WIDTH and field.mapTo(window, field.rect().topRight()).x() < window_width
+    else:
+        assert field.width() == app_module.FORM_WIDTH
+    window.close()

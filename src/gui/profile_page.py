@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
 )
 
 import src.gui.storage as storage
+from src.gui.password_field import PasswordField, new_password_helpers
 
 
 class ProfilePage(QWidget):
@@ -34,18 +35,18 @@ class ProfilePage(QWidget):
         layout.addWidget(self.usernameInput)
 
         layout.addWidget(self._section_label("NEW PASSWORD (leave blank to keep current)"))
-        self.newPasswordInput = QLineEdit()
-        self.newPasswordInput.setEchoMode(QLineEdit.Password)
+        self.newPasswordInput = PasswordField()
         layout.addWidget(self.newPasswordInput)
 
         layout.addWidget(self._section_label("CONFIRM NEW PASSWORD"))
-        self.confirmNewPasswordInput = QLineEdit()
-        self.confirmNewPasswordInput.setEchoMode(QLineEdit.Password)
+        self.confirmNewPasswordInput = PasswordField()
         layout.addWidget(self.confirmNewPasswordInput)
+        generate, hint = new_password_helpers(self.newPasswordInput, self.confirmNewPasswordInput)
+        layout.addWidget(hint)
+        layout.addWidget(generate)
 
         layout.addWidget(self._section_label("CURRENT PASSWORD (needed to set a new one)"))
-        self.currentPasswordInput = QLineEdit()
-        self.currentPasswordInput.setEchoMode(QLineEdit.Password)
+        self.currentPasswordInput = PasswordField()
         layout.addWidget(self.currentPasswordInput)
 
         self.saveButton = QPushButton("Save Changes")

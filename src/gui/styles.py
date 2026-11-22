@@ -29,7 +29,7 @@ QWidget {{
     background-color: {PRIMARY_DARK};
     color: {TEXT_LIGHT};
     font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 13px;
+    font-size: 15px;
 }}
 
 QLabel {{
@@ -168,6 +168,7 @@ QPushButton[role="danger"]:hover {{
 /* ---- Sidebar (card-focused: distinct panel, no heavy border) ---- */
 QWidget[role="sidebar"] {{
     background-color: {PRIMARY};
+    border-right: 1px solid {BORDER};
 }}
 
 QLabel[role="sidebar-name"] {{

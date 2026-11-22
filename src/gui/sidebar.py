@@ -2,7 +2,7 @@
 sidebar.py — Collapsible persistent left sidebar
 """
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 
 
@@ -21,6 +21,7 @@ class Sidebar(QWidget):
     def __init__(self):
         super().__init__()
         self.setProperty("role", "sidebar")
+        self.setAttribute(Qt.WA_StyledBackground)   # a QWidget subclass ignores a stylesheet background without it
         self.is_collapsed = False
         self.is_admin = False
 
