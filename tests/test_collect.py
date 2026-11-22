@@ -157,6 +157,32 @@ def test_one_tablet_asks_nothing(app, monkeypatch):
     assert collect_signatures(count=1)["device_model"] == "XPPen Deco 640 Pen"
 
 
+@pytest.mark.parametrize("system, driver, says_none", [
+    ("Linux", False, True),       # the kernel lists every tablet
+    ("Windows", True, True),      # Wintab lists every tablet the driver sees
+    ("Windows", False, False),    # Windows Ink may still work: no tablet name is not no tablet
+])
+def test_no_tablet_says_so_and_the_window_stays(app, monkeypatch, system, driver, says_none):
+    import src.capture.tablet as tablet
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: [])
+    monkeypatch.setattr(collect.platform, "system", lambda: system)
+    monkeypatch.setattr(collect, "wintab_installed", lambda: driver)
+    d = CollectDialog(count=1)
+    message = d.capture.label.text()
+    assert (message == "No tablet found. Plug it in, or choose Paper image only.") == says_none
+    assert not d.capture.isHidden()            # a tablet plugged in now can still be used (G16)
+    d.toggle_language()
+    assert (d.capture.label.text() != "وقّع داخل المربع، ثم اضغط «أوافق» أو «إعادة».") == says_none
+
+
+def test_a_connected_tablet_gets_the_usual_instruction(app, monkeypatch):
+    import src.capture.tablet as tablet
+
+    monkeypatch.setattr(tablet, "tablet_names", lambda: ["XPPen Deco 640 Pen"])
+    assert CollectDialog(count=1).capture.label.text() == "Sign inside the box, then press I approve or Redo."
+
+
 def test_the_arabic_toggle_translates_and_right_aligns(app):
     d = CollectDialog(count=5)
     d.toggle_language()
