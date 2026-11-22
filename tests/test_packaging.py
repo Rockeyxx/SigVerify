@@ -204,3 +204,6 @@ def test_every_merge_to_main_builds_a_prerelease_named_after_the_app_version():
     assert re.search(r"push:\s*\n\s*branches:\s*\[main\]", text)
     assert "app_version()" in text and "gh release create" in text and "--prerelease" in text
     assert "needs.tag.outputs.tag" in text            # build and attach use the tag that job made
+    # One platform failing (the Windows runner refused for billing) still attaches the other's file.
+    attach_if = re.search(r"\n  attach:\n(?:.*\n)*?    if: (.*)\n", text).group(1)
+    assert "needs.build.result == 'failure'" in attach_if
