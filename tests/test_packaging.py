@@ -179,3 +179,10 @@ def test_the_build_bakes_the_version_from_full_git_history():
     assert "VERSION" in check_bundle.REQUIRED
     assert "app_version()" in (REPO / "bundle" / "sigverify.spec").read_text()
     assert "fetch-depth: 0" in (REPO / ".github" / "workflows" / "release.yml").read_text()   # the count needs history
+
+
+def test_every_merge_to_main_builds_a_prerelease_named_after_the_app_version():
+    text = (REPO / ".github" / "workflows" / "release.yml").read_text()
+    assert re.search(r"push:\s*\n\s*branches:\s*\[main\]", text)
+    assert "app_version()" in text and "gh release create" in text and "--prerelease" in text
+    assert "needs.tag.outputs.tag" in text            # build and attach use the tag that job made

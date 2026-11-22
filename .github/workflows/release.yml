@@ -1,9 +1,12 @@
 name: Build installers
 
 # Issue #42: one download per system, attached to the GitHub release.
-# Runs when a release is published (the release page then exists for the upload, and the build
-# uses exactly that release's tag), or by hand for an existing release.
+# Runs on every push to main (a merge): the tag job makes a pre-release named after the app
+# version (v1.0.x, src/app_version.py) and the build attaches the installers to it. Also runs
+# when a release is published by hand, or by hand for an existing release.
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -15,11 +18,14 @@ on:
 # Least privilege by default. Only the attach job may write to the release.
 permissions: {}
 
-env:
-  TAG: ${{ github.event.release.tag_name || inputs.tag }}
-
 jobs:
+  # build and attach first: skylos ties its runner finding to the first runner line (tag is last)
   build:
+    needs: tag
+    # tag is skipped for a release published by hand or a manual run; build still runs then
+    if: ${{ !cancelled() && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
+    env:
+      TAG: ${{ needs.tag.outputs.tag || github.event.release.tag_name || inputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,11 +92,14 @@ jobs:
           if-no-files-found: error
 
   attach:
-    needs: build
+    needs: [tag, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.tag.outputs.tag || github.event.release.tag_name || inputs.tag }}
     steps:
       - name: Collect both files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -102,3 +111,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  tag:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # creates the tag and the pre-release
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout main with its history
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0             # the app version counts commits
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+
+      - name: Work out the app version
+        id: version
+        run: echo "tag=v$(python -c 'from src.app_version import app_version; print(app_version())')" >> "$GITHUB_OUTPUT"
+
+      - name: Create the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "SigVerify $TAG" \
+            --notes "Automatic build of main at $GITHUB_SHA. The Windows installer and the Linux AppImage are attached when the build finishes (about 15 minutes). Weights: release $(python -c 'from config.settings import MODEL_VERSION; print(MODEL_VERSION)')."

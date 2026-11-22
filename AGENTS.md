@@ -838,6 +838,10 @@ commits since that line last changed (`src/app_version.py`), shown on the login 
 baked into the package as `VERSION`. Never write the last number by hand; change
 `APP_VERSION` only for a minor or major release (`1.1`, `2.0`), and the count starts at 0.
 `MODEL_VERSION` is separate: it names the weights, not the app.
+Every push to `main` makes a pre-release tagged `v<app version>` and attaches both installers
+(`.github/workflows/release.yml`, job `tag`). Merge pull requests with a merge commit, not a
+squash: a squash makes the `APP_VERSION` commit the head, the count 0, and the tag `v1.0.0`,
+which already exists, so the run stops.
 
 ---
 
