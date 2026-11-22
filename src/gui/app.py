@@ -27,6 +27,7 @@ from src.gui.profile_page import ProfilePage
 from src.gui.styles import STYLE
 from src.gui.workers import LoginWorker, WarmUpWorker, wait_for_workers
 import src.gui.storage as storage
+from src.app_version import app_version
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "signature_icon.png")
@@ -161,6 +162,11 @@ class LoginScreen(QWidget):
         self.registerButton.clicked.connect(go_register)
         content.addWidget(self.registerButton, alignment=Qt.AlignHCenter)
 
+        version = QLabel(f"Version {app_version()}")
+        version.setProperty("role", "muted")
+        version.setAlignment(Qt.AlignHCenter)
+        content.addWidget(version)
+
         self.on_login_success = on_login_success
         self.setLayout(centered(content, FORM_WIDTH))
 
@@ -262,7 +268,7 @@ class RegisterScreen(QWidget):
         self.createButton.clicked.connect(self._handle_register)
         content.addWidget(self.createButton)
 
-        self.restoreButton = QPushButton("Restore a vault from a backup")
+        self.restoreButton = QPushButton("I already have a vault: restore it from a backup")
         self.restoreButton.setProperty("role", "ghost")
         self.restoreButton.clicked.connect(self._handle_restore)
         content.addWidget(self.restoreButton, alignment=Qt.AlignHCenter)

@@ -12,6 +12,9 @@ MODEL_WEIGHTS_DIR = os.path.join(PROJECT_ROOT, "models", "weights")
 # of the corpora and writer partition it was trained on.
 SPATIAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "spatial_cnn.pth")
 TEMPORAL_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "temporal_lstm.pth")
+# The app version is APP_VERSION plus the commits since this line last changed (src/app_version.py).
+# Change it by hand for a minor or major release (1.1, 2.0); the last number then starts at 0.
+APP_VERSION = "1.0"
 # Release tag of the two shipped weights above; both are byte-identical to that
 # release's assets. Storage saves it beside every template, and a template whose
 # tag differs was embedded by other weights and needs re-enrolment. Bump it

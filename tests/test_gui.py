@@ -876,7 +876,7 @@ def test_first_run_registers_a_company_and_lands_in_it_as_its_admin(empty_db, ma
     assert isinstance(screen, app_module.RegisterScreen)
     labels = [label.text() for label in screen.findChildren(QtWidgets.QLabel)]
     assert "Create a vault" in labels and storage.ADMIN_WARNING in labels
-    assert "Create Vault" in _buttons(screen) and "Restore a vault from a backup" in _buttons(screen)
+    assert "Create Vault" in _buttons(screen) and "I already have a vault: restore it from a backup" in _buttons(screen)
     assert "Back to login" not in _buttons(screen)            # nothing to go back to on a first run
 
     _register(screen, "", "Alice A", "alice", "alice-password-1")
@@ -1469,3 +1469,9 @@ def test_the_vault_form_shrinks_in_a_narrow_window_and_stops_growing_in_a_wide_o
     else:
         assert field.width() == app_module.FORM_WIDTH
     window.close()
+
+
+def test_the_login_screen_shows_the_app_version(empty_db, make_window):
+    from src.app_version import app_version
+    labels = [label.text() for label in make_window().login_screen.findChildren(QtWidgets.QLabel)]
+    assert f"Version {app_version()}" in labels

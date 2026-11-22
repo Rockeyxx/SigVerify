@@ -90,7 +90,7 @@ The owner opens **Members**, clicks **Back Up to a Folder** and picks a folder.
 The backup file is encrypted like the vault.
 
 To restore, the owner clicks **Restore from Backup** on the Members page. On a
-new computer, use **Restore a vault from a backup** on the first screen instead,
+new computer, use **I already have a vault: restore it from a backup** on the first screen instead,
 then give the vault name and an owner's User ID and password from the backup.
 The app keeps a copy of the current database before it restores, and you log in
 again afterwards.

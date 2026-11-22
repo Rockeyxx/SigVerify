@@ -173,3 +173,9 @@ def test_the_common_password_list_ships_with_the_app():
     rel = Path(COMMON_PASSWORDS_FILE).relative_to(PROJECT_ROOT).as_posix()
     assert rel in check_bundle.REQUIRED
     assert '"common_passwords.txt"' in (REPO / "bundle" / "sigverify.spec").read_text()
+
+
+def test_the_build_bakes_the_version_from_full_git_history():
+    assert "VERSION" in check_bundle.REQUIRED
+    assert "app_version()" in (REPO / "bundle" / "sigverify.spec").read_text()
+    assert "fetch-depth: 0" in (REPO / ".github" / "workflows" / "release.yml").read_text()   # the count needs history
