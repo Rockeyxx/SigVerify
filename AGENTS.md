@@ -766,7 +766,7 @@ Do **not** cite ISO/IEC 18033-3 or a generic "ISO/IEC 9075".
 **Allowed:**
 
 ```
-torch, torchvision, opencv-python, numpy, PyQt5,
+torch, torchvision, opencv-python-headless, numpy, PyQt5,
 cryptography, matplotlib, scikit-learn, Pillow, scipy, sqlite3 (stdlib)
 ```
 

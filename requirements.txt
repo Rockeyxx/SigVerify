@@ -12,7 +12,7 @@ torch>=2.0.0
 torchvision>=0.15.0
 
 # Computer Vision & Image Processing (cv2)
-opencv-python>=4.8.0
+opencv-python-headless>=4.8.0  # headless: its Qt copy broke PyQt5 on X11 (#51); we never open cv2 windows
 Pillow>=10.0.0
 
 # Scientific Computing
