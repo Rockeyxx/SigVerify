@@ -88,8 +88,8 @@ imports, the model loads and the first forward pass happen before Enter. Keep on
 `SignatureService` for the whole session, because a second instance loads the models
 again. The budget must stay well under 3.0 s, because the front end needs time too.
 `tools/profile_latency.py` reports it on its first row and `tests/test_latency.py`
-asserts it off CI. Measured on an 8-core laptop CPU: 0.5 s from Enter (0.8 s on 2
-cores, 1.7 s on one), and 1.35 s to start the app, 1.0 s of it importing PyTorch,
+asserts it off CI. Measured on an 8-core laptop CPU: 0.52 s from Enter (0.8 s on 2
+cores, 1.7 s on one), and 1.40 s to start the app, 1.14 s of it importing PyTorch,
 reported but not budgeted (1.9 s on the first launch after a reboot). A `verify()` against
 stored references takes 0.08 s (0.28 s on one core); never quote it as the budget.
 
