@@ -123,7 +123,7 @@ With only one input, the app uses that branch alone ($\alpha = 1$ for a scan, $\
 
 ### Download and install
 
-Download the file for your system from the [Releases page](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases). No Python is needed.
+Download the file for your system from the [Releases page](https://github.com/Rockeyxx/SigVerify/releases). No Python is needed.
 
 | System | File | How |
 | --- | --- | --- |
@@ -154,8 +154,8 @@ It downloads nothing and installs no driver. The app folder it copies holds Pyth
 For development and training. Python 3.11 or newer.
 
 ```bash
-git clone https://github.com/Rockeyxx/Signature-Verification-ML-EE499.git
-cd Signature-Verification-ML-EE499
+git clone https://github.com/Rockeyxx/SigVerify.git
+cd SigVerify
 
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -219,7 +219,7 @@ The match score is a similarity, not a probability.
 
 ### Model weights
 
-The installers already contain the weights. From source, `python bundle/fetch_weights.py` downloads `spatial_cnn.pth` and `temporal_lstm.pth` from the release named by `MODEL_VERSION` in `config/settings.py` and checks their SHA-256. These two are the only weights the app uses; the six `temporal_dt_s4*.pth` seed weights in some releases are a research ensemble the app does not run, and the installers leave them out. What every file of a release is, and how it was measured, is in that release's notes on the [Releases page](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases).
+The installers already contain the weights. From source, `python bundle/fetch_weights.py` downloads `spatial_cnn.pth` and `temporal_lstm.pth` from the release named by `MODEL_VERSION` in `config/settings.py` and checks their SHA-256. These two are the only weights the app uses; the six `temporal_dt_s4*.pth` seed weights in some releases are a research ensemble the app does not run, and the installers leave them out. What every file of a release is, and how it was measured, is in that release's notes on the [Releases page](https://github.com/Rockeyxx/SigVerify/releases).
 
 ---
 

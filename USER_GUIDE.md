@@ -8,7 +8,7 @@ signature, a signature on a pen tablet, or both. Nothing is sent over the intern
 ### Windows 10 or 11 (64-bit)
 
 1. Download `SigVerify-vX.Y.Z-setup.exe` from the
-   [Releases page](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases).
+   [Releases page](https://github.com/Rockeyxx/SigVerify/releases).
 2. Run it. The installer is not code-signed yet, so Windows may show "Windows
    protected your PC". Click **More info**, then **Run anyway**.
 3. No administrator password is needed. The app is installed for your user only.
@@ -17,7 +17,7 @@ signature, a signature on a pen tablet, or both. Nothing is sent over the intern
 ### Linux (64-bit, tested on Arch)
 
 1. Download `SigVerify-vX.Y.Z-x86_64.AppImage` from the
-   [Releases page](https://github.com/Rockeyxx/Signature-Verification-ML-EE499/releases).
+   [Releases page](https://github.com/Rockeyxx/SigVerify/releases).
 2. Allow it to run: right-click, Properties, "Allow executing file as program",
    or in a terminal `chmod +x SigVerify-*.AppImage`.
 3. Double-click it.
