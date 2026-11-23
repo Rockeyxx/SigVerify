@@ -53,6 +53,14 @@ def test_a_lock_file_windows_will_not_let_us_read_does_not_stop_the_test(app, ki
     assert report.passed and "signatures.db.lock (locked by the app)" in leak_check["detail"]
 
 
+def test_a_ram_reading_of_zero_fails_the_check_instead_of_passing(app, kit, monkeypatch):
+    """On Windows the reading failed silently and 0.00 GB passed "at most 4 GB"."""
+    from src import self_test
+    monkeypatch.setattr(self_test, "_peak_ram_gb", lambda: 0.0)
+    ram = next(c for c in self_test.run(kit).checks if "peak RAM" in c["name"])
+    assert not ram["ok"] and ram["detail"] == "could not be measured"
+
+
 def test_the_results_file_says_pass_and_names_no_user_or_path(app, kit):
     from src import self_test
     assert self_test.main([kit]) == 0

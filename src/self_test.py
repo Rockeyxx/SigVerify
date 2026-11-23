@@ -72,9 +72,16 @@ def _peak_ram_gb():
                         ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
                         ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                         ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+        from ctypes import wintypes
+        # Types declared: by default ctypes passes the process handle as a 32-bit int, the call
+        # failed and the counters stayed 0 (the first Windows runs reported 0.00 GB).
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
         c = Counters(cb=ctypes.sizeof(Counters))
-        ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.windll.kernel32.GetCurrentProcess(),
-                                                 ctypes.byref(c), c.cb)
+        if not kernel32.K32GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb):
+            return 0.0
         return c.PeakWorkingSetSize / 1024 ** 3
     import resource
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2     # KB on Linux
@@ -306,9 +313,15 @@ def _screen_problems(window, row, expected, threshold, routing):
 
 
 # ------------------------------------------------------------------ the five tests
+def _application():
+    """The running QApplication, or a new one started as the app starts it (scaling, icon, theme)."""
+    from PyQt5.QtWidgets import QApplication
+    from src.gui.app import create_application
+    return QApplication.instance() or create_application([])
+
+
 def run(kit, report=None):
     """Run the five tests on the kit. Returns the Report (also written by main())."""
-    from PyQt5.QtWidgets import QApplication
     import src.verification as verification
     from config.settings import (DECISION_THRESHOLD, INFERENCE_RAM_CEILING_GB, LATENCY_SLA_SECONDS,
                                  SPATIAL_DECISION_THRESHOLD, TEMPORAL_DECISION_THRESHOLD)
@@ -322,7 +335,7 @@ def run(kit, report=None):
     forged = [p for p in probes if not p["genuine"]]
     if len(genuine) < 6 or not forged:
         raise ValueError("The kit needs 6 genuine probes and a forgery.")
-    qt_app = QApplication.instance() or QApplication([])   # kept: an unreferenced QApplication is freed at once
+    qt_app = _application()                # kept: an unreferenced QApplication is freed at once
     seconds = []
 
     with _sandbox() as hw:
@@ -495,9 +508,10 @@ def run(kit, report=None):
         finally:
             os.environ.pop(PASSPHRASE_ENV_VAR, None)
 
-        report.measured["peak RAM of the app (GB)"] = round(_peak_ram_gb(), 2)
-        report.check(2, f"peak RAM at most {INFERENCE_RAM_CEILING_GB:g} GB",
-                     _peak_ram_gb() <= INFERENCE_RAM_CEILING_GB, f"{_peak_ram_gb():.2f} GB")
+        ram = _peak_ram_gb()
+        report.measured["peak RAM of the app (GB)"] = round(ram, 2)
+        report.check(2, f"peak RAM at most {INFERENCE_RAM_CEILING_GB:g} GB", 0 < ram <= INFERENCE_RAM_CEILING_GB,
+                     f"{ram:.2f} GB" if ram > 0 else "could not be measured")
         qt_app.processEvents()             # closed windows go before their temporary folders do
     return report
 
