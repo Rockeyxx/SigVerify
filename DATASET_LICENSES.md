@@ -1,6 +1,6 @@
 # Dataset licences
 
-The scope of the MIT licence in [LICENSE](LICENSE) applies exclusively to **the code hosted within this repository**. Third parties retain ownership of every signature corpus referenced herein, each subject to distinct terms. We redistribute none of these corpora: `data/` remains gitignored, and zero assets derived from a licensed dataset are committed.
+The scope of the MIT licence in [LICENSE](LICENSE) applies exclusively to **the code hosted within this repository**. Third parties retain ownership of every signature corpus referenced herein, each subject to distinct terms. We redistribute none of these corpora: `data/` remains gitignored. Three committed figures show sample signatures from the offline corpora (CEDAR, BHSig260, UTSig, SigComp2011): `results/dataset_samples.png`, `results/dataset_examples_spatial.png` and `results/sample_predictions.png`. No DeepSignDB or BiosecurID-SONOF signature appears in any committed file.
 
 ## Openly available corpora
 
