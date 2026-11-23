@@ -81,6 +81,10 @@ def embed(model, sample, branch, device="cpu"):
     else:
         raise ValueError(f"Unknown branch '{branch}' — expected 'spatial' or 'temporal'")
 
+    # Denormal floats in the CNN stall Intel CPUs: 1640 ms -> 94 ms per forward pass on Windows,
+    # embeddings identical (ENG_REPORT G37). The flag is per thread and each visit runs on a new
+    # worker thread, so it is set here, in the thread that runs the model.
+    torch.set_flush_denormal(True)
     with torch.no_grad():
         return model.encode(tensor.to(device)).squeeze(0).cpu().numpy().astype(EMBEDDING_DTYPE)
 

@@ -147,6 +147,22 @@ class TestEmbeddingBytes:
 class TestEmbed:
     """Preprocessing + encoding in one call, so callers never build tensors."""
 
+    @pytest.mark.skipif(not torch.set_flush_denormal(False), reason="this CPU cannot flush denormals")
+    def test_embed_flushes_denormals_in_the_thread_that_runs_the_model(self):
+        """Denormal floats in the CNN made a forward pass 17x slower on Intel under Windows
+        (1640 ms -> 94 ms). The CPU flag is per thread, and every visit runs on a new worker
+        thread, so embed() sets it in the thread that calls it."""
+        import threading
+        seen = {}
+
+        def visit():
+            embed(TemporalSiamese().eval(), np.zeros((20, TEMPORAL_INPUT_FEATURES), np.float32), "temporal")
+            seen["tiny"] = float((torch.tensor([1e-39]) * 1.0).item())   # a denormal float32
+        worker = threading.Thread(target=visit)
+        worker.start()
+        worker.join()
+        assert seen["tiny"] == 0.0
+
     def test_spatial_embed_from_path(self):
         path = _sharp_signature_image()
         embedding = embed(SpatialSiamese(embedding_dim=512).eval(), path, "spatial")

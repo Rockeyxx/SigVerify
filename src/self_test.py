@@ -380,7 +380,7 @@ def run(kit, report=None):
     if len(genuine) < 6 or not forged:
         raise ValueError("The kit needs 6 genuine probes and a forgery.")
     qt_app = _application()                # kept: an unreferenced QApplication is freed at once
-    seconds = []
+    seconds, timed = [], []    # the visits behind the latency check, and their stage times
 
     with _sandbox() as hw:
         # 1 End to end -------------------------------------------------------------
@@ -401,6 +401,7 @@ def run(kit, report=None):
             s = _verify(window, hw, "Client One", probe)
             if s is not None:
                 seconds.append(s)
+                timed.append(hw["visits"][-1])
             problems = ["the page refused before verifying"] if s is None else \
                 _screen_problems(window, _verify_rows()[-1], probe["fused"], DECISION_THRESHOLD, "multimodal")
             report.check(test, name, not problems, "; ".join(problems) or
@@ -431,6 +432,7 @@ def run(kit, report=None):
             s = _verify(window, hw, "Client One", probe, modality)
             if s is not None:
                 seconds.append(s)
+                timed.append(hw["visits"][-1])
             problems = ["the page refused before verifying"] if s is None else \
                 _screen_problems(window, _verify_rows()[-1], probe[branch], threshold, routing)
             if not window.verification_panel.degradedModeIndicator.text().startswith("⚠ Degraded"):
@@ -459,7 +461,7 @@ def run(kit, report=None):
         # 2 Latency and RAM ------------------------------------------------------
         report.measured["Verify to result on screen, worst (s)"] = round(max(seconds), 3)
         report.measured["Verify to result on screen, all (s)"] = [round(s, 3) for s in seconds]
-        report.measured["where the time of a visit with a scan goes, mean (s)"] = _breakdown(hw["visits"])
+        report.measured["where the time of a visit with a scan goes, mean (s)"] = _breakdown(timed)
         report.check(2, f"every visit under {LATENCY_SLA_SECONDS:g} s from Verify to the result",
                      max(seconds) < LATENCY_SLA_SECONDS, f"worst {max(seconds):.3f} s")
 
