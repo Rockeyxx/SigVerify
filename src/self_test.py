@@ -313,9 +313,15 @@ def _screen_problems(window, row, expected, threshold, routing):
 
 
 # ------------------------------------------------------------------ the five tests
+def _application():
+    """The running QApplication, or a new one started as the app starts it (scaling, icon, theme)."""
+    from PyQt5.QtWidgets import QApplication
+    from src.gui.app import create_application
+    return QApplication.instance() or create_application([])
+
+
 def run(kit, report=None):
     """Run the five tests on the kit. Returns the Report (also written by main())."""
-    from PyQt5.QtWidgets import QApplication
     import src.verification as verification
     from config.settings import (DECISION_THRESHOLD, INFERENCE_RAM_CEILING_GB, LATENCY_SLA_SECONDS,
                                  SPATIAL_DECISION_THRESHOLD, TEMPORAL_DECISION_THRESHOLD)
@@ -329,7 +335,7 @@ def run(kit, report=None):
     forged = [p for p in probes if not p["genuine"]]
     if len(genuine) < 6 or not forged:
         raise ValueError("The kit needs 6 genuine probes and a forgery.")
-    qt_app = QApplication.instance() or QApplication([])   # kept: an unreferenced QApplication is freed at once
+    qt_app = _application()                # kept: an unreferenced QApplication is freed at once
     seconds = []
 
     with _sandbox() as hw:

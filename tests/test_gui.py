@@ -1419,6 +1419,23 @@ def test_a_wrong_password_and_a_storage_error_keep_their_messages_after_the_work
     assert window.login_screen.loginButton.isEnabled() and QtWidgets.QApplication.overrideCursor() is None
 
 
+def test_the_self_test_starts_qt_like_the_app_scaling_icon_and_theme():
+    """A new process: pytest already holds a QApplication. In test mode the window looked unthemed
+    and small on Windows because the self-test made a bare QApplication."""
+    import subprocess
+    code = ("import torch\n"
+            "from PyQt5.QtCore import QCoreApplication, Qt\n"
+            "from src import self_test\n"
+            "from src.gui.styles import STYLE\n"
+            "app = self_test._application()\n"
+            "print(app.styleSheet() == STYLE, QCoreApplication.testAttribute(Qt.AA_EnableHighDpiScaling),"
+            " not app.windowIcon().isNull())\n")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    assert out.stdout.strip().splitlines()[-1:] == ["True True True"], out.stderr[-2000:]
+
+
 def test_high_dpi_scaling_is_on_before_the_application_is_made(monkeypatch):
     from PyQt5.QtCore import QCoreApplication, Qt
     seen = {}

@@ -508,6 +508,18 @@ class MainWindow(QMainWindow):
         self.clients_page.refresh(username)
 
 
+def create_application(argv):
+    """The QApplication as the app starts it: display scaling, icon and theme. The self-test
+    (src/self_test.py) starts Qt through this too, so test mode looks like the app."""
+    # Qt5 draws at 100% unless told to follow the display scaling (Windows laptops run 125-200%)
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    app = QApplication(argv)
+    app.setWindowIcon(QIcon(ICON_PATH))   # the title bar of every window, dialogs included
+    app.setStyleSheet(STYLE)
+    return app
+
+
 def main():
     from src.capture.pen_input import choose_pen_input
     choose_pen_input()
@@ -515,13 +527,8 @@ def main():
         # Without its own ID the app is grouped under python.exe, and the taskbar shows Python's icon.
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EE499.Team06.SignatureVerification")
-    # Qt5 draws at 100% unless told to follow the display scaling (Windows laptops run 125-200%)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-    app = QApplication(sys.argv)
+    app = create_application(sys.argv)
     install_error_dialog()
-    app.setWindowIcon(QIcon(ICON_PATH))   # the title bar of every window, dialogs included
-    app.setStyleSheet(STYLE)
     window = MainWindow()
     if not window.startup_failed:
         window.show()
