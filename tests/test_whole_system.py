@@ -36,6 +36,23 @@ def test_the_five_tests_pass_on_the_app_from_source(app, kit):
     assert len(report.checks) >= 18 and not failed, failed
 
 
+def test_a_lock_file_windows_will_not_let_us_read_does_not_stop_the_test(app, kit, monkeypatch):
+    """Windows enforces the app's lock on signatures.db.lock, so reading it raises PermissionError
+    (the first Windows run stopped there); Linux locks are advisory."""
+    import builtins
+    from src import self_test
+    real_open = builtins.open
+
+    def windows_open(path, mode="r", *args, **kwargs):
+        if str(path).endswith(".lock") and mode == "rb":
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, mode, *args, **kwargs)
+    monkeypatch.setattr(builtins, "open", windows_open)
+    report = self_test.run(kit)
+    leak_check = next(c for c in report.checks if "plain form" in c["name"])
+    assert report.passed and "signatures.db.lock (locked by the app)" in leak_check["detail"]
+
+
 def test_the_results_file_says_pass_and_names_no_user_or_path(app, kit):
     from src import self_test
     assert self_test.main([kit]) == 0
