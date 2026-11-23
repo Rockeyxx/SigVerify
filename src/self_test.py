@@ -433,14 +433,19 @@ def run(kit, report=None):
         for client in ("Client One", "Client Two"):
             templates += [base64.b64decode(b) for b in storage.get_reference_embeddings(client)[0]]
             templates += [base64.b64decode(b) for b in storage.get_client(client)["dynamic_references"]]
-        leaks = []
+        leaks, locked = [], []
         for folder, _, files in os.walk(hw["home"]):
             for name in files:
-                with open(os.path.join(folder, name), "rb") as f:  # skylos: ignore[SKY-D215,SKY-D325] the test's own temporary vault folder
-                    data = f.read()
+                try:
+                    with open(os.path.join(folder, name), "rb") as f:  # skylos: ignore[SKY-D215,SKY-D325] the test's own temporary vault folder
+                        data = f.read()
+                except PermissionError:   # Windows enforces the app's lock on signatures.db.lock (empty)
+                    locked.append(name)
+                    continue
                 leaks += [name for t in templates if t[:32] in data]
         report.check(5, f"none of the {len(templates)} stored templates in plain form in any vault file",
-                     not leaks, ", ".join(sorted(set(leaks))))
+                     not leaks and all(n.endswith(".lock") for n in locked),
+                     ", ".join(sorted(set(leaks)) + [f"{n} (locked by the app)" for n in locked]))
         verdicts = [r for r in _verify_rows() if r["client_display_name"] == "Client One"]
         report.check(5, "one audit row per verdict", len(verdicts) == 6, f"{len(verdicts)} rows for 6 verdicts")
 
