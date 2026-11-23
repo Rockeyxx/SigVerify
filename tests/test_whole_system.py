@@ -34,6 +34,14 @@ def test_the_five_tests_pass_on_the_app_from_source(app, kit):
     failed = [f"test {c['test']}: {c['name']} ({c['detail']})" for c in report.checks if not c["ok"]]
     print("\n" + "\n".join(f"{k}: {v}" for k, v in report.measured.items()))
     assert len(report.checks) >= 18 and not failed, failed
+    # Where a scan visit's time goes (Windows took 2.7 s against 0.2 s on Linux): every stage
+    # named, none negative, and together they make the mean visit.
+    stages = report.measured["where the time of a visit with a scan goes, mean (s)"]
+    assert {"crop the photo", "paper model (CNN)", "pen model (LSTM)", "read and resize the image",
+            "vault (reference check, replay check, audit row)"} <= set(stages)
+    assert all(v >= -0.002 for v in stages.values()), stages
+    scan_visits = [s for s in report.measured["Verify to result on screen, all (s)"] if s > 0.05]
+    assert abs(sum(stages.values()) - sum(scan_visits) / len(scan_visits)) < 0.01 * len(stages)
 
 
 def test_a_lock_file_windows_will_not_let_us_read_does_not_stop_the_test(app, kit, monkeypatch):

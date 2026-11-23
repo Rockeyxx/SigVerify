@@ -140,10 +140,26 @@ def _replay(canvas, pen_csv):
             time.sleep(max(0.0, (t - first) / 1000 - (time.perf_counter() - started)))
 
 
+_TIMES = {}      # seconds per stage of the current visit, filled by the _timed wrappers
+
+
+def _timed(fn, label):
+    """fn, adding its run time to _TIMES[label] (label may be a function of the call's arguments)."""
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            key = label(args, kwargs) if callable(label) else label
+            _TIMES[key] = _TIMES.get(key, 0.0) + time.perf_counter() - start
+    return wrapper
+
+
 @contextlib.contextmanager
 def _sandbox():
     """A new install in temporary folders, the hardware replaced; everything put back after."""
     from PyQt5 import QtWidgets
+    import src.verification as verification
     from src.capture import collect, tablet
     from src.database.db_manager import PASSPHRASE_ENV_VAR
     from src.gui import enrollment_page, interfaces, storage
@@ -151,7 +167,7 @@ def _sandbox():
     root = tempfile.mkdtemp(prefix="sigverify-selftest-")
     home, temp = os.path.join(root, "home"), os.path.join(root, "tmp")
     os.makedirs(temp)
-    hw = {"file": None, "pens": None, "dialogs": [], "home": home, "temp": temp}
+    hw = {"file": None, "pens": None, "dialogs": [], "home": home, "temp": temp, "visits": []}
     saved_env = {k: os.environ.get(k) for k in (storage.HOME_ENV_VAR, PASSPHRASE_ENV_VAR)}
     box = QtWidgets.QMessageBox
 
@@ -181,6 +197,14 @@ def _sandbox():
         (box, "information", lambda *a: hw["dialogs"].append(a)),
         (box, "question", lambda *a: box.Yes),
         (interfaces, "_service", None),
+        # where a visit's time goes (issue #43: scan visits took 2.7 s on Windows, 0.2 s on Linux)
+        (interfaces, "_prepare_image", _timed(interfaces._prepare_image, "crop the photo")),
+        (verification, "quality_gate", _timed(verification.quality_gate, "check the image")),
+        (verification, "_as_spatial_input", _timed(verification._as_spatial_input, "read and resize the image")),
+        (verification, "embed", _timed(verification.embed, lambda a, k: f"{a[2] if len(a) > 2 else k['branch']} model")),
+        (storage, "check_references", _timed(storage.check_references, "vault")),
+        (storage, "is_replayed_probe", _timed(storage.is_replayed_probe, "vault")),
+        (storage, "append_verification_log", _timed(storage.append_verification_log, "vault")),
     ]
     originals = [(obj, name, getattr(obj, name)) for obj, name, _ in patches]
     try:
@@ -277,12 +301,14 @@ def _verify(window, hw, client, probe, modality="fused"):
         hw["pens"] = [probe["pen_csv"]]
         panel.capture_pen_probe()
     panel._verify_worker = None
+    _TIMES.clear()
     started = time.perf_counter()
     panel.run_verification()
     if panel._verify_worker is None:
         return None
     _settle(panel._verify_worker)
     seconds = time.perf_counter() - started
+    hw["visits"].append((modality, seconds, dict(_TIMES)))
     _pause(1.5)                                    # the result stays on screen for the tester
     return seconds
 
@@ -310,6 +336,24 @@ def _screen_problems(window, row, expected, threshold, routing):
     if decision != want:
         out.append(f"decision {decision}, the model says {want}")
     return out
+
+
+def _breakdown(visits):
+    """Mean seconds per stage over the visits with a scan; the paper model excludes reading the image,
+    and "other" is what no timer saw (starting the worker thread, Qt, fusion)."""
+    scans = [(seconds, t) for modality, seconds, t in visits if modality != "pen"]
+    if not scans:
+        return {}
+    mean = {}
+    for seconds, t in scans:
+        t = dict(t)
+        t["spatial model"] = t.get("spatial model", 0.0) - t.get("read and resize the image", 0.0)
+        t["other (thread, Qt, fusion)"] = seconds - sum(t.values())
+        for k, v in t.items():
+            mean[k] = mean.get(k, 0.0) + v / len(scans)
+    names = {"spatial model": "paper model (CNN)", "temporal model": "pen model (LSTM)",
+             "vault": "vault (reference check, replay check, audit row)"}
+    return {names.get(k, k): round(v, 3) for k, v in sorted(mean.items(), key=lambda kv: -kv[1])}
 
 
 # ------------------------------------------------------------------ the five tests
@@ -415,6 +459,7 @@ def run(kit, report=None):
         # 2 Latency and RAM ------------------------------------------------------
         report.measured["Verify to result on screen, worst (s)"] = round(max(seconds), 3)
         report.measured["Verify to result on screen, all (s)"] = [round(s, 3) for s in seconds]
+        report.measured["where the time of a visit with a scan goes, mean (s)"] = _breakdown(hw["visits"])
         report.check(2, f"every visit under {LATENCY_SLA_SECONDS:g} s from Verify to the result",
                      max(seconds) < LATENCY_SLA_SECONDS, f"worst {max(seconds):.3f} s")
 
