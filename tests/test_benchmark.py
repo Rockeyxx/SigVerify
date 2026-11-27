@@ -1,9 +1,4 @@
-"""Tests for the EER regression harness (scripts/benchmark.py).
-
-The harness exists so model changes are judged on separation quality (EER and
-Cohen's d over held-out writers) rather than on FAR/FRR at a fixed threshold —
-reading FAR/FRR at a fixed tau is what masked the P-001 accuracy failure.
-"""
+"""Tests for scripts/benchmark.py (held-out EER and Cohen's d separation)."""
 
 import numpy as np
 import pytest
@@ -108,10 +103,7 @@ class TestDatasetOf:
 
 
 class TestSelectTestWriters:
-    """
-    Comparing two models whose writer_samples lists differ means scoring them on the
-    writers both held out — and refusing anything else.
-    """
+    """Restrict cross-model comparisons to writers held out by both models."""
 
     SPLIT = (["svc_1", "svc_2"], ["svc_3"], ["svc_4", "svc_5"])
 

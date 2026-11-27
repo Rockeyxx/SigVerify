@@ -1,10 +1,4 @@
-"""Raw pen samples to the model's trajectory, shared by live capture and in-house parsers.
-
-The XPPen Deco 640 (ENG_REPORT G4), like Qt on Windows, gives no device clock, reports only
-when a value changes, and grows y downward. The pen corpora the model trained on grow y upward
-on an exact 10 ms grid. AGENTS.md, "Device timing and pressure", sets the rules; spec decision
-D8 adapts the pen-down rule to devices that report only on change.
-"""
+"""Convert raw tablet stroke samples into normalized [L, C] trajectories."""
 from __future__ import annotations
 
 import numpy as np
@@ -16,13 +10,7 @@ _WRAP_MS = 2.0 ** 32   # Qt timestamps are unsigned 32-bit milliseconds
 
 
 def repair_clock(t_ms, period_ms):
-    """A monotonic float64 clock from host-stamped samples.
-
-    A 32-bit millisecond wrap is unwrapped, any other backward step becomes one device period,
-    and samples that share one timestamp (Windows receipt-time bursts) are spread evenly up to
-    the next timestamp, at most one period apart. Forward gaps are kept: on devices that report
-    only on change they are real time, a still pen or a pen lift.
-    """
+    """Build a monotonic float64 clock, unwrapping 32-bit wrap and spreading burst timestamps."""
     t = np.asarray(t_ms, dtype=np.float64)
     if len(t) < 2:
         return t.copy()
@@ -39,7 +27,7 @@ def repair_clock(t_ms, period_ms):
 
 
 def device_period(strokes):
-    """Median interval between consecutive samples inside strokes, in ms (one grid step if none)."""
+    """Return median positive inter-sample interval in ms."""
     gaps = [np.diff(np.asarray(s, dtype=np.float64)[:, 0]) for s in strokes if len(s) > 1]
     gaps = np.concatenate(gaps) if gaps else np.array([])
     gaps = gaps[gaps > 0]
@@ -47,8 +35,7 @@ def device_period(strokes):
 
 
 def _hold_or_interp(grid, t, v, hold_after):
-    """Value at each grid time: linear between neighbouring samples, but the last sample is held
-    through a gap longer than hold_after, because the pen was still and the device sent nothing."""
+    """Interpolate linearly between samples, holding the last value across gaps > hold_after."""
     i = np.clip(np.searchsorted(t, grid, side="right") - 1, 0, len(t) - 1)
     j = np.minimum(i + 1, len(t) - 1)
     span = t[j] - t[i]
@@ -58,13 +45,7 @@ def _hold_or_interp(grid, t, v, hold_after):
 
 
 def resample_strokes(strokes, pressure_max, flip_y=True, period_ms=TEMPORAL_SAMPLE_PERIOD_MS):
-    """Pen-down strokes to grid samples, before normalisation.
-
-    Returns (t, x, y, p) for the pen-down points of one exact period_ms grid anchored at the
-    first sample: y negated when flip_y (screen y grows down, the pen corpora grow up), p divided
-    by pressure_max and clipped to [0, 1]. A stroke shorter than one grid step keeps one point at
-    its first sample, so dots survive.
-    """
+    """Resample pen-down strokes onto a uniform period_ms grid and scale pressure to [0, 1]."""
     kept = [np.asarray(s, dtype=np.float64) for s in strokes if len(s)]
     if not kept:
         raise ValueError("no pen-down samples")
@@ -88,11 +69,7 @@ def resample_strokes(strokes, pressure_max, flip_y=True, period_ms=TEMPORAL_SAMP
 
 
 def strokes_to_trajectory(strokes, pressure_max, flip_y=True):
-    """Model input [L, TEMPORAL_INPUT_FEATURES] from pen-down strokes.
-
-    resample_strokes, then dt = time since the previous kept point (a lift's duration on the first
-    point of a stroke), clipped at MAX_GAP_MS and scaled to [0, 1], then normalize_trajectory.
-    """
+    """Resample strokes, compute clipped dt, and normalize into [L, TEMPORAL_INPUT_FEATURES]."""
     if TEMPORAL_INPUT_FEATURES > 4:
         raise NotImplementedError("tilt channels are recorded but not wired into capture (spec D3)")
     t, x, y, p = resample_strokes(strokes, pressure_max, flip_y)

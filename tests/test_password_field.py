@@ -2,7 +2,7 @@
 import os
 
 import pytest
-import torch  # noqa: F401 — before PyQt5: on Windows the other order fails to load c10.dll
+import torch  # noqa: F401 (import before PyQt5 to avoid Windows c10.dll load conflict)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PyQt5.QtWidgets")

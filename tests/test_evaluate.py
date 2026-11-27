@@ -1,15 +1,4 @@
-"""
-Tests for the enrollment-protocol scoring path.
-
-This is the protocol the field measures with and the one `src/verification.py`
-runs at inference: a user enrolls K genuine signatures and a probe is matched
-against the nearest of them. SVC2004 used K = 5 and never showed a skilled
-forgery during enrollment.
-
-The scoring maths is asserted against `src.verification._nearest_reference_score`
-directly, because the whole point is that the benchmark and the deployed
-verifier compute the same number.
-"""
+"""Tests for the enrollment-protocol scoring path matching `src/verification.py`."""
 
 import numpy as np
 import pytest
@@ -98,16 +87,7 @@ class TestEnrolledTrialScores:
         assert scores.min() == pytest.approx(min(expected + [scores.min()]), abs=1e-6)
 
     def test_different_seeds_draw_different_references(self):
-        """
-        Enrollment luck is a real effect and the harness must expose it, which is
-        why the benchmark averages over draws.
-
-        Two genuines and K = 1, so each draw enrols one and probes the other and
-        the forgery's nearest-reference distance flips between 1 and 9. A larger
-        uniform cluster would leave an equivalent probe behind on almost every
-        draw and the scores would coincide — that is a property of the fixture,
-        not of the code, and asserting on it would test nothing.
-        """
+        """Different seeds draw distinct reference subsets, changing nearest-reference distances."""
         embedded = {"w1": _writer([[0.0, 0.0], [10.0, 0.0]], [[1.0, 0.0]])}
         draws = {enrolled_trial_scores(embedded, num_references=1, seed=s)[0].tobytes()
                  for s in range(12)}

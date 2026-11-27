@@ -1,8 +1,4 @@
-"""The tablet signing window the GUI calls: n signatures, a thank-you screen, Confirm or Start over.
-
-The GUI owns the model call, the database and the score; this returns raw trajectories only,
-with the operating system and the tablet name read from the system.
-"""
+"""Modal dialog for collecting n tablet signatures with Confirm / Start over."""
 import platform
 
 from PyQt5.QtCore import Qt
@@ -54,8 +50,7 @@ class CollectDialog(QDialog):
             raise ValueError(f"count must be at least 1, got {count}")
         self.count, self.lang, self.signatures = count, lang, []
         self.setModal(True)
-        # The app theme (same look outside the app), plus a larger "Thank you" and a lighter
-        # Start over button ('ghost' has no background, so it read as plain text).
+        # Secondary button needs an explicit background since 'ghost' renders transparent.
         self.setStyleSheet(
             STYLE
             + 'QLabel[role="status-success"] { font-size: 24px; }'
@@ -66,7 +61,7 @@ class CollectDialog(QDialog):
         self.counter = _role(QLabel(), "hero-title")
         self.capture = SignatureCaptureWidget(self)
         self.capture.signature_confirmed.connect(self._on_signature)
-        # Redo writes the widget's own English line; ours runs after it (connection order).
+        # Connected after SignatureCaptureWidget's handler so our localized hint wins.
         self.capture.btn_reset.clicked.connect(lambda: self.capture.label.setText(self._t("hint")))
         self.done = _role(QLabel(), "status-success")
         self.btn_confirm = _role(QPushButton(), "primary")
@@ -75,7 +70,7 @@ class CollectDialog(QDialog):
         self.btn_restart.clicked.connect(self.start_over)
         self.btn_lang = _role(QPushButton(), "ghost")
         self.btn_lang.clicked.connect(self.toggle_language)
-        _role(self.capture.label, "title")       # the instruction, read standing at the tablet
+        _role(self.capture.label, "title")
         self.capture.label.setWordWrap(True)
 
         top = QHBoxLayout()
@@ -89,8 +84,7 @@ class CollectDialog(QDialog):
         layout.addWidget(self.capture)
         layout.addWidget(self.done)
         layout.addLayout(end)
-        # Linux and Wintab list every tablet; Windows without the driver lists none, though
-        # Windows Ink may still work, so there an empty list says nothing (G34).
+        # Without Wintab, Windows Ink still works even when no tablet name can be enumerated.
         self._no_tablet = not self.capture.tablets and (platform.system() != "Windows" or wintab_installed())
         self._retranslate()
 
@@ -98,12 +92,11 @@ class CollectDialog(QDialog):
     def finished(self):
         return len(self.signatures) >= self.count
 
-    # --- flow ---------------------------------------------------------------
     def _on_signature(self, trajectory):
         if self.finished:
             return
         self.signatures.append(trajectory)
-        self.capture.label.setText(self._t("hint"))   # the widget wrote "Accepted!" there
+        self.capture.label.setText(self._t("hint"))
         self._show_stage()
 
     def confirm(self):
@@ -111,9 +104,7 @@ class CollectDialog(QDialog):
             self.accept()
 
     def choose_tablet(self):
-        """With two or more tablets connected, the person picks the one they sign on: Qt5 does
-        not say which tablet a stroke came from, so the pick is stored as given, unchecked.
-        False when they cancel."""
+        """Prompt user to pick a tablet when multiple are connected; Qt5 does not identify source device."""
         tablets = self.capture.tablets
         if len(tablets) < 2:
             return True
@@ -167,18 +158,11 @@ class CollectDialog(QDialog):
 
 
 def collect_signatures(count=5, parent=None, lang="en"):
-    """Open the signing window. count=5 to enrol, count=1 to verify.
-
-    Returns, after Confirm, {"signatures": count arrays [L, TEMPORAL_INPUT_FEATURES] (float32,
-    signing order), "os", "device_model", "qt_platform"}: storage keeps the last three with the
-    pen set, because enrolling on one tablet and verifying on another fails (F23).
-    device_model is the tablet name read from the system, or CAPTURE_NO_DRIVER. Returns None
-    when the window is closed first, or the tablet choice is cancelled.
-    """
+    """Open the signing dialog and return trajectories plus device metadata, or None if cancelled."""
     dialog = CollectDialog(count, parent, lang)
     if dialog.choose_tablet() and dialog.exec_() == QDialog.Accepted:
         info = dialog.capture.capture_info()
-        if info["device_model"] == CAPTURE_NO_DRIVER:     # plugged in after the window opened (G16)
+        if info["device_model"] == CAPTURE_NO_DRIVER:
             info["device_model"] = (tablet.tablet_names() or [CAPTURE_NO_DRIVER])[0]
         return {"signatures": list(dialog.signatures), **info}
     return None

@@ -1,6 +1,4 @@
-"""The app version shown to the user: APP_VERSION from config/settings.py (major.minor, changed by
-hand for 1.1 or 2.0) plus the number of commits since that line last changed. The installer build
-writes the result to VERSION, because the package has no git."""
+"""Resolve app version from baked VERSION file or git commit count since APP_VERSION changed."""
 
 import subprocess
 from pathlib import Path

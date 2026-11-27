@@ -1,41 +1,20 @@
-"""
-Derived Kinematic Time Functions for Online Signatures.
-
-Derives 16 time functions from raw (X, Y, Pressure) coordinates:
-  - Velocity components and speed
-  - Tangent direction (sine and cosine)
-  - Angular velocity and log curvature radius
-  - Second derivatives and acceleration components
-  - Local speed consistency ratio
-
-Coordinates are smoothed with a low-pass filter before computing derivatives
-to reduce sensor noise.
-"""
+"""16 derived kinematic time functions for online signatures."""
 
 import numpy as np
 from scipy.signal import butter, filtfilt
 
 from config.settings import TEMPORAL_SAMPLE_RATE_HZ
 
-# Low-pass filter settings to smooth hand movement trajectories.
 _FILTER_ORDER = 3
 _CUTOFF_HZ = 15.0
 _SAMPLE_RATE_HZ = TEMPORAL_SAMPLE_RATE_HZ
-
-# Small constant to prevent division by zero when pen is stationary.
 _EPSILON = 1e-6
-
 SPEED_WINDOW = 5
-
-# Total number of output channels produced by this feature extractor.
 NUM_DERIVED_CHANNELS = 16
 
 
 def _smooth(values):
-    """
-    Apply zero-phase low-pass filtering along one coordinate axis.
-    Short trajectories below filter padding length are returned unchanged.
-    """
+    """Zero-phase low-pass filter along one axis; returns short arrays unchanged."""
     padlen = 3 * _FILTER_ORDER
     if len(values) <= padlen + 1:
         return values.astype(np.float64)
@@ -45,17 +24,13 @@ def _smooth(values):
 
 
 def _derivative(values):
-    """Calculate first difference across consecutive points."""
     out = np.zeros_like(values)
     out[1:] = values[1:] - values[:-1]
     return out
 
 
 def _speed_ratio(speed, window=SPEED_WINDOW):
-    """
-    Calculate min-to-max speed ratio within a sliding window.
-    Measures stroke smoothness and speed consistency over time.
-    """
+    """Min-to-max speed ratio in a sliding window."""
     half = window // 2
     padded = np.pad(speed, half, mode="edge")
     frames = np.lib.stride_tricks.sliding_window_view(padded, window)
@@ -63,26 +38,7 @@ def _speed_ratio(speed, window=SPEED_WINDOW):
 
 
 def derive_time_functions(trajectory):
-    """
-    Expand a normalized [L, 3] trajectory into a [L, 16] kinematic feature matrix.
-
-    Args:
-        trajectory: Array with shape [L, 3] containing (X, Y, Pressure).
-
-    Returns:
-        Array with shape [L, 16] float32:
-          - Channels 0-2:   Original X, Y, Pressure
-          - Channels 3-4:   Velocity components (dX, dY)
-          - Channel 5:      Total speed magnitude
-          - Channels 6-7:   Tangent angle direction (sin, cos)
-          - Channel 8:      Angular velocity
-          - Channel 9:      Log curvature radius
-          - Channels 10-11: Second derivatives (ddX, ddY)
-          - Channel 12:     Tangential acceleration
-          - Channel 13:     Normal acceleration
-          - Channel 14:     Total acceleration magnitude
-          - Channel 15:     Sliding window speed ratio
-    """
+    """Expand a normalized [L, 3] (X, Y, P) array into a [L, 16] kinematic matrix."""
     trajectory = np.asarray(trajectory, dtype=np.float32)
     if trajectory.ndim != 2 or trajectory.shape[1] != 3:
         raise ValueError(

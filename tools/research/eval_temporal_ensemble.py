@@ -1,6 +1,4 @@
-"""
-Evaluate the 6-seed Temporal Ensemble on held-out test writers.
-"""
+"""Evaluate the 6-seed Temporal Ensemble on held-out test writers."""
 
 import os
 import numpy as np

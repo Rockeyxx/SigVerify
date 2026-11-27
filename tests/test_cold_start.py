@@ -1,23 +1,4 @@
-"""
-Tests for the cold-start (cross-corpus) evaluation harness.
-
-Two properties are gated here, and neither is arithmetic.
-
-The first is that the harness scores through `verify()`. That is the entire
-reason this tool exists rather than another `benchmark.py` flag: `trajectory_gate`
-and the routing-dependent threshold selection are reachable *only* from
-`verify()`, so a harness that embedded and compared scores itself would report a
-number for a code path the deployment does not run. Three serving defects
-were invisible to the suite for exactly that reason.
-
-The second is that tau is never fitted on the writers it is then scored on. A
-constant selected on the scores it is quoted against is optimistically biased
-and, in this repo's own words, "a lower bound on nothing" -- the mistake that
-produced a retracted "+8.87 point" fusion result.
-
-Neither property is visible in the numbers the tool prints, which is why both are
-asserted structurally instead.
-"""
+"""Tests for cold-start evaluation: verifies routing through verify() and unbiased threshold selection."""
 import os
 
 import numpy as np

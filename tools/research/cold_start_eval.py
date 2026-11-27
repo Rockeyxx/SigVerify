@@ -1,13 +1,4 @@
-"""Cold-start evaluation: evaluate models against unseen datasets.
-
-Evaluates trained model weights against external signature corpora not seen
-during training, measuring transfer performance across domains.
-
-Reports FAR, FRR, and HTER metrics across multiple threshold configurations:
-  1. Default threshold from settings.
-  2. Domain-calibrated threshold fitted on held-out writers.
-  3. FAR-constrained threshold targeting specific security requirements.
-"""
+"""Cold-start evaluation on unseen corpora across shipped, balanced, and FAR-constrained thresholds."""
 import argparse
 import os
 import re
@@ -40,20 +31,7 @@ UNSEEN_CORPUS = {
 
 
 def parse_sign_data(root, allowed):
-    """
-    `sign_data/{split}/{writer}[_forg]/*.png` -- an ad-hoc downloaded corpus.
-
-    Deliberately NOT registered in `src/data/parsers.py`. Perceptual hashing
-    found 362 of its 2149 images to be exact duplicates of
-    `data/sigcomp2011_offline`, so it is partly a redistribution and does not
-    deserve the standing of a supported dataset. `allowed` carries the writers
-    that survived that screen.
-
-    Writer IDs are namespaced by split because 049-064 appear under both
-    `train/` and `test/`. Merging them would pool two people's genuines into one
-    reference set if the reused IDs are different signers, which would corrupt
-    the enrolment the protocol depends on.
-    """
+    """Parse screened sign_data folders, namespaced by split so reused IDs stay separate."""
     writers = {}
     for split in ("train", "test"):
         base = os.path.join(root, split)
@@ -76,18 +54,7 @@ def parse_sign_data(root, allowed):
 
 
 def parse_nfi2009(root, allowed):
-    """
-    SigComp2009 / NFI offline: `NFI-{author:03d}{session:02d}{target:03d}.png`.
-
-    Genuine when the author signed their own name (author == target), a skilled
-    forgery of `target` otherwise. Kept in `tools/` rather than
-    `src/data/parsers.py` for the same reason as sign_data: it is an evaluation
-    corpus pulled in to break a measurement deadlock, not a supported dataset.
-
-    `allowed` is the writer list that survived a perceptual-hash screen against
-    EVERY image corpus on disk -- not one partition of one corpus, which is how
-    the previous screen let a trained-on corpus through.
-    """
+    """Parse screened SigComp2009/NFI offline images into {writer: {genuine, forged}}."""
     pattern = re.compile(r"^NFI-(\d{3})(\d{2})(\d{3})\.png$", re.IGNORECASE)
     writers = {}
     for kind, folder in (("genuine", "genuines"), ("forged", "forgeries")):
@@ -110,17 +77,9 @@ def parse_nfi2009(root, allowed):
 
 
 def load_corpus(branch, corpus="default"):
-    """
-    The unseen corpus for `branch`, keyed to what that checkpoint trained on.
-
-    Writers are dropped unless they supply K references, at least one genuine
-    probe *and* at least one forgery. A writer missing either arm contributes to
-    only half the confusion matrix and biases whichever half it reaches, doing so
-    invisibly because the probe totals still look large.
-    """
+    """Load unseen evaluation writers with >K genuines and >=1 forgery."""
     if corpus == "default" and branch == "spatial":
-        # A comment cannot stop this; the default corpus is training data for the
-        # shipped weight and would report memorisation as a cold-start score.
+        # Default sigcomp2011_offline overlaps training data for the shipped spatial weight.
         raise ValueError(
             "sigcomp2011_offline is training data for the spatial weight shipped "
             "on 2026-09-06, so the default corpus would "
@@ -155,19 +114,7 @@ def load_corpus(branch, corpus="default"):
 
 
 def embed_corpus(models, writers, branch):
-    """
-    Embed every sample once, after its input gate.
-
-    The gate runs first because a probe it rejects never reaches the model in
-    production either; counting a gate rejection as a model error misattributes
-    the failure to the weights.
-
-    Returns `{writer: {"genuine": (samples, [E1, E2, ...]), "forged": (...)}}`
-    plus a rejection tally, where one embedding matrix is produced per model.
-    A single model is the one-element case, so ensembling adds no second code
-    path. Raw samples are kept beside the embeddings so the `verify()` pass can
-    re-derive each score from the original input.
-    """
+    """Gate and embed all writer samples once across every model in `models`."""
     gate = quality_gate if branch == "spatial" else trajectory_gate
     embedded, rejected = {}, {"genuine": 0, "forged": 0}
 
@@ -191,13 +138,7 @@ def embed_corpus(models, writers, branch):
 
 
 def scores_per_writer(embedded, num_references, seed):
-    """
-    One enrolment draw, kept broken out per writer.
-
-    Pooling here would make the writer-disjoint split impossible: tau has to be
-    fitted on one set of *writers* and applied to another, and a pooled array has
-    forgotten which score came from whom.
-    """
+    """Score one shared reference draw per writer, averaged across models."""
     rng = np.random.default_rng(seed)
     per = {}
     for writer in sorted(embedded):
@@ -208,10 +149,7 @@ def scores_per_writer(embedded, num_references, seed):
         def nearest(candidates, bank):
             return similarity_from_distance(nearest_reference_distances(candidates, bank))
 
-        # Every model sees the SAME reference draw, so the averaged score is an
-        # ensemble over one enrolment rather than an average over enrolment luck
-        # as well -- otherwise the arm would flatter itself by also averaging out
-        # the draw-to-draw variance the single-model arm still carries.
+        # Share one reference draw across ensemble members so draw variance does not shrink artificially.
         genuine = np.mean([nearest(g[probes], g[refs])
                            for g in genuine_banks], axis=0)
         forged = np.mean([nearest(f, g[refs])
@@ -221,34 +159,17 @@ def scores_per_writer(embedded, num_references, seed):
 
 
 def pool(per, writers):
-    """Concatenate the genuine and impostor arms across a set of writers."""
     return (np.concatenate([per[w][0] for w in writers]),
             np.concatenate([per[w][1] for w in writers]))
 
 
 def threshold_for_far(impostor_scores, target_far):
-    """
-    Lowest tau whose FAR on *these* impostor scores is at most `target_far`.
-
-    Fitted on calibration writers only. Applied to the writers it was fitted on
-    it would be a tautology, which is why the caller never does that.
-    """
     return float(np.quantile(impostor_scores, 1.0 - target_far))
 
 
 def writer_disjoint(embedded, num_references, repeats, base_seed, far_target,
                     shipped_tau):
-    """
-    Fit tau on half the writers, score it on the other half, `repeats` times.
-
-    All three taus are scored on the *same* test writers in each split, so they
-    are paired readings of one experiment rather than three differently-drawn
-    ones. `shipped_tau` is fitted nowhere -- it is the frozen constant from
-    `config/settings.py`, carried through so the gain from recalibration is a
-    paired difference rather than a comparison against a separate single draw.
-
-    Returns a list of `(shipped, balanced, constrained)` (far, frr) triples.
-    """
+    """Fit balanced and FAR-constrained taus on half the writers and score on the other half."""
     rows = []
     for repeat in range(repeats):
         rng = np.random.default_rng(base_seed + repeat)
@@ -276,21 +197,7 @@ def writer_disjoint(embedded, num_references, repeats, base_seed, far_target,
 
 
 def shipped_operating_point(model, embedded, branch, num_references, seed):
-    """
-    Score every probe through `verify()` -- the call the GUI makes.
-
-    References make the full enrolment round trip (embed, serialise, read back)
-    because that is what the database layer stores. A byte-layout error would
-    surface here and nowhere in `benchmark.py`.
-
-    Returns (scores, truths, accepted) as aligned arrays.
-
-    One RNG is threaded across every writer. Seeding per writer instead would
-    hand identical permutations to every writer holding the same number of
-    genuines, so all of them would enrol the same *positions* -- and sample index
-    tracks capture session in both corpora, which turns a random draw into one
-    systematically chosen session pattern repeated corpus-wide.
-    """
+    """Score probes through verify() using serialized/deserialized embeddings as references."""
     rng = np.random.default_rng(seed)
     scores, truths, accepted = [], [], []
     for samples in embedded.values():
@@ -350,9 +257,7 @@ def main(argv=None):
         print(f"Input gate .. rejected {rejected['genuine']} genuine, "
               f"{rejected['forged']} forged before scoring")
 
-    # `verify()` takes exactly one model, so the deployed path cannot serve an
-    # ensemble today. Reporting a single member's operating point as though it
-    # were the ensemble's would be a straightforward lie, so it is skipped.
+    # verify() accepts a single model only; skip when evaluating an ensemble.
     if len(models) == 1:
         scores, truths, accepted = shipped_operating_point(
             models[0], embedded, args.branch, args.enroll, args.seed)
@@ -385,8 +290,7 @@ def main(argv=None):
               f"FRR {arm[:, 1].mean() * 100:>6.2f}% +/- {arm[:, 1].std() * 100:<5.2f} "
               f"HTER {hter.mean() * 100:>6.2f}% +/- {hter.std() * 100:.2f}")
 
-    # Paired on identical splits, so the difference is a within-split delta and
-    # not two independently-drawn experiments differenced against each other.
+    # Paired within-split delta across identical writer partitions.
     delta = (shipped[:, 0] + shipped[:, 1]) / 2 - (balanced[:, 0] + balanced[:, 1]) / 2
     print(f"\n  Recalibration buys {delta.mean() * 100:+.2f} HTER points "
           f"+/- {delta.std() * 100:.2f}, winning {int((delta > 0).sum())}/{len(delta)} splits.")

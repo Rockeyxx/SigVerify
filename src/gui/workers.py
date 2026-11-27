@@ -1,17 +1,8 @@
-"""
-workers.py — Signature Verification System
-
-QThread workers that run heavy interfaces.py calls (model inference,
-image cleanup) off the main GUI thread, so the window stays responsive
-and doesn't show "Not Responding" during enrollment/verification.
-"""
+"""QThread workers running enrollment, verification, login, and warm-up off the GUI thread."""
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-# Every worker is tracked here so closing the window can wait for the ones still running
-# (a QThread that is destroyed while running prints "QThread: Destroyed while thread is
-# still running" or crashes). The signal name `finished` is reused by the workers below,
-# so a thread is checked with isRunning() instead.
+# Track active threads so MainWindow can wait on shutdown (finished signal is reused below).
 _started_workers = []
 
 
@@ -23,7 +14,7 @@ class TrackedThread(QThread):
 
 
 def wait_for_workers():
-    """Block until every started worker has finished (call when the window closes)."""
+    """Wait for all active worker threads before closing the window."""
     for thread in list(_started_workers):
         if thread.isRunning():
             thread.wait()
@@ -33,7 +24,6 @@ WEIGHTS_MESSAGE = "Model weights not found. See README → Model Weights & GitHu
 
 
 def _missing_file_message(error: FileNotFoundError) -> str:
-    """Say which kind of file is missing: the model weights, or an image."""
     text = str(error)
     if "weights" in text.lower():
         return WEIGHTS_MESSAGE
@@ -43,7 +33,6 @@ def _missing_file_message(error: FileNotFoundError) -> str:
 
 
 def _is_quality_gate_error(error) -> bool:
-    """True when the model's input gate (size / sharpness of the image) rejected the photo."""
     text = str(error).lower()
     return "quality gate" in text or "input gate" in text
 
@@ -62,7 +51,6 @@ PEN_GATE_MESSAGE = (
 
 
 def _gate_message(error) -> str:
-    """The retake advice for a gate rejection: the pen, or the photo."""
     text = str(error).lower()
     if "temporal" in text and "spatial" not in text:
         return PEN_GATE_MESSAGE
@@ -70,8 +58,8 @@ def _gate_message(error) -> str:
 
 
 class EnrollWorker(TrackedThread):
-    finished = pyqtSignal(dict)      # emits: interfaces.enroll_client() result
-    failed = pyqtSignal(str)         # emits: error message
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
 
     def __init__(self, image_paths: list, trajectories: list = None):
         super().__init__()
@@ -86,7 +74,7 @@ class EnrollWorker(TrackedThread):
         except FileNotFoundError as e:
             self.failed.emit(_missing_file_message(e))
         except interfaces.ImageRejectedError as e:
-            self.failed.emit(str(e))       # already names the image and the reason
+            self.failed.emit(str(e))
         except interfaces.PenSignatureRejectedError:
             self.failed.emit(f"One of the pen signatures was rejected. {PEN_GATE_MESSAGE} "
                              "Press 'Capture Pen Signatures' to sign all of them again.")
@@ -100,8 +88,8 @@ class EnrollWorker(TrackedThread):
 
 
 class VerifyWorker(TrackedThread):
-    finished = pyqtSignal(dict)      # emits: result dict
-    failed = pyqtSignal(str)         # emits: error message
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
 
     def __init__(self, reference_embeddings_b64: list, spatial_origin: str, probe_image_path,
                  reference_temporal_b64: list = None, probe_trajectory=None):
@@ -132,9 +120,9 @@ class VerifyWorker(TrackedThread):
             self.failed.emit(f"Unexpected error: {e}")
 
 class LoginWorker(TrackedThread):
-    """Opens the vault and checks the password: unwrapping a key slot is scrypt, slow by design."""
-    finished = pyqtSignal(bool, object, str)   # emits: storage.authenticate_employee() result
-    failed = pyqtSignal(str)                   # emits: a StorageError, shown in a dialog
+    """Open the vault and unwrap the user's key slot (scrypt)."""
+    finished = pyqtSignal(bool, object, str)
+    failed = pyqtSignal(str)
 
     def __init__(self, company: str, username: str, password: str):
         super().__init__()
@@ -152,7 +140,7 @@ class LoginWorker(TrackedThread):
 
 
 class WarmUpWorker(TrackedThread):
-    """Loads both models once when the app opens, so the first verification is fast."""
+    """Load both models once at startup."""
     done = pyqtSignal()
 
     def run(self):
@@ -160,17 +148,13 @@ class WarmUpWorker(TrackedThread):
         try:
             interfaces.warm_up()
         except Exception:
-            pass  # a missing weight file is reported later, on the real call
+            pass  # missing weights surface on the real enroll/verify call
         self.done.emit()
 
 
 class ConfirmedSigningWorker(TrackedThread):
-    """Embeds the signings of a confirmed visit (the employee confirmed the person's identity).
-
-    signings: list of (image path or None, trajectory or None), one per signing of the visit.
-    A fused visit gives both, so both its paper and its pen embedding are added (item 15).
-    """
-    finished = pyqtSignal(list)      # emits: list of {"spatial": b64|None, "temporal": b64|None}
+    """Embed (image_path, trajectory) pairs from a confirmed verification visit."""
+    finished = pyqtSignal(list)
     failed = pyqtSignal(str)
 
     def __init__(self, signings: list):

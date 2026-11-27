@@ -36,8 +36,6 @@ def auto_crop_signature(image_path):
     x2, y2 = min(w, x_max + pad), min(h, y_max + pad)
 
     cropped = img[y1:y2, x1:x2]
-    # tempfile, not a literal "/tmp": AGENTS.md requires the project run
-    # identically on Windows, which has no /tmp.
     tmp_path = os.path.join(tempfile.gettempdir(),
                             f"crop_{os.path.basename(image_path)}")
     cv2.imwrite(tmp_path, cropped)
@@ -45,9 +43,7 @@ def auto_crop_signature(image_path):
 
 
 def evaluate_writer_samples(model, references, genuine_probe, forged_probe, device="cpu"):
-    """
-    Evaluate a single writer set (references, genuine probe, forged probe) with a spatial model.
-    """
+    """Evaluate one writer set with a spatial model."""
     cropped_refs = [auto_crop_signature(r) for r in references]
     cropped_gen = auto_crop_signature(genuine_probe)
     cropped_forg = auto_crop_signature(forged_probe)

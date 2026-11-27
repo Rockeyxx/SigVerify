@@ -1,6 +1,4 @@
-"""
-clients_page.py — Table view of every client of the company, whoever enrolled them
-"""
+"""Table view of enrolled company clients."""
 
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (

@@ -323,7 +323,7 @@ class TestSignatureService:
 
 
     def _degenerate_trajectory(self):
-        """Raw tablet units — `trajectory_gate` refuses it, exactly as `verify()` does."""
+        """Raw tablet units rejected by `trajectory_gate`."""
         traj = self._sample_trajectory(80)
         traj[:, 0] = traj[:, 0] * 1200 + 8000
         traj[:, 1] = traj[:, 1] * 1200 + 6000
@@ -343,15 +343,7 @@ class TestSignatureService:
         return img
 
     def test_enroll_from_tablet_refuses_a_gate_failing_trajectory(self, service):
-        """
-        Enrolment used to embed whatever it was handed.
-
-        `verify()` gates every probe it scores; the three `enroll_*` methods
-        called `embed()` directly and gated nothing, so a trajectory still in
-        raw device units became a stored template. Every later verification
-        against that template was meaningless, and the diagnostic — if any —
-        pointed at the probe rather than at the reference it was compared to.
-        """
+        """Enrollment methods gate trajectories before embedding so bad templates cannot be stored."""
         trajs = [self._sample_trajectory(80), self._degenerate_trajectory()]
 
         with pytest.raises(ValueError) as excinfo:

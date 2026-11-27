@@ -1,11 +1,4 @@
-"""
-Tests for the real-dataset parsers.
-
-Two layers:
-  1. Synthetic-fixture tests — always run, pin the naming/label logic.
-  2. Real-dataset tests — skipped unless ./data is populated, and assert the
-     exact writer/sample counts each dataset is documented to have.
-"""
+"""Tests for dataset parsers (synthetic naming fixtures and real ./data count checks)."""
 
 import os
 
@@ -144,7 +137,7 @@ class TestParseUTSig:
 
 
 class TestLoadSVC2004File:
-    """SVC2004 trajectory loading — auto-detects Task1 (4-col) vs Task2 (7-col)."""
+    """SVC2004 trajectory loading for Task1 (4-col) and Task2 (7-col)."""
 
     def _write(self, path, rows):
         with open(path, "w") as fh:
@@ -154,7 +147,7 @@ class TestLoadSVC2004File:
         return str(path)
 
     def test_task1_four_column_imputes_pressure(self, tmp_path):
-        """Task1 has no pressure channel — P must be imputed to 1.0 throughout."""
+        """Task1 lacks pressure, so P is imputed to 1.0."""
         path = self._write(tmp_path / "U1S1.TXT",
                            [[100, 200, 1000, 0], [110, 210, 1010, 1], [120, 190, 1020, 1]])
         seq = load_svc2004_file(path)
@@ -184,7 +177,7 @@ class TestLoadSVC2004File:
         assert np.allclose(seq[:, :2].std(axis=0), 1.0, atol=1e-5)
 
     def test_constant_coordinate_does_not_divide_by_zero(self, tmp_path):
-        """A degenerate dot signature has zero variance — must not emit NaN."""
+        """Zero-variance dot trajectories must normalize cleanly without NaN."""
         path = self._write(tmp_path / "U1S1.TXT",
                            [[500, 500, 0, 1], [500, 500, 10, 1]])
         seq = load_svc2004_file(path)
@@ -258,7 +251,7 @@ class TestParseSVC2004:
         assert len(writers["svc_1"]["forged"]) == 1, "sample 21 must be forged"
 
     def test_returns_arrays_not_paths(self, tmp_path):
-        """Temporal samples are loaded eagerly — sequences are small."""
+        """Temporal samples load eagerly as arrays."""
         writers = parse_svc2004(self._fixture(str(tmp_path)))
         sample = writers["svc_1"]["genuine"][0]
         assert isinstance(sample, np.ndarray)
@@ -320,7 +313,7 @@ def test_real_svc2004_counts(root):
 
 @pytest.mark.skipif(not _have(SVC2004_TASK1_DIR), reason="SVC2004 Task1 not downloaded")
 def test_real_task1_has_no_pressure():
-    """Task1 is the pressure-blind ablation baseline — every P must be the imputed 1.0."""
+    """Task1 carries no real pressure data (all imputed 1.0)."""
     assert svc2004_has_pressure(SVC2004_TASK1_DIR) is False
     sample = parse_svc2004(SVC2004_TASK1_DIR)["svc_1"]["genuine"][0]
     assert np.allclose(sample[:, 2], 1.0)
@@ -465,10 +458,7 @@ class TestParseSigComp2011:
         assert "sigcomp_Chinese_0120001" not in writers
 
     def test_test_layout_reads_index_before_writer(self, tmp_path):
-        """
-        `01_013.HWR` is genuine while the training set's `001_01.HWR` is also
-        genuine with the tokens reversed — only the folder tells them apart.
-        """
+        """Test and training SigComp2011 layouts swap writer/sample token order."""
         writers = parse_sigcomp2011(self._fixture(str(tmp_path)))
         dutch = writers["sigcomp_Dutch_013"]
         assert len(dutch["genuine"]) == 2      # one Reference, one Questioned
@@ -565,18 +555,7 @@ def test_real_sigcomp2011_counts():
 
 
 class TestParseDeepSignDB:
-    """
-    DeepSignDB: `DeepSignDB/{split}/{modality}/u{id}_{g|s}_*.txt`.
-
-    Every value below is invented. DeepSignDB is licensed and may not be
-    redistributed, so no real sample is reproduced here — not even a partial one.
-    The azimuth/altitude constants 3600 and 900 are the published WACOM maxima
-    already hard-coded in `parsers.py`, not values taken from any signature.
-
-    The fixture carries one writer per source database, so the per-source
-    pressure column, the per-file sample rate and the source filter are each
-    exercised against a file that would parse wrongly under another source's rules.
-    """
+    """Synthetic fixture tests for DeepSignDB source parsing and per-source columns."""
 
     def _fixture(self, root):
         stylus = os.path.join(root, "DeepSignDB", "Development", "stylus")
@@ -611,7 +590,7 @@ class TestParseDeepSignDB:
         with open(os.path.join(stylus, "u1009_g_synthetic_w1.txt"), "w") as fh:
             fh.write("2\n30 40 1000 200\n31 41 1010 300\n")
 
-        # The same integer ID in the other half — a different person.
+        # Same integer ID in Evaluation represents a distinct writer.
         evaluation = os.path.join(root, "DeepSignDB", "Evaluation", "stylus")
         os.makedirs(evaluation, exist_ok=True)
         with open(os.path.join(evaluation, "u0001_g_synthetic.txt"), "w") as fh:
@@ -642,12 +621,7 @@ class TestParseDeepSignDB:
         assert "deepsign_eBioSign_DS1-dev_1009" in widened
 
     def test_development_and_evaluation_never_collide(self, tmp_path):
-        """
-        `Development/u0001` and `Evaluation/u0001` are two different people —
-        MCYT's 330 signers are split 230/100 between the halves. One shared
-        writer ID would leak a training writer into the held-out set, and it
-        would do so silently, by *improving* the reported EER.
-        """
+        """Shared numeric IDs in Development and Evaluation receive distinct writer IDs."""
         root = self._fixture(str(tmp_path))
         development = parse_deepsigndb(root, split="Development")
         evaluation = parse_deepsigndb(root, split="Evaluation")
@@ -657,10 +631,7 @@ class TestParseDeepSignDB:
         assert not set(development) & set(evaluation)
 
     def test_pressure_comes_from_the_source_specific_column(self, tmp_path):
-        """
-        MCYT keeps pressure in column 6 and BiosecurID in column 7. Reading a
-        fixed column would return azimuth instead — 3600, or 3.52 once scaled.
-        """
+        """MCYT reads pressure from column 6 and BiosecurID from column 7."""
         writers = parse_deepsigndb(self._fixture(str(tmp_path)))
         mcyt = writers["deepsign_MCYT-dev_0001"]["genuine"][0]
         biosecurid = writers["deepsign_BiosecurID-dev_0231"]["genuine"][0]

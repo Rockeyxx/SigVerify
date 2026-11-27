@@ -1,19 +1,4 @@
-"""Choose the fused alpha and tau the way the shipped values were chosen, then check them.
-
-Both branches score the same signing: the scan through the spatial model and the pen
-recording through the temporal model. Chosen on the BiosecurID-SONOF paired writers,
-which neither branch trained on: K = 5 references, 10 enrolment draws seeded 42 + draw,
-one draw shared by both branches, nearest-reference similarity. alpha is the grid point
-(ALPHA_GRID_STEP) with the lowest mean skilled-forgery EER over the draws, and tau is the
-mean EER-point threshold at that alpha. Both are then applied once to the screened NFI
-writers (NFI_FUSION_WRITERS), who took no part in the choice.
-
-Chosen by this method: ALPHA_DEFAULT = 0.4 and SONOF_FUSED_THRESHOLD = 0.7564
-(docs/ENG_REPORT.md F16). The script prints whether a run reproduces them. alpha ships;
-the shipped tau (DECISION_THRESHOLD) now comes from the in-house campaign instead.
-
-    python scripts/calibrate_fusion.py
-"""
+"""Calibrate fusion alpha and threshold tau on BiosecurID-SONOF and evaluate on NFI."""
 
 from __future__ import annotations
 
@@ -46,12 +31,7 @@ _NFI_SCAN = re.compile(r"^NFI-(\d{3})(\d{2})(\d{3})\.png$", re.IGNORECASE)
 
 
 def parse_nfi_pairs(root=SIGCOMP2009_DIR, writers=NFI_FUSION_WRITERS):
-    """Pair each NFI scan with the pen file of the same signing, for the listed writers.
-
-    `NFI-{author}{session}{target}.png` sits beside its `.hwr`. A genuine has author ==
-    target; a forgery targets someone else. Returns the same shape as
-    parse_biosecurid_sonof_pairs: {writer: {"genuine": [(png, pen)], "forged": [...]}}.
-    """
+    """Pair each NFI scan with its `.hwr` pen file for the requested writers."""
     out = {}
     for kind, folder in (("genuine", "genuines"), ("forged", "forgeries")):
         for png in sorted(glob.glob(os.path.join(root, folder, "*.png"))):
@@ -79,11 +59,7 @@ def embed_pairs(pairs, spatial_model, temporal_model, load_pen, device="cpu"):
 
 
 def draw_scores(embedded, draw, num_references=NUM_ENROLLMENT_REFERENCES):
-    """One enrolment draw: per writer, (scan, pen) similarities of genuine probes and forgeries.
-
-    Both branches use the same references. A writer needs more than num_references
-    genuines and at least one forgery, or it is skipped before drawing.
-    """
+    """Draw K shared references per writer and return (scan, pen) similarities."""
     rng = np.random.default_rng(42 + draw)
     rows = {}
     for writer, record in embedded.items():

@@ -1,13 +1,4 @@
-"""
-Evaluation & Calibration — Signature Verification System
-
-Independent evaluation and threshold calibration script. Loads saved weights,
-computes EER/FAR/FRR metrics, and generates ROC/DET curves and confusion matrices.
-
-CLI Examples:
-    python scripts/evaluate.py --branch spatial --weights models/weights/spatial_cnn.pth --data-dir ./data
-    python scripts/evaluate.py --alpha-sweep --spatial-weights ... --temporal-weights ... --data-dir ./data
-"""
+"""Evaluation and threshold calibration CLI for spatial, temporal, and fused models."""
 
 import argparse
 import os
@@ -42,13 +33,7 @@ from src.verification import nearest_reference_distances, similarity_from_distan
 
 
 def compute_eer(genuine_scores, impostor_scores):
-    """
-    Compute Equal Error Rate (EER) from genuine and forgery score distributions.
-
-    Finds the decision threshold where False Acceptance Rate (FAR) equals False Rejection Rate (FRR).
-
-    Returns: (eer: float, threshold_at_eer: float)
-    """
+    """Compute Equal Error Rate and threshold where FAR equals FRR."""
 
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
@@ -56,29 +41,19 @@ def compute_eer(genuine_scores, impostor_scores):
     fpr, tpr, thresholds = roc_curve(labels, scores)
     fnr = 1 - tpr
 
-    # Compute minimal absolute difference index where FPR equals FNR
     idx = np.nanargmin(np.abs(fpr - fnr))
     eer = (fpr[idx] + fnr[idx]) / 2
     return float(eer), float(thresholds[idx])
 
 
 def compute_far_frr(genuine_scores, impostor_scores, threshold):
-    """Calculate False Acceptance Rate (FAR) and False Rejection Rate (FRR) at specified decision threshold."""
+    """Return (FAR, FRR) at threshold."""
     far = np.mean(impostor_scores >= threshold)
     frr = np.mean(genuine_scores < threshold)
     return float(far), float(frr)
 
 
-
 def _finish_plot(fig, output_path, kind):
-    """
-    Save-and-close for the CLI path.
-
-    The plot helpers below take an optional `ax`. When a caller supplies one,
-    say the notebook drawing into its own subplot grid, the figure belongs to
-    that caller, so it is neither saved nor closed here. That is the
-    `fig is None` case, where this returns immediately.
-    """
     if fig is None:
         return
     fig.tight_layout()
@@ -89,20 +64,13 @@ def _finish_plot(fig, output_path, kind):
 
 def plot_loss_curve(history, title="Training vs Validation Loss",
                     output_path=None, ax=None):
-    """
-    Plot per-epoch train and validation loss from a `train.fit` history dict.
-
-    Marks the best-validation epoch, since that is the one whose weights were
-    saved. Under early stopping the final epoch is rarely the best, and a curve
-    that doesn't say so invites reading the wrong number off it.
-    """
+    """Plot train/val contrastive loss and mark the minimum validation epoch."""
     train_loss = history["train_loss"]
     val_loss = history["val_loss"]
     epochs = range(1, len(train_loss) + 1)
 
     fig, ax = (None, ax) if ax is not None else plt.subplots(figsize=(8, 5))
 
-    # Markers make a short run readable and a long one an unreadable smear.
     marker = "o" if len(train_loss) <= 30 else None
     ax.plot(epochs, train_loss, label="Train Loss", marker=marker, linewidth=2)
     ax.plot(epochs, val_loss, label="Validation Loss", marker=marker,
@@ -124,12 +92,7 @@ def plot_loss_curve(history, title="Training vs Validation Loss",
 
 
 def plot_roc(genuine_scores, impostor_scores, title, output_path=None, ax=None):
-    """
-    Plot a Receiver Operating Characteristic (ROC) curve.
-
-    Draws into `ax` if given (nothing is saved); otherwise creates its own
-    figure and writes it to `output_path`.
-    """
+    """Plot ROC curve into ax or save to output_path."""
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     fpr, tpr, _ = roc_curve(labels, scores)
@@ -146,12 +109,7 @@ def plot_roc(genuine_scores, impostor_scores, title, output_path=None, ax=None):
 
 
 def plot_det(genuine_scores, impostor_scores, title, output_path=None, ax=None):
-    """
-    Plot a Detection Error Tradeoff (DET) curve.
-
-    Draws into `ax` if given (nothing is saved); otherwise creates its own
-    figure and writes it to `output_path`.
-    """
+    """Plot DET curve into ax or save to output_path."""
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     fpr, fnr, _ = det_curve(labels, scores)
@@ -168,12 +126,7 @@ def plot_det(genuine_scores, impostor_scores, title, output_path=None, ax=None):
 
 def plot_confusion_matrix(genuine_scores, impostor_scores, threshold, title,
                           output_path=None, ax=None):
-    """
-    Plot a confusion matrix at a calibrated decision threshold.
-
-    Draws into `ax` if given (nothing is saved); otherwise creates its own
-    figure and writes it to `output_path`.
-    """
+    """Plot confusion matrix at threshold into ax or save to output_path."""
     labels = np.concatenate([np.ones(len(genuine_scores)), np.zeros(len(impostor_scores))])
     scores = np.concatenate([genuine_scores, impostor_scores])
     preds = (scores >= threshold).astype(int)
@@ -267,16 +220,7 @@ def build_eval_loader(writer_samples, writer_ids, branch, batch_size, num_worker
 
 
 def score_pairs(model, dataloader, device, desc="scoring"):
-    """
-    Run inference over a loader and return similarity scores in loader order.
-
-    Order is only meaningful for shuffle-free loaders, which is every loader
-    `build_eval_loader` hands out. Where it holds, the scores line up with
-    `dataloader.dataset.pairs`, letting a caller show which specific pair got
-    which prediction.
-
-    Returns: (scores, labels) as numpy arrays.
-    """
+    """Score a shuffle-free pair loader and return (scores, labels) numpy arrays."""
     model.eval()
     all_scores, all_labels = [], []
 
@@ -302,17 +246,7 @@ def score_pairs(model, dataloader, device, desc="scoring"):
 
 
 def embed_samples(model, samples, branch, device, batch_size=BATCH_SIZE):
-    """
-    Embed a flat list of samples — not pairs — returning [N, D] float32.
-
-    The enrollment protocol scores every probe against every reference, so
-    embedding each sample once and comparing in NumPy costs O(N) forward passes
-    instead of the O(N x K) a pair loader would run.
-
-    Spatial samples are image paths; temporal samples are [L, 3] trajectories,
-    padded per batch and packed so a padded batch yields the same embedding the
-    sample would produce alone.
-    """
+    """Embed a flat list of images or trajectories into a [N, D] float32 matrix."""
     if not samples:
         return np.zeros((0, model.embedding_dim), dtype=np.float32)
 
@@ -341,15 +275,7 @@ def embed_samples(model, samples, branch, device, batch_size=BATCH_SIZE):
 
 def embed_writers(model, writer_samples, writer_ids, branch, device, batch_size=BATCH_SIZE,
                   desc="embedding"):
-    """
-    Embed every genuine and forged sample for each writer, once.
-
-    Reference draws are then re-sampled from these arrays rather than re-running
-    the encoder, so averaging over ten enrollment trials costs one forward pass
-    over the dataset instead of ten.
-
-    Returns: {writer_id: {"genuine": [N, D], "forged": [M, D]}}
-    """
+    """Embed each writer's genuine and forged samples once into {writer: {genuine, forged}}."""
     embedded = {}
 
     for writer in tqdm(sorted(writer_ids), desc=desc, leave=False):
@@ -365,66 +291,20 @@ def embed_writers(model, writer_samples, writer_ids, branch, device, batch_size=
 
 
 def _draw(samples, indices):
-    """
-    Index a sample collection that may be a stacked matrix or a ragged list.
-
-    Embeddings arrive as `[N, D]` and index directly. Raw trajectories do not —
-    they are variable-length `[L, C]` arrays that cannot stack — so the
-    enrollment draw has to work on a plain list too.
-    """
     if isinstance(samples, np.ndarray):
         return samples[indices]
     return [samples[i] for i in indices]
 
 
 def enrollment_draw(rng, num_genuine, num_references):
-    """
-    One enrollment draw: which genuine samples are references, which are probes.
-
-    Returns `(reference_indices, probe_indices)`. The writer's forgeries are not
-    involved — they are always probes, never references.
-
-    This existed eight times across `scripts/` and `tools/` in two different
-    idioms: `rng.permutation(n)` sliced in two here, and `rng.choice` plus
-    `np.setdiff1d` in the tools. Both draw a uniformly random K-subset, so they
-    were statistically equivalent but consumed the RNG stream differently, which
-    meant "the same seed" named two different draws depending on which file you
-    were reading. The permutation form is canonical because it is what the
-    enrolment protocol in `src/verification.py` mirrors.
-    """
+    """Split num_genuine indices into (reference_indices, probe_indices)."""
     order = rng.permutation(num_genuine)
     return order[:num_references], order[num_references:]
 
 
 def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
                           seed=42, distance=None):
-    """
-    Score one enrollment draw: K genuine references per writer, everything else a probe.
-
-    This is the protocol the field uses and the one `src/verification.py` runs.
-    SVC2004 enrolled exactly 5 genuine signatures per user and never showed a
-    skilled forgery during enrollment — forgeries appear only as probes, which
-    is why `references` is drawn from `genuine` alone.
-
-    Scoring is nearest-reference with `S = 1 / (1 + d)`, identical to
-    `src.verification._nearest_reference_score`. A person's signature varies, so
-    the closest enrolled sample is the fairest comparison.
-
-    A writer needs `num_references` + 1 genuines and at least one forgery, or it
-    cannot contribute both arms and is skipped rather than half-counted.
-
-    `distance` swaps the metric without touching the protocol. It defaults to
-    None, meaning the vectorized L2 over stacked embeddings that every model
-    path uses; passing a callable `(probe, reference) -> float` routes scoring
-    through it instead. This exists so the DTW baseline
-    (`tools/research/dtw_baseline.py`) can be measured on the same writers, the same K
-    references and the same RNG sequence as the model it is compared against —
-    a second copy of this loop is how two measurements drift apart. The
-    callable path costs O(probes x references) Python calls, so it is for
-    diagnostics, not for scoring a model.
-
-    Returns: (scores, labels) as numpy arrays, genuine probes labelled 1.
-    """
+    """Score one enrollment draw per writer using nearest-reference similarity or a custom distance."""
     rng = np.random.default_rng(seed)
     all_scores, all_labels = [], []
 
@@ -458,36 +338,7 @@ def enrolled_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
 
 
 def znorm_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES, seed=42):
-    """
-    Enrollment scoring with the probe distance standardized per writer.
-
-    Identical draw to `enrolled_trial_scores` — same RNG, same K references, same
-    probes — so the two are directly comparable. Only the metric differs.
-
-    **The problem this addresses.** `S = 1/(1+d)` is compared against one global
-    threshold for every writer in every corpus, which asks every signer to be
-    equally self-consistent. They are not: this branch reads 4.24% EER on
-    sigcomp_Dutch and 16.32% on svc2004, and a single threshold cannot sit well
-    for both. A naturally variable signer's genuine probe can land further away
-    than a precise signer's skilled forgery, and no threshold fixes that.
-
-    **The fix.** The enrolled references already measure that writer's own scale,
-    for free and without any extra capture: the pairwise distances of the K
-    genuine references *to each other*. Standardizing the probe distance by their
-    mean and spread is the Z-norm the biometrics literature has used for decades.
-
-    This learns no decision boundary, only a scale — which is why the earlier
-    per-user SVM result (EER 2-3x worse) does not transfer. That failed because
-    random-forgery negatives cannot teach a skilled-forgery boundary; Z-norm
-    never looks at a negative.
-
-    Scores are **negated z-scores**, not `S = 1/(1+d)`: higher still means more
-    genuine and EER is rank-based, so it is directly comparable, but a threshold
-    tuned on one scoring does not carry to the other. Same caveat as
-    `writer_dependent_scores`.
-
-    Returns: (scores, labels) as numpy arrays, genuine probes labelled 1.
-    """
+    """Score one enrollment draw using negated per-writer z-normalized nearest-reference distances."""
     rng = np.random.default_rng(seed)
     all_scores, all_labels = [], []
 
@@ -502,22 +353,17 @@ def znorm_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES, seed=
         references = _draw(genuine, ref_idx)
         genuine_probes = _draw(genuine, probe_idx)
 
-        # The writer's own scale: how far their enrolled references sit from one
-        # another. Upper triangle only — the diagonal is zero by construction and
-        # would drag the mean toward it.
+        # Upper triangle only so zero diagonal does not pull the intra-writer mean down.
         intra = np.linalg.norm(references[:, None, :] - references[None, :, :], axis=2)
         upper = intra[np.triu_indices(len(references), k=1)]
         centre = float(upper.mean()) if upper.size else 0.0
-        # A writer who signed identically twice has zero spread. Floor it rather
-        # than clean up the inf afterwards.
         spread = max(float(upper.std()), 1e-6) if upper.size else 1.0
 
         for probes, label in ((genuine_probes, 1), (forged, 0)):
             if not len(probes):
                 continue
             distances = nearest_reference_distances(probes, references)
-            # Negated: the convention everywhere else is that a larger score
-            # means more genuine, and a z-score runs the other way.
+            # Negate so higher scores indicate greater similarity.
             all_scores.append(-(distances - centre) / spread)
             all_labels.append(np.full(len(probes), label))
 
@@ -528,29 +374,7 @@ def znorm_trial_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES, seed=
 
 
 def fit_writer_classifier(references, negatives, C=1.0):
-    """
-    Fit one enrolled user's decision boundary.
-
-    Positives are that user's enrolled genuine signatures. Negatives are genuine
-    signatures belonging to **other** users — "random forgeries" in the
-    literature's terminology.
-
-    This is the stage published systems have and this project did not. On
-    identical features SigNet-F reports 1.78% EER with a single global threshold
-    against 0.4% with per-user boundaries, and every "99%+ on CEDAR" result is
-    writer-dependent. One global distance threshold asks every signer to be
-    equally consistent; a per-user boundary does not.
-
-    Negatives deliberately exclude this user's own skilled forgeries. Those are
-    the attack being measured, so fitting on them leaks the evaluation — and the
-    deployed system never holds a labelled forgery of a real customer, so a
-    result that needed them could not ship.
-
-    `class_weight="balanced"` because negatives outnumber positives heavily:
-    5 enrolled signatures against a pool drawn from every other writer.
-
-    The classifier reads embeddings only. It never touches the Siamese encoder.
-    """
+    """Fit a balanced per-writer LinearSVC using other writers' genuines as negatives."""
     x = np.vstack([references, negatives])
     y = np.concatenate([np.ones(len(references)), np.zeros(len(negatives))])
     return LinearSVC(C=C, class_weight="balanced").fit(x, y)
@@ -558,21 +382,7 @@ def fit_writer_classifier(references, negatives, C=1.0):
 
 def writer_dependent_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
                             seed=42, max_negatives=200):
-    """
-    Score every probe with its own writer's fitted classifier.
-
-    Same enrolment draw as `enrolled_trial_scores` — K genuine references, the
-    rest of the genuines plus every forgery as probes — but the decision comes
-    from a per-user boundary instead of a distance to the nearest reference.
-
-    Returns SVM decision-function margins rather than similarities. They are
-    higher-is-genuine, which is all the downstream EER code requires, but they
-    are **not** on the `S = 1/(1+d)` scale, so a threshold tuned against one is
-    meaningless against the other.
-
-    A writer needs `num_references` + 1 genuines, at least one forgery, and at
-    least one other writer to draw negatives from, or it is skipped.
-    """
+    """Score one enrollment draw using per-writer LinearSVC decision margins."""
     rng = np.random.default_rng(seed)
     writers = sorted(embedded)
     all_scores, all_labels = [], []
@@ -589,7 +399,7 @@ def writer_dependent_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
         references = genuine[ref_idx]
         genuine_probes = genuine[probe_idx]
 
-        # Other writers' genuines only — never this writer's forgeries.
+        # Random impostors only; never fit on this writer's skilled forgeries.
         pool = np.vstack([embedded[w]["genuine"] for w in others])
         if len(pool) > max_negatives:
             pool = pool[rng.choice(len(pool), max_negatives, replace=False)]
@@ -609,23 +419,13 @@ def writer_dependent_scores(embedded, num_references=NUM_ENROLLMENT_REFERENCES,
 
 
 def enrolled_writer_count(embedded, num_references=NUM_ENROLLMENT_REFERENCES):
-    """How many writers can supply K references plus a probe of each class."""
     return sum(1 for w in embedded
                if len(embedded[w]["genuine"]) >= num_references + 1
                and len(embedded[w]["forged"]))
 
 
 def load_branch_model(branch, weights_path, device):
-    """
-    Instantiate the requested backbone and load its trained weights.
-
-    The spatial architecture is read back out of the checkpoint rather than out
-    of `config/`, so an archived run trained with a different trunk or embedding
-    width still benchmarks correctly while config points at whatever is being
-    trained now. Scoring a checkpoint under the wrong architecture would either
-    raise a shape error or, worse, load a subset of the weights and report a
-    number that means nothing.
-    """
+    """Load a spatial or temporal checkpoint, recovering its architecture from weights_path."""
     state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
     if branch == "spatial":
         model = SpatialSiamese.from_state_dict(state_dict)
@@ -680,14 +480,7 @@ def parse_args(argv=None):
 
 
 def dataset_key(writer_id):
-    """
-    Group a namespaced writer ID back to its source writer_samples.
-
-    A writer_samples that splits its writers by script or language keeps that middle
-    token — `bhsig_Bengali`, `bhsig_Hindi`, `sigcomp_Dutch` — because the
-    cross-script comparison is the interesting one; datasets with a bare numeric
-    writer ID collapse to the dataset name.
-    """
+    """Extract source dataset (and script/language when present) from a prefixed writer ID."""
     parts = writer_id.split("_")
     if len(parts) > 2 and not parts[1].isdigit():
         return "_".join(parts[:2])
@@ -696,15 +489,7 @@ def dataset_key(writer_id):
 
 def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args, device,
                        embedded=None):
-    """
-    Report EER per source writer_samples at the validation-tuned threshold.
-
-    A pooled EER can hide a dataset the model handles badly by averaging it
-    against one it handles well. Training merges CEDAR (Latin), BHSig260
-    (Bengali/Devanagari) and UTSig (Persian) into one model — this is the
-    breakdown that shows whether it actually generalizes across scripts or
-    just learned the majority script.
-    """
+    """Print and return EER/FAR/FRR broken down by source corpus."""
     groups = {}
     for writer in test_ids:
         groups.setdefault(dataset_key(writer), []).append(writer)
@@ -718,8 +503,6 @@ def per_dataset_report(branch, model, writer_samples, test_ids, threshold, args,
 
     breakdown = {}
     for name, writers in sorted(groups.items()):
-        # Same enrolment protocol τ was tuned under, so each dataset's FAR/FRR is
-        # comparable to the pooled figure and to the deployed operating point.
         try:
             genuine, impostor = enrolled_split_scores(
                 model, branch, writer_samples, writers, args, device, desc=name,
@@ -743,31 +526,14 @@ def enrolled_split_scores(model, branch, writer_samples, writer_ids, args, devic
                           desc="split",
                           num_references=NUM_ENROLLMENT_REFERENCES,
                           trials=ENROLLMENT_TRIALS, embedded=None):
-    """
-    Scores for one writer set under the enrolment protocol.
-
-    Which K genuines a writer happens to enrol moves the scores, so a single draw
-    would fix τ against one lucky enrolment. This averages by taking the
-    **median-EER** draw of `trials`, the same representative-draw rule
-    `scripts/benchmark.enrolled_scores` uses.
-
-    `embedded` (from embed_writers) is reused when given, so writers already run
-    through the model are not run again.
-
-    Returns (genuine_scores, impostor_scores).
-    """
+    """Return (genuine_scores, impostor_scores) from the median-EER enrollment draw."""
     if embedded is None:
         embedded = embed_writers(model, writer_samples, writer_ids, branch, device,
                                  args.batch_size, desc=f"{branch} · {desc}")
     else:
         embedded = {w: embedded[w] for w in writer_ids}
 
-    # A writer needs K+1 genuines and a forgery to contribute both arms, so a
-    # small validation split may not support the deployed K. Step K down rather
-    # than falling back to pair-scoring: a lower K is still the right *protocol*
-    # and its τ is close, whereas pair-scoring is the wrong protocol and its τ is
-    # the bug this function exists to fix. Announce it, because a τ calibrated at
-    # a K the app does not use is an approximation the reader should see.
+    # Step K down if a small split cannot supply K+1 genuines per writer, keeping the enrollment protocol.
     for k in range(num_references, 0, -1):
         draws = []
         for trial in range(trials):
@@ -791,23 +557,13 @@ def enrolled_split_scores(model, branch, writer_samples, writer_ids, args, devic
 
 
 def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, args, device):
-    """
-    Score one branch: tune τ on validation, then report on the held-out test set.
-
-    Returns (report dict, test_genuine, test_impostor).
-    """
+    """Tune tau on validation and evaluate on held-out test writers; returns (report, genuine, impostor)."""
     model = load_branch_model(branch, weights_path, device)
 
-    # τ is tuned on validation only. Picking it on test would report
-    # an overly optimistic threshold rather than a realistic operating point.
-    # It is tuned using the enrollment protocol to match production deployment.
     val_genuine, val_impostor = enrolled_split_scores(
         model, branch, writer_samples, val_ids, args, device, desc="val (tune τ)")
     _, threshold = compute_eer(val_genuine, val_impostor)
 
-    # Test is scored under the same protocol τ was tuned on. Mixing them — an
-    # enrolment τ applied to pair-scored test scores — would report a FAR/FRR
-    # pair that describes no real operating point at all.
     test_embedded = embed_writers(model, writer_samples, test_ids, branch, device,
                                   args.batch_size, desc=f"{branch} · test")
     test_genuine, test_impostor = enrolled_split_scores(
@@ -837,14 +593,10 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
     print(f"\n[{branch}]  EER {eer*100:.2f}%  |  at τ={threshold:.4f}: "
           f"FAR {far*100:.2f}%  FRR {frr*100:.2f}%")
     if far > TARGET_FAR:
-        # AGENTS.md: when the FAR target is missed, keeping FAR low outranks FRR.
         print(f"  FAR target ({TARGET_FAR*100:.0f}%) MISSED — raise τ to trade FRR for FAR.")
     if frr > TARGET_FRR:
         print(f"  FRR target ({TARGET_FRR*100:.0f}%) MISSED — genuine users are being "
               f"rejected at this τ.")
-    # Accuracy at the EER operating point is 1 - EER by definition, so this is a
-    # restatement of the EER against the Term-1 requirement rather than a fourth
-    # measurement. It is printed because the requirement is written in accuracy.
     if 1.0 - eer < TARGET_ACCURACY:
         print(f"  Accuracy target ({TARGET_ACCURACY*100:.0f}%) MISSED — "
               f"{(1.0 - eer)*100:.2f}% at the EER point.")
@@ -856,15 +608,12 @@ def evaluate_branch(branch, weights_path, writer_samples, val_ids, test_ids, arg
 
 
 def main(argv=None):
-    # Headless backend is selected here, not at import time: importing this
-    # module from a notebook must not clobber the interactive backend and kill
-    # every inline plot. Only the CLI path runs without a display.
+    # Select Agg only in the CLI entry point so notebook imports keep interactive plots.
     matplotlib.use("Agg")
 
     args = parse_args(argv)
     os.makedirs(args.output_dir, exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --output-dir
 
-    # Dynamic hardware selection for evaluation inference
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Evaluation mode: {args.branch}")
@@ -876,8 +625,6 @@ def main(argv=None):
     writer_samples = build_writer_samples(
         args.data_dir, None if channels in (None, "xyp") else channels)
 
-    # Re-derive the exact partition training used: same writer list, same seed,
-    # same ratios, and same holdout set.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
         TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
     if args.holdout_writers:
@@ -890,7 +637,6 @@ def main(argv=None):
 
     print(f"Split: {len(train_ids)} train / {len(val_ids)} val / {len(test_ids)} test writers")
 
-    # Ensure evaluation partition matches the checkpoint's split record.
     record = check_split_against_record(args.weights, test_ids, max_gap_ms=MAX_GAP_MS)
     print("Split record: matches the checkpoint" if record else
           "Split record: none (checkpoint predates 2026-09-19; provenance unverified)")
@@ -908,7 +654,7 @@ def main(argv=None):
                                        val_ids, test_ids, args, device)
         return report
 
-    # ─── Fused ────────────────────────────────────────────────────────
+    # Fused
     if not (args.spatial_weights and args.temporal_weights):
         raise ValueError("--branch fused requires --spatial-weights and --temporal-weights")
 
@@ -917,9 +663,7 @@ def main(argv=None):
     temporal_report, temporal_genuine, temporal_impostor = evaluate_branch(
         "temporal", args.temporal_weights, writer_samples, val_ids, test_ids, args, device)
 
-    # No writer has both an image and a trajectory yet, so the two score vectors
-    # describe different pairs. Truncating to a common length lets α be swept,
-    # but the resulting EER is an estimate — hence PROVISIONAL, per AGENTS.md.
+    # Unpaired corpora: truncate to common length for a provisional alpha sweep.
     n_genuine = min(len(spatial_genuine), len(temporal_genuine))
     n_impostor = min(len(spatial_impostor), len(temporal_impostor))
 

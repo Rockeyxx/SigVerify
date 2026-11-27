@@ -21,8 +21,7 @@ _DEV_NUMBER = re.compile(r"\d+:\d+")
 
 
 def _linux_tablet_names(sys_root, udev_root):
-    """Kernel names of the input nodes udev flags as tablets. One XPPen makes three nodes with
-    one USB ID (Pen, Mouse, Keyboard); only the pen carries ID_INPUT_TABLET."""
+    """Return Linux input device names tagged ID_INPUT_TABLET=1 by udev."""
     names = []
     for node in sorted(glob.glob(os.path.join(sys_root, "event*"))):
         try:
@@ -43,7 +42,7 @@ def _linux_tablet_names(sys_root, udev_root):
 
 
 def _wintab_names(load_wintab):
-    """Each device name the tablet driver reports through Wintab; empty without the driver."""
+    """Return device names reported by Wintab, or [] if the driver is absent."""
     try:
         dll = load_wintab()
         count = ctypes.c_uint(0)
@@ -65,9 +64,7 @@ def _wintab_names(load_wintab):
 
 def tablet_names(system=None, sys_root="/sys/class/input", udev_root="/run/udev/data",
                  wintab=None):
-    """Names of the connected tablets, read from the system: the kernel on Linux, Wintab on
-    Windows. Empty when none can be read (no tablet, or Windows without the driver).
-    Reading takes milliseconds (3.7 ms for 27 input nodes on Linux)."""
+    """Return connected tablet names from sysfs/udev (Linux) or Wintab (Windows)."""
     system = system or platform.system()
     if system == "Linux":
         return _linux_tablet_names(sys_root, udev_root)
@@ -77,17 +74,12 @@ def tablet_names(system=None, sys_root="/sys/class/input", udev_root="/run/udev/
 
 
 class TrajectoryGateError(ValueError):
-    """Raised when there is nothing to process (no pen-down strokes recorded).
-    The quality gate itself runs at Confirm and again in verify()."""
+    """Raised when no pen-down strokes were recorded."""
     pass
 
 
 class SignatureCaptureWidget(QWidget):
-    """
-    Signature capture container widget for XPPen Deco 640.
-    Keeps recording across pen lifts until an explicit Confirm action is triggered.
-    Emits `signature_confirmed` with a normalized [L, 4] float32 array on Confirm.
-    """
+    """Tablet capture widget emitting normalized [L, 4] trajectories on Confirm."""
     signature_confirmed = pyqtSignal(object)  # np.ndarray [L, 4] -> (x, y, pressure, dt)
 
     def __init__(self, parent=None):
@@ -116,8 +108,7 @@ class SignatureCaptureWidget(QWidget):
         self.layout.addLayout(btn_layout)
         self.setLayout(self.layout)
 
-        # Read once when the window opens, before anyone presses Enter. With two tablets the
-        # signing window asks which one (CollectDialog.choose_tablet); until then, the first.
+        # Snapshot tablet list at startup; choose_tablet() lets the user pick if multiple exist.
         self.tablets = tablet_names()
         self.device_model = self.tablets[0] if self.tablets else CAPTURE_NO_DRIVER
 
@@ -146,26 +137,18 @@ class SignatureCaptureWidget(QWidget):
         self.label.setText("Canvas cleared. Start signing again.")
 
     def capture_signature(self) -> np.ndarray:
-        """
-        Public API method to retrieve the finalized and normalized signature trajectory.
-        Shape: [L, 4] -> (x, y, pressure, dt)
-        """
+        """Return the normalized [L, 4] trajectory."""
         return self.canvas.trajectory()
 
     def capture_info(self) -> dict:
-        """What enrolment stores beside the template, so verification can insist on the same
-        tablet model and operating system (F23; spec decisions D7 and D9). device_model is the
-        tablet name read from the system, or CAPTURE_NO_DRIVER."""
+        """Return device_model, OS, and active Qt platform string."""
         return {"device_model": self.device_model, "os": platform.system(),
-                # platformName() is "windows" for both Windows pen inputs; the started spec
-                # (e.g. "windows:nowmpointer" for Wintab) tells them apart.
+                # platformName() is "windows" for both backends; QT_QPA_PLATFORM keeps Wintab vs Ink distinct.
                 "qt_platform": os.environ.get("QT_QPA_PLATFORM") or QGuiApplication.platformName()}
 
 
 class DrawingCanvas(QWidget):
-    """
-    Canvas widget capturing hardware-level tablet events (hi-res coords, device timestamps, pressure).
-    """
+    """Canvas widget capturing Qt tablet events."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(760, 350)
@@ -188,8 +171,7 @@ class DrawingCanvas(QWidget):
         x, y = float(event.hiResGlobalX()), float(event.hiResGlobalY())
         et = event.type()
 
-        # Only samples inside the box count. Qt keeps sending a stroke to the canvas after the
-        # pen leaves it, so leaving ends the stroke and coming back starts a new one (B10).
+        # Qt keeps routing tablet events after the pen leaves the widget; split strokes at box bounds.
         inside = self.rect().contains(event.pos())
         self.raw_events.append((ts_ms, int(et), x, y, p, float(event.xTilt()),
                                 float(event.yTilt()), int(inside)))
@@ -221,8 +203,7 @@ class DrawingCanvas(QWidget):
     def paintEvent(self, event):  # skylos: ignore Qt calls this override by name, with this signature
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        # Paint the signing box itself: a plain QWidget subclass ignores a stylesheet background,
-        # so without this the box is invisible (B10).
+        # QWidget subclasses ignore stylesheet backgrounds, so paint the box explicitly.
         painter.fillRect(self.rect(), Qt.white)
         painter.setPen(QPen(QColor("#555555"), 4))
         painter.drawRect(self.rect())
@@ -245,8 +226,7 @@ class DrawingCanvas(QWidget):
         strokes = [s for s in self.completed_strokes_data + [self.current_stroke_data] if s]
         if not strokes:
             raise TrajectoryGateError("No strokes recorded.")
-        # Qt pressure is already 0..1 (the platform divides by its own maximum). Screen y grows
-        # down and the pen corpora grow up, so pen_stream flips it (ENG_REPORT G4).
+        # Qt pressure is in [0, 1]; pen_stream flips screen y to match training corpora.
         return strokes_to_trajectory([np.asarray(s, dtype=np.float64) for s in strokes],
                                      pressure_max=1.0)
 

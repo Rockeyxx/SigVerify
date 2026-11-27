@@ -1,12 +1,4 @@
-"""Issue #43: the whole app as one system, on the shipped weights and a real vault.
-
-The checks live in src/self_test.py, so a team member runs the same ones on the installed app
-(`SigVerify --self-test KIT`, kit from tools/make_test_kit.py). Here they run from source on a
-kit built in a temporary folder. Real signings: in-house participant P01 (XPPen tablet and
-blue-pen paper of the same signing, the one participant cleared for this use; the kit holds
-copies, so the originals are never touched). Without that folder (CI) the kit's made-up signer
-is used. NFI cannot stand in: its scans are black ink, which the app's crop refuses (A6).
-"""
+"""End-to-end system self-test on shipped weights and a temporary vault (src/self_test.py)."""
 import os
 
 import pytest

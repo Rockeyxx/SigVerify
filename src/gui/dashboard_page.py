@@ -1,6 +1,4 @@
-"""
-dashboard_page.py — Bento-style Home + Stats screen (own row and company row)
-"""
+"""Dashboard home and statistics screen."""
 
 import math
 from PyQt5.QtCore import Qt, QRectF
@@ -12,7 +10,7 @@ from src.gui.styles import ACCENT, BORDER, TEXT_LIGHT
 
 
 class ProgressRing(QWidget):
-    """دائرة تقدّم رسومية (Bento-style hero tile) — ترسم نفسها بـ QPainter"""
+    """Circular genuine-rate ring painted with QPainter."""
     def __init__(self):
         super().__init__()
         self.percentage = 0
@@ -93,7 +91,6 @@ class RecentEventsTile(QFrame):
         self.setLayout(self.layout)
 
     def set_events(self, events: list):
-        # نفضي أي صفوف قديمة
         while self.rows_container.count():
             item = self.rows_container.takeAt(0)
             if item.widget():
@@ -143,7 +140,7 @@ class StatsRow(QWidget):
         bento.setContentsMargins(0, 0, 0, 0)
         bento.setSpacing(14)
 
-        # البلاطة الكبيرة: دائرة التقدّم (تمتد صفين)
+        # Hero tile: genuine rate progress ring spanning two rows.
         ring_tile = QFrame()
         ring_tile.setProperty("role", "stat-card")
         ring_layout = QVBoxLayout()

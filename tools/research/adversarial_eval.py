@@ -1,15 +1,4 @@
-"""Threat 2 test: a white-box PGD attack on the scan branch, alone and fused.
-
-The attacker holds the victim's five reference embeddings (a stolen database)
-and the public weights. They perturb the scan of their own skilled forgery so its
-embedding moves toward the nearest reference, each pixel changed by at most
-epsilon. Their pen recording of the same signing is left as it is: it is signed
-live on the tablet. BiosecurID-SONOF pairs scan and pen per signing, forgeries too.
-
-Digital attack only: the perturbation is applied to the model input after
-preprocessing, as if the attacker could hand the app a file and skip the scanner.
-Read the numbers as an upper bound. Nothing is trained or saved.
-"""
+"""White-box PGD attack on the scan branch (alone and fused) using BiosecurID-SONOF."""
 import argparse
 
 import numpy as np
@@ -29,10 +18,10 @@ STEPS = 20
 
 
 def pgd(model, x, references, eps, steps=STEPS):
-    """Move x [N,1,H,W] toward its nearest reference [K,D], each pixel within eps of x and in [0, 1]."""
+    """Run L_inf PGD on x [N, 1, H, W] toward its nearest reference embedding."""
     if eps == 0:
         return x
-    step = 2.5 * eps / steps  # Madry et al.; eps / 4 overshot and made eps 8 weaker than eps 4
+    step = 2.5 * eps / steps
     adv = x.clone()
     for _ in range(steps):
         adv.requires_grad_(True)
@@ -44,13 +33,8 @@ def pgd(model, x, references, eps, steps=STEPS):
 
 
 def attack_draw(spatial, pairs, embedded, draw, device, target="references"):
-    """Per epsilon, (attacked scan similarity, untouched pen similarity) of every forgery in one draw.
-
-    target "references": the attacker aims at the five enrolled references (stolen database).
-    target "public": the attacker aims at one other genuine signature of the victim, never
-    one of the five (a signed document); acceptance is still scored against the five.
-    """
-    rng = np.random.default_rng(42 + draw)  # same draw as draw_scores
+    """Return per-epsilon attacked scan similarities and untouched pen similarities for one draw."""
+    rng = np.random.default_rng(42 + draw)
     baseline = draw_scores(embedded, draw)
     scan, pen = {eps: [] for eps in EPSILONS}, []
     for writer, rows in baseline.items():
@@ -65,7 +49,7 @@ def attack_draw(spatial, pairs, embedded, draw, device, target="references"):
             with torch.no_grad():
                 distance = torch.cdist(spatial.encode(adv), references).min(dim=1).values
             scan[eps].append(similarity_from_distance(distance.cpu().numpy()))
-        # the harness must reproduce the shipped scorer before any attack is read
+        # Verify attack at eps=0 matches baseline scorer before reading higher epsilons.
         assert np.allclose(scan[0][-1], rows["forged"][0], atol=1e-4), writer
         pen.append(rows["forged"][1])
         print(f"  draw {draw + 1}: writer {len(pen)}/{len(baseline)}", flush=True)

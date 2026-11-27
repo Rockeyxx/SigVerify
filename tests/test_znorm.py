@@ -1,21 +1,4 @@
-"""
-Tests for writer-level score normalization (Z-norm).
-
-Scoring is `S = 1/(1+d)` against one global threshold for every writer in every
-corpus. That asks every signer to be equally self-consistent. They are not, and
-the per-dataset spread the branch shows (4.24% on sigcomp_Dutch against 16.32%
-on svc2004) is exactly what a single global threshold handles badly.
-
-The enrolled reference set already measures a writer's own scale for free: the
-distances of the K genuine references *to each other*. Z-norm divides by that,
-so a naturally variable signer stops being judged on the same absolute scale as
-a naturally precise one.
-
-This learns no decision boundary — only a scale. That distinction matters,
-because the per-user SVM tried earlier made EER 2-3x worse; it failed because
-random-forgery negatives cannot teach a skilled-forgery boundary. Z-norm never
-sees a negative, so that failure does not carry over.
-"""
+"""Tests for per-writer Z-norm score scaling using genuine reference spread."""
 import pytest
 
 # Closed experiment: skipped by default, run in CI (see pytest.ini).
@@ -90,7 +73,7 @@ class TestZnormTrialScores:
         assert norm_gap > base_gap
 
     def test_identical_references_do_not_produce_nan(self):
-        """Zero spread is a division by zero — a writer who signs identically twice."""
+        """Identical references (zero spread) must not divide by zero."""
         embedded = {"w1": _writer([[0.0, 0.0]] * 6, [[5.0, 0.0], [0.0, 5.0]])}
         scores, _ = znorm_trial_scores(embedded, num_references=5, seed=42)
         assert np.all(np.isfinite(scores))

@@ -491,7 +491,7 @@ def test_an_old_database_is_refused_with_the_folder_to_move(isolated_storage):
     assert str(folder) in str(e.value)
 
 
-# ------------------------------------------------- several sets (issue #33, item 3)
+# Multiple spatial sets per client
 def test_scan_then_render_are_stored_side_by_side(people):
     scan, render = spatial(5, 0), spatial(5, 100)
     assert storage.save_client_enrollment("C", [], "alice", spatial_embeddings=scan, spatial_origin="scan")[0]

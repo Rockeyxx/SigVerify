@@ -1,8 +1,4 @@
-"""SynSig2Vec training pipeline: synthesis, ranking loss, and verification.
-
-Integrates kinematic synthesis (tools/research/sigma_lognormal.py) with ranking
-representation learning (tools/research/sig2vec.py) for writer-independent verification.
-"""
+"""SynSig2Vec training pipeline with Sigma-Lognormal synthesis and AP ranking loss."""
 
 import argparse
 import os
@@ -30,18 +26,10 @@ def _decompose_one(sample):
 
 
 def build_parameter_cache(writer_samples, writer_ids, workers, cache_path):
-    """
-    Extract SigmaLambda parameters for every genuine signature, once.
-
-    Cached because extraction dominates runtime by orders of magnitude and is
-    deterministic — the same signature always yields the same strokes, so
-    recomputing it every epoch would burn hours for nothing.
-    """
+    """Extract and cache deterministic SigmaLambda parameters for genuine signatures."""
     if cache_path and os.path.exists(cache_path):
         print(f"Loading SigmaLambda cache: {cache_path}")
-        # `weights_only=False` is required and safe here: the cache holds pickled
-        # SignatureParameters dataclasses, not tensors, and this process wrote it
-        # itself under ~/.cache. It is not a distributed artifact.
+        # Local dataclass cache written by this process; weights_only=False is required.
         return torch.load(  # skylos: ignore[SKY-D265] self-written local dataclass cache
             cache_path, weights_only=False)
 
@@ -79,33 +67,14 @@ def _to_tensor(trajectories, device, feature_fn, channels):
 
 
 def _with_pressure(synthetic, source):
-    """
-    Give a synthetic trajectory its template's own pressure profile.
-
-    SigmaLambda models the velocity of the pen, not how hard it pressed, so
-    `reconstruct` returns `[N, 2]`. The 12-function input wants a pressure
-    channel, and leaving it at zero would train the network on samples whose
-    seventh channel is flat while every real signature it is later scored on has
-    a live one — a train/test mismatch dressed up as a feature.
-
-    `distort` preserves `params.length`, so the synthetic and its source are the
-    same length and the profile transfers without resampling.
-    """
+    """Attach the source template's pressure column (lengths match because distort preserves duration)."""
     if source.shape[1] < 3 or len(synthetic) != len(source):
         return synthetic
     return np.hstack([synthetic[:, :2], source[:, 2:3]])
 
 
 def save_weights(model, args, channels, path, epoch):
-    """
-    Single writer for both the periodic checkpoint and the final save.
-
-    Written to a temporary file and renamed, because `torch.save` is not atomic
-    and every checkpoint overwrites the same path: a crash partway through the
-    write would leave a truncated file *and* destroy the last good checkpoint,
-    which is exactly the failure this is here to survive. `os.replace` is atomic
-    on POSIX.
-    """
+    """Atomically write checkpoint via a temp file rename."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     tmp = path + ".tmp"
     torch.save({"state_dict": model.state_dict(), "features": args.features,
@@ -116,13 +85,7 @@ def save_weights(model, args, channels, path, epoch):
 
 
 def train(model, cache, writer_samples, feature_fn, channels, args, device):
-    """
-    Algorithm 1 of the paper: draw a genuine, synthesise G1 and G2, rank them.
-
-    The classification head supplies the cross-entropy term that protects
-    against *random* forgeries, while the AP term on the ranking head is what
-    protects against skilled ones. Neither ever sees a real forgery.
-    """
+    """Train Sig2Vec with combined AP ranking loss and writer classification cross-entropy."""
     writers = sorted(cache)
     index = {w: i for i, w in enumerate(writers)}
     classifier = nn.Linear(model.embedding_dim, len(writers)).to(device)
@@ -147,9 +110,7 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
             if not params.strokes:
                 continue
 
-            # The cache was built by walking each writer's genuine list in order,
-            # so index `choice` addresses the very signature these strokes came
-            # from — that is where the pressure profile comes from.
+            # Cache indexes writers' genuine lists in order, so choice matches the source signature.
             genuine = writer_samples[writer].get("genuine", [])
             source = genuine[choice] if choice < len(genuine) else None
 
@@ -162,10 +123,7 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
             if args.oracle_supervised:
                 forged = writer_samples[writer].get("forged", [])
                 if len(forged) < 2:
-                    # Each writer gets exactly one step per epoch, and the
-                    # forged count never changes, so this drops the writer from
-                    # the run entirely. Report it — the whole point of the
-                    # oracle is a like-for-like ceiling on a known population.
+                    # Skip writers with fewer than 2 forgeries and report them at the end.
                     starved.add(writer)
                     continue
                 picks = rng.choice(len(forged),
@@ -182,8 +140,7 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
 
             similarity = template_similarity(embeddings[0], embeddings[1:])
             loss = average_precision_loss(similarity[:len(g1)], similarity[len(g1):])
-            # Every sample in this batch belongs to the same writer, synthetic or
-            # not — that is exactly the invariance the classifier should learn.
+            # All samples in this batch belong to the same writer.
             target = torch.full((len(embeddings),), index[writer],
                                 dtype=torch.long, device=device)
             loss = loss + args.ce_weight * cross_entropy(classifier(embeddings), target)
@@ -196,9 +153,7 @@ def train(model, cache, writer_samples, feature_fn, channels, args, device):
         if losses:
             print(f"epoch {epoch:3d}/{args.epochs}  loss {np.mean(losses):.4f}",
                   flush=True)
-        # A 1000-epoch run is ~2.7 h. One that dies at epoch 90 with the weights
-        # only written after the final eval leaves nothing behind — that has
-        # already happened once.
+        # Periodic checkpoint to preserve progress across long runs.
         if args.save and args.checkpoint_every \
                 and epoch % args.checkpoint_every == 0:
             save_weights(model, args, channels, args.save + ".ckpt", epoch)
@@ -225,8 +180,7 @@ def embed_writers_sig2vec(model, writer_samples, writer_ids, device,
                 continue
             batch, lengths = _to_tensor(samples, device, feature_fn, channels)
             vectors = model(batch, lengths)
-            # The verifier normalises before comparing (equation 23), so the
-            # distance thresholded here is the one the loss ranked.
+            # L2-normalize to match the cosine distance in template_similarity.
             out[label] = torch.nn.functional.normalize(vectors, dim=1).cpu().numpy()
         embedded[writer] = out
     return embedded
@@ -234,13 +188,7 @@ def embed_writers_sig2vec(model, writer_samples, writer_ids, device,
 
 def evaluate(model, writer_samples, writer_ids, args, device, feature_fn,
              channels, quiet=False):
-    """
-    Score under the project's enrolment protocol, not the paper's.
-
-    `enrolled_trial_scores` is reused rather than reimplemented so this number
-    sits on the same axis as every other temporal EER in the repository — K
-    references, nearest-reference distance, averaged over independent draws.
-    """
+    """Score under the repo's pooled enrollment protocol over `args.enroll_trials` draws."""
     model.eval()
     embedded = embed_writers_sig2vec(model, writer_samples, writer_ids, device,
                                      feature_fn, channels)
@@ -267,21 +215,7 @@ def evaluate(model, writer_samples, writer_ids, args, device, feature_fn,
 
 def per_writer_eer(model, writer_samples, writer_ids, args, device, feature_fn,
                    channels):
-    """
-    User-threshold EER: the EER *inside* each writer, then averaged.
-
-    This is the number the SVC2004 literature reports, and it is not the same
-    measurement as the pooled EER used everywhere else in this repository. Pooled
-    scoring puts every writer on one global threshold, so a writer whose
-    embeddings sit far from the origin drags the whole operating point; per-writer
-    scoring gives each signer their own threshold, which is what a deployed system
-    with per-user enrolment actually has. The competition's own 2.89% was measured
-    this way, so comparing our pooled figure against it compares two protocols and
-    concludes the model is bad.
-
-    Reported alongside pooled, never instead of it — pooled is the honest number
-    for a system that must ship one threshold.
-    """
+    """Compute within-writer EER (per-user threshold, SVC2004 literature metric)."""
     embedded = embed_writers_sig2vec(model, writer_samples, writer_ids, device,
                                      feature_fn, channels)
     per = []
@@ -378,8 +312,7 @@ def main(argv=None):
             for name, writers in sorted(groups.items()):
                 sub = evaluate(model, writer_samples, writers, args, device,
                                feature_fn, channels, quiet=True)
-                # Both protocols side by side: pooled is what this repo ships on,
-                # per-writer is what the SVC2004 literature quotes.
+                # Report both pooled and per-writer EER side by side.
                 per = per_writer_eer(model, writer_samples, writers, args, device,
                                      feature_fn, channels)
                 if sub:

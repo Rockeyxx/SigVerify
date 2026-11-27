@@ -1,13 +1,4 @@
-"""Sigma-Lognormal signature model for synthetic trajectory generation.
-
-SynSig2Vec (Lai, Jin et al., AAAI 2020) trains a dynamic-signature verifier
-using genuine signatures only. It synthesises each template at two ordered
-distortion levels (G1 and G2) and learns to rank the lower-distortion group
-closer to the genuine template.
-
-The kinematic model represents handwriting as a sum of overlapping lognormal
-velocity profiles, producing motor-plausible stroke variations.
-"""
+"""Sigma-Lognormal signature model for synthetic trajectory generation (Lai et al., AAAI 2020)."""
 
 from dataclasses import dataclass, replace
 
@@ -15,10 +6,7 @@ import numpy as np
 from scipy.optimize import brentq, least_squares
 from scipy.signal import butter, filtfilt
 
-# Admissible parameter ranges, Table 1 of the paper: the bounds inside which a
-# perturbed signature still reads as the same person's handwriting. The paper
-# attributes them to a visual Turing test (Bhattacharya et al. 2017), except
-# D's, which its authors set by their own visual inspection.
+# Admissible parameter perturbation ranges (Table 1).
 _ADMISSIBLE = {
     "D":     (-0.1000, 0.1000),
     "t0":    (-0.0825, 0.0850),
@@ -26,9 +14,7 @@ _ADMISSIBLE = {
     "sigma": (-0.3250, 0.2875),
 }
 
-# Distortion levels. G1 draws from the inner part of each range to stay close
-# to the template; G2 draws from an outer annulus that excludes the middle to ensure
-# a reliable margin between the two groups for the ranking objective.
+# Distortion bands for ranking: inner (G1) vs outer annulus (G2).
 _LEVELS = {
     1: {"scale": {"D": 0.25, "t0": 0.25, "mu": 0.17, "sigma": 0.25},
         "annulus": None, "theta": 0.10},
@@ -36,9 +22,7 @@ _LEVELS = {
         "annulus": (0.40, 0.65), "theta": 0.20},
 }
 
-# `_SAMPLE_RATE_HZ` restates config.settings.TEMPORAL_SAMPLE_RATE_HZ rather
-# than importing it: this module is clean-room and carries no project
-# imports. If the corpus-wide rate changes, change it here too.
+# Matches config.settings.TEMPORAL_SAMPLE_RATE_HZ without importing project config.
 _CUTOFF_HZ, _FILTER_ORDER, _SAMPLE_RATE_HZ = 10.0, 2, 100.0
 _EPS = 1e-9
 
@@ -64,13 +48,7 @@ class SignatureParameters:
 
 
 def stroke_velocity(t, stroke):
-    """
-    Equation 1 — the speed profile of one stroke, zero before its onset.
-
-    The lognormal is undefined at and before `t0`; those samples are set to zero
-    rather than cleaned up afterwards, because the true value there is not
-    merely large.
-    """
+    """Compute one lognormal stroke speed profile (equation 1), zero for `t <= t0`."""
     t = np.asarray(t, dtype=np.float64)
     dt = t - stroke.t0
     out = np.zeros_like(dt)
@@ -94,28 +72,7 @@ def _smooth(v):
 
 
 def _extract_analytic(t, v, peak):
-    """
-    Recover `(D, t0, mu, sigma)` for one stroke from its characteristic points.
-
-    This is the heart of robust SigmaLambda extraction and the reason a blind
-    least-squares fit is the wrong tool. A lognormal's peak and its two
-    inflection points pin the parameters exactly:
-
-        peak:        ln(t_p - t0) = mu - sigma^2
-        inflections: ln(t_i - t0) = mu - (3 sigma^2 +/- sigma * sqrt(sigma^2 + 4)) / 2
-
-    Writing A = ln(t2 - t0) - ln(t_p - t0) and B = ln(t_p - t0) - ln(t1 - t0)
-    eliminates mu and gives
-
-        B - A = sigma^2                    ->  sigma = sqrt(B - A)
-        A + B = sigma * sqrt(sigma^2 + 4)  ->  a consistency condition on t0
-
-    So the only unknown left is `t0`, found by a one-dimensional root search
-    instead of a 6N-dimensional optimisation. `mu` and `D` then follow in closed
-    form. Returns None when the residual around this peak is not lognormal
-    enough to admit a solution — the caller drops the stroke rather than
-    inventing one.
-    """
+    """Analytically solve `(D, t0, mu, sigma)` for one velocity peak using its two inflection points."""
     n = len(v)
     if peak <= 1 or peak >= n - 2 or v[peak] <= _EPS:
         return None
@@ -178,15 +135,7 @@ def _extract_analytic(t, v, peak):
 
 
 def _seed_from_peak(t, v, peak):
-    """
-    Width-based fallback when the analytic solution has no root.
-
-    Estimates the stroke from the peak's own half-height width: a lognormal's
-    mode sits at `ln(t_p - t0) = mu - sigma^2`, so fixing a plausible `sigma`
-    and reading the onset lag off the measured width determines `mu`, and the
-    peak height then gives `D`. Deliberately crude — its job is to put the
-    joint refinement in the right basin, not to be correct on its own.
-    """
+    """Estimate initial stroke parameters from half-height peak width when analytic extraction fails."""
     n = len(v)
     if peak <= 0 or peak >= n - 1 or v[peak] <= _EPS:
         return None
@@ -213,16 +162,7 @@ def _seed_from_peak(t, v, peak):
 
 
 def decompose(trajectory):
-    """
-    Fit a stroke set to a `[L, >=2]` trajectory.
-
-    Peaks in the smoothed speed profile seed one stroke each — the Kinematic
-    Theory's claim is precisely that each velocity peak is one lognormal impulse
-    — then all stroke parameters are refined jointly by bounded least squares
-    against the observed speed. Direction angles are read off the trajectory at
-    each stroke's start and end rather than fitted, keeping the optimisation to
-    four parameters per stroke instead of six.
-    """
+    """Fit a sum of lognormal strokes to a `[L, >=2]` trajectory via greedy extraction and least squares."""
     xy = np.asarray(trajectory, dtype=np.float64)[:, :2]
     n = len(xy)
     if n < 8:
@@ -239,12 +179,7 @@ def decompose(trajectory):
         return SignatureParameters(strokes=(), duration=duration, length=n,
                                    origin=tuple(xy[0]))
 
-    # Greedy extraction on the residual: take the tallest remaining peak, solve
-    # it analytically, subtract its contribution, repeat. Each stroke is
-    # therefore fitted against what the previous ones did not explain, which is
-    # what makes overlapping lognormals separable. Blind simultaneous fitting
-    # has no such structure and lands in a local minimum — measured RMSE 0.41 on
-    # real signatures against a 0.25 gate.
+    # Greedily extract peaks on the residual speed profile so overlapping strokes separate cleanly.
     heading = np.unwrap(np.arctan2(vy, vx))
     vx_s, vy_s = _smooth(vx), _smooth(vy)
     residual = speed.copy()
@@ -258,12 +193,7 @@ def decompose(trajectory):
         p = int(np.argmax(residual))
         found = _extract_analytic(t, residual, p)
         if found is None:
-            # A real velocity peak is not always exactly lognormal — where
-            # strokes overlap heavily the profile can even be left-skewed, and a
-            # lognormal never is, so no valid t0 exists. Measured on SVC2004:
-            # requiring exact solvability rejected *every* peak and extracted
-            # zero strokes. Fall back to a width-based seed and let the joint
-            # refinement below correct it, rather than discarding the stroke.
+            # Overlapping peaks can skew left and fail exact lognormal solvability; fall back to width seed.
             found = _seed_from_peak(t, residual, p)
             if found is None:
                 lo, hi = max(p - 2, 0), min(p + 3, n)
@@ -325,13 +255,7 @@ def decompose(trajectory):
 
 
 def reconstruct(params):
-    """
-    Equations 3-5 — integrate the summed stroke velocities back to a trajectory.
-
-    Returns `[length, 2]`. A parameter set with no strokes rebuilds as a
-    stationary pen at the origin, which is the honest answer for an input that
-    never moved.
-    """
+    """Integrate summed stroke velocities (equations 3 to 5) into `[length, 2]` coordinates."""
     n = params.length
     out = np.zeros((n, 2), dtype=np.float32)
     out[:] = np.asarray(params.origin, dtype=np.float32)
@@ -356,14 +280,7 @@ def reconstruct(params):
 
 
 def _draw(rng, low, high, scale, annulus):
-    """
-    One distortion variable: a signed draw from an annulus of the admissible
-    range, or from a plain scaled band when no annulus is given.
-
-    `scale` applies in both branches. It used to be dropped whenever an annulus
-    was set, which silently made level 2's per-parameter scales inert — every
-    parameter got the same band regardless of what the table said.
-    """
+    """Sample a scaled perturbation uniformly or from a signed inner/outer annulus."""
     if annulus is None:
         return rng.uniform(scale * low, scale * high)
     inner, outer = annulus
@@ -373,14 +290,7 @@ def _draw(rng, low, high, scale, annulus):
 
 
 def distort(params, level, rng):
-    """
-    Equations 6-11 — perturb every stroke by one draw shared across the signature.
-
-    The random variables are drawn **once per signature, not per stroke**, as the
-    paper specifies: a coherent distortion reads as the same hand writing
-    slightly differently, whereas independent per-stroke noise reads as a tremor
-    and destroys the shape.
-    """
+    """Perturb all strokes coherently with one signature-level random draw (equations 6 to 11)."""
     if level not in _LEVELS:
         raise ValueError(f"unknown distortion level {level!r}; expected 1 or 2")
     spec = _LEVELS[level]
@@ -403,15 +313,7 @@ def distort(params, level, rng):
 
 
 def synthesize(trajectory, n_low=5, n_median=10, seed=0):
-    """
-    Template in, two ranked synthetic pools out.
-
-    `G1` (low distortion) must rank above `G2` (median distortion) by similarity
-    to the template — that ordering is the supervision signal the AP loss
-    consumes, and it is what `tests/test_sigma_lognormal.py` gates on.
-
-    Returns: (G1, G2), lists of `[L, 2]` float32 trajectories.
-    """
+    """Return ranked synthetic pools `(G1, G2)` of `[L, 2]` float32 trajectories from one template."""
     rng = np.random.default_rng(seed)
     params = decompose(trajectory)
     return ([reconstruct(distort(params, 1, rng)) for _ in range(n_low)],

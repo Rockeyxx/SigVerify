@@ -1,21 +1,4 @@
-"""Dataset processing for the signature verification system.
-
-This module handles data loading, spatial preprocessing, data augmentation,
-quality checks, and writer-independent dataset splits for offline images
-and online dynamic signatures.
-
-Directory structure in `./data`:
---------------------------------
-data/
-├── cedar/                  # Offline CEDAR dataset (55 writers)
-├── bhsig260/               # Offline BHSig260 dataset (260 writers)
-├── utsig/                  # Offline UTSig dataset (115 writers)
-└── svc2004/                # Online SVC2004 dataset (40 writers)
-
-Supported Datasets:
-  Spatial:  CEDAR, BHSig260, UTSig
-  Temporal: SVC2004, SigComp2011, MOBISIG, DeepSignDB
-"""
+"""Dataset loading, preprocessing, quality gates, splits, pair sampling, and augmentation."""
 
 import itertools
 import json
@@ -53,7 +36,6 @@ from config.settings import (
 from src.data.renderer import render_trajectory_to_image
 from src.data.parsers import MAX_GAP_MS
 
-# Channel names used in gate error messages, based on configured temporal features.
 _CHANNEL_NAMES = {
     3: "X, Y, P",
     4: "X, Y, P, dt",
@@ -62,21 +44,8 @@ _CHANNEL_NAMES = {
 
 
 def preprocess_image(image, target_size=SPATIAL_INPUT_SIZE):
-    """Preprocess a signature image for the Spatial Siamese CNN.
-
-    Steps:
-      1. Load image in 8-bit grayscale format.
-      2. Apply square padding or direct scaling based on settings.
-      3. Resize to target dimensions using INTER_AREA interpolation.
-      4. Invert pixel values (background 0.0, stroke ink positive [0.0, 1.0]).
-      5. Add channel dimension [1, H, W] for PyTorch.
-
-    Returns:
-        float32 numpy array with shape (1, H, W).
-    """
+    """Load an 8-bit grayscale scan, resize to target_size, and invert to [1, H, W] float32 in [0, 1]."""
     if isinstance(image, np.ndarray):
-        # Handle array input (paper bright, ink dark).
-        # It is resized and inverted below to match file loading.
         img = image[0] if image.ndim == 3 else image
         if img.dtype != np.uint8:
             img = np.clip(img, 0, 255).astype(np.uint8)
@@ -86,7 +55,6 @@ def preprocess_image(image, target_size=SPATIAL_INPUT_SIZE):
         raise FileNotFoundError(f"Cannot load image: {image}")
 
     if SPATIAL_SQUARE_PAD:
-        # Pad image onto a square canvas to keep original aspect ratio.
         h, w = img.shape
         max_dim = max(h, w)
         framed = np.full((max_dim, max_dim), 255, dtype=np.uint8)
@@ -94,36 +62,23 @@ def preprocess_image(image, target_size=SPATIAL_INPUT_SIZE):
         x_off = (max_dim - w) // 2
         framed[y_off:y_off + h, x_off:x_off + w] = img
     else:
-        # Scale directly to target input dimensions (155x220).
         framed = img
 
-    # Resize to spatial dimensions and invert polarity (background 0, ink high).
-    # Inversion ensures convolutions focus on signature strokes instead of blank paper.
+    # Invert polarity (background 0, ink high) so convolutions focus on ink rather than paper.
     resized = cv2.resize(framed, target_size, interpolation=cv2.INTER_AREA)
     normalized = (255.0 - resized.astype(np.float32)) / 255.0
     return normalized[np.newaxis, :, :]
 
 
-# Column boundaries for trajectories based on configuration.
 _TRAJECTORY_MIN_COLUMNS = min(TEMPORAL_CHANNEL_WIDTHS.values())
 _TRAJECTORY_MAX_COLUMNS = max(TEMPORAL_CHANNEL_WIDTHS.values())
 
 
 def as_spatial_input(sample, allow_trajectory=False):
-    """Convert a sample into the standard [1, H, W] spatial tensor format.
-
-    Handles four kinds of inputs:
-    * A file path: loaded and inverted by preprocess_image.
-    * A 2-D scan array: resized and inverted by preprocess_image.
-    * A canonical [1, H, W] float array in [0, 1]: verified and passed through.
-    * A trajectory [L, C]: rendered into an image if allow_trajectory is True.
-
-    Raises ValueError if the input format is invalid.
-    """
+    """Normalize a path, scan array, canonical [1, H, W] float array, or [L, C] trajectory into [1, H, W]."""
     if not isinstance(sample, np.ndarray):
         return preprocess_image(sample)
 
-    # Check for NaN or infinite values early.
     if np.issubdtype(sample.dtype, np.floating) and not np.all(np.isfinite(sample)):
         raise ValueError(
             f"Spatial array of shape {sample.shape} contains NaN or infinity. A "
@@ -144,7 +99,6 @@ def as_spatial_input(sample, allow_trajectory=False):
         return np.ascontiguousarray(sample, dtype=np.float32)
 
     if sample.ndim == 3 and sample.shape[0] == 1:
-        # A raw scan with an explicit channel dimension: preprocess normally.
         return preprocess_image(sample)
 
     if sample.ndim == 2:
@@ -161,7 +115,6 @@ def as_spatial_input(sample, allow_trajectory=False):
                        "trajectories are not accepted here — render it with "
                        "render_trajectory_to_image() first."))
             if rows < MIN_TRAJECTORY_POINTS:
-                # Trajectory has too few points to render reliably.
                 raise ValueError(
                     f"Trajectory has {rows} points, need {MIN_TRAJECTORY_POINTS} "
                     f"to render a signature.")
@@ -185,21 +138,12 @@ def as_spatial_input(sample, allow_trajectory=False):
 
 
 def quality_gate(image):
-    """Assess signature image quality using bounding-box size and sharpness metrics.
-
-    Calculates:
-      - Stroke bounding-box dimensions (must be >= MIN_BBOX_PIXELS).
-      - Laplacian variance sharpness score (must be >= MIN_LAPLACIAN_VARIANCE).
-
-    Returns:
-        (passed: bool, details: dict)
-    """
+    """Check ink bounding box (>= MIN_BBOX_PIXELS) and Laplacian sharpness (>= MIN_LAPLACIAN_VARIANCE)."""
     if isinstance(image, np.ndarray):
         arr = image[0] if image.ndim == 3 else image
         if arr.dtype != np.uint8:
             if arr.max() <= 1.0:
-                # Inverted float array (background 0, ink 1):
-                # Convert back to standard scan polarity for Otsu thresholding.
+                # Convert inverted float [0, 1] back to dark-ink uint8 for Otsu thresholding.
                 img = np.clip(255.0 - arr * 255.0, 0, 255).astype(np.uint8)
             else:
                 img = np.clip(arr, 0, 255).astype(np.uint8)
@@ -210,14 +154,12 @@ def quality_gate(image):
     if img is None:
         return False, {"error": "Cannot load image"}
 
-    # Binarize scan using Otsu thresholding to find stroke regions.
     _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return False, {"error": "No signature content detected"}
 
-    # Calculate bounding-box dimensions across detected contours.
     x_min = min(cv2.boundingRect(c)[0] for c in contours)
     y_min = min(cv2.boundingRect(c)[1] for c in contours)
     x_max = max(cv2.boundingRect(c)[0] + cv2.boundingRect(c)[2] for c in contours)
@@ -225,7 +167,6 @@ def quality_gate(image):
     bbox_w = x_max - x_min
     bbox_h = y_max - y_min
 
-    # Calculate image sharpness using Laplacian variance.
     laplacian = cv2.Laplacian(img, cv2.CV_64F)
     sharpness = laplacian.var()
 
@@ -238,19 +179,7 @@ def quality_gate(image):
 
 
 def trajectory_gate(trajectory):
-    """Verify that a trajectory matches the expected shape and normalization.
-
-    Checks:
-      - Trajectory shape matches [L, TEMPORAL_INPUT_FEATURES].
-      - Point count meets MIN_TRAJECTORY_POINTS.
-      - Values are finite without NaN or infinity.
-      - X and Y coordinates are normalized (mean near 0, standard deviation in range).
-      - Pressure values are within [0.0, 1.0].
-      - dt values (if present) are within [0.0, 1.0].
-
-    Returns:
-        (passed: bool, details: dict)
-    """
+    """Validate trajectory shape [L, TEMPORAL_INPUT_FEATURES], finiteness, normalization, and dt grid."""
     trajectory = np.asarray(trajectory, dtype=np.float32)
 
     if trajectory.ndim != 2 or trajectory.shape[1] != TEMPORAL_INPUT_FEATURES:
@@ -452,23 +381,7 @@ def pin_holdout(writer_ids, pinned, train_ratio=SPATIAL_SPLIT_RATIOS[0],
 def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUINE_PER_WRITER,
                            num_forged_per_writer=PAIRS_IMPOSTOR_PER_WRITER, seed=42,
                            random_impostor_ratio=0.0, pair_caps=None):
-    """Generate training or evaluation pairs under the skilled forgery setting.
-
-    Positive pairs consist of two genuine signatures from the same writer.
-    Negative pairs by default consist of a genuine signature and a skilled forgery
-    targeting that same writer.
-
-    Args:
-        samples_by_writer: dict mapping writer ID to {"genuine": [...], "forged": [...]}.
-        num_genuine_per_writer: target count of positive pairs per writer.
-        num_forged_per_writer: target count of negative pairs per writer.
-        seed: random seed for reproducibility.
-        random_impostor_ratio: fraction of negative pairs drawn from other writers.
-        pair_caps: optional {writer: max pairs per side} binding those writers only.
-
-    Returns:
-        (pairs: list of (sample1, sample2), labels: list of int).
-    """
+    """Build balanced positive (genuine-genuine) and negative (forged/impostor) pairs per writer."""
     if not 0.0 <= random_impostor_ratio <= 1.0:
         raise ValueError(
             f"random_impostor_ratio must be in [0, 1], got {random_impostor_ratio}")
@@ -480,11 +393,9 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         genuine = samples_by_writer[writer].get("genuine", [])
         forged = samples_by_writer[writer].get("forged", [])
 
-        # Each writer needs at least two genuine signatures and one forgery.
         if len(genuine) < 2 or not forged:
             continue
 
-        # Balance pairs so positive and negative sample counts match.
         num_pairs = min(
             num_genuine_per_writer,
             num_forged_per_writer,
@@ -494,25 +405,21 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
         if pair_caps and writer in pair_caps:
             num_pairs = min(num_pairs, pair_caps[writer])
 
-        # Draw genuine pairs without replacement from all unique combinations.
         genuine_space = list(itertools.combinations(range(len(genuine)), 2))
         rng.shuffle(genuine_space)
         for i, j in genuine_space[:num_pairs]:
             pairs.append((genuine[i], genuine[j]))
             labels.append(1)
 
-        # Split negative pairs into skilled forgeries and random impostors.
         num_random = int(num_pairs * random_impostor_ratio)
         num_skilled = num_pairs - num_random
 
-        # Skilled forgery pairs (authentic signature vs skilled imitation).
         impostor_space = list(itertools.product(genuine, forged))
         rng.shuffle(impostor_space)
         for s1, s2 in impostor_space[:num_skilled]:
             pairs.append((s1, s2))
             labels.append(0)
 
-        # Random impostor pairs (authentic signature vs different writer's genuine signature).
         others = [w for w in samples_by_writer if w != writer
                   and samples_by_writer[w].get("genuine")]
         if not others:
@@ -527,14 +434,7 @@ def generate_skilled_pairs(samples_by_writer, num_genuine_per_writer=PAIRS_GENUI
 
 
 def collate_temporal_pairs(batch):
-    """Collate variable-length trajectory pairs into a padded batch for the LSTM.
-
-    Args:
-        batch: list of (seq1 [L1, C], seq2 [L2, C], label) tuples.
-
-    Returns:
-        (padded1, lengths1, padded2, lengths2, labels).
-    """
+    """Pad variable-length trajectory pairs into `(padded1, len1, padded2, len2, labels)`."""
     seqs1, seqs2, labels = zip(*batch)
 
     lengths1 = torch.tensor([len(s) for s in seqs1], dtype=torch.long)
@@ -553,15 +453,7 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
                   blur_sigma_max=SPATIAL_AUG_BLUR_SIGMA,
                   ink_gain_min=SPATIAL_AUG_INK_GAIN_MIN,
                   noise_std_max=SPATIAL_AUG_NOISE_STD):
-    """Apply affine warps and stroke variations to perturb an image during training.
-
-    Args:
-        image: [1, H, W] float32 image with inverted polarity (ink high, background 0).
-        rng: numpy random generator.
-
-    Returns:
-        A perturbed [1, H, W] float32 image array.
-    """
+    """Apply affine warps and optional stroke/scanner perturbations to a [1, H, W] image."""
     channels, height, width = image.shape
     canvas = image[0]
 
@@ -574,20 +466,17 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
     matrix[0, 2] += rng.uniform(-max_translate, max_translate) * width
     matrix[1, 2] += rng.uniform(-max_translate, max_translate) * height
 
-    # borderValue=0 keeps background black to match inverted polarity.
+    # borderValue=0 keeps black background for inverted polarity.
     warped = cv2.warpAffine(canvas, matrix, (width, height),
                             flags=cv2.INTER_LINEAR,
                             borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
 
-    # Occasionally vary stroke thickness using dilation or erosion.
     if rng.random() < stroke_prob:
         kernel = np.ones((2, 2), dtype=np.uint8)
         warped = (cv2.dilate(warped, kernel) if rng.random() < 0.5
                   else cv2.erode(warped, kernel))
 
-    # Scanner effects: optics blur, ink darkness, sensor noise. Each draws from the RNG
-    # only when switched on, so the shipped recipe (all off) consumes the same random
-    # stream as before these existed and every released seed reproduces.
+    # Only draw from RNG when an effect is enabled so default runs keep the exact random stream.
     if blur_sigma_max > 0:
         sigma = rng.uniform(0.0, blur_sigma_max)
         if sigma > 0:
@@ -602,10 +491,7 @@ def augment_image(image, rng, max_rotation_deg=SPATIAL_AUG_MAX_ROTATION_DEG,
 
 
 class SpatialSignatureDataset(Dataset):
-    """PyTorch Dataset loading spatial signature image pairs for Siamese training.
-
-    Pairs can contain image paths, raw arrays, or rendered trajectory arrays.
-    """
+    """PyTorch Dataset yielding spatial image pairs for Siamese training."""
 
     def __init__(self, pairs, labels, transform=None, augment=False, seed=None,
                  augment_params=None):
@@ -622,12 +508,11 @@ class SpatialSignatureDataset(Dataset):
 
     def __getitem__(self, index):
         sample1, sample2 = self.pairs[index]
-        # Resolve each sample to a canonical spatial tensor.
         img1 = as_spatial_input(sample1, allow_trajectory=True)
         img2 = as_spatial_input(sample2, allow_trajectory=True)
 
         if self.augment:
-            # Warp each side of the pair independently.
+            # Warp each side independently so genuine pairs do not stay identical.
             img1 = augment_image(img1, self._rng, **self.augment_params)
             img2 = augment_image(img2, self._rng, **self.augment_params)
 
@@ -645,13 +530,7 @@ class SpatialSignatureDataset(Dataset):
 def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION_DEG,
                        jitter=TEMPORAL_AUG_JITTER,
                        max_speed_change=TEMPORAL_AUG_MAX_SPEED_CHANGE):
-    """Apply speed, rotation, and jitter perturbations to a trajectory sequence.
-
-    Perturbations mimic natural variations in signing:
-    - Speed variations resample the trajectory slightly faster or slower.
-    - Small rotations vary the angle of the pen strokes.
-    - Coordinate jitter adds minor sensor noise and natural tremor.
-    """
+    """Apply small rotation, coordinate jitter, and speed resampling to a trajectory."""
     sequence = np.asarray(sequence, dtype=np.float32)
     if len(sequence) < 8:
         return sequence
@@ -664,7 +543,6 @@ def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION
 
     xy += rng.normal(0.0, jitter, size=xy.shape).astype(np.float32)
 
-    # Resample trajectory along a modified timeline to vary signing speed.
     scale = 1.0 + rng.uniform(-max_speed_change, max_speed_change)
     new_length = max(8, int(round(len(sequence) * scale)))
     source = np.arange(len(sequence), dtype=np.float32)
@@ -673,7 +551,6 @@ def augment_trajectory(sequence, rng, max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION
     columns = [np.interp(target, source, xy[:, 0]),
                np.interp(target, source, xy[:, 1])]
 
-    # Interpolate pressure and additional channels along the new timeline.
     for channel in range(2, sequence.shape[1]):
         columns.append(np.clip(np.interp(target, source, sequence[:, channel]), 0.0, 1.0))
 
@@ -685,16 +562,7 @@ def augment_device(sequence, rng, rate_range_hz=TEMPORAL_DEVICE_AUG_RATE_HZ,
                    gain_range=TEMPORAL_DEVICE_AUG_PRESSURE_GAIN,
                    pressure_levels=TEMPORAL_DEVICE_AUG_PRESSURE_LEVELS,
                    dt_channel=3 if TEMPORAL_CHANNELS == "dt" else None):
-    """Re-record a trajectory as another tablet inside the capture spec would deliver it.
-
-    The spec (README hardware table) admits any tablet reporting at 200 Hz or more with
-    1024 pressure levels or more; ingest keeps every n-th sample to reach the model rate
-    and scales pressure to [0, 1]. Two device differences survive that. Integer
-    decimation lands a 270 Hz tablet on 90 Hz rather than 100, which stretches every
-    delta and every dt. And each tablet maps force to level through its own curve. This
-    draws one such tablet and returns the sequence as it would arrive. Shape and
-    orientation are untouched: those belong to the writer, not the device.
-    """
+    """Simulate capture under another tablet's decimation rate and pressure curve."""
     sequence = np.asarray(sequence, dtype=np.float32)
     if len(sequence) < 8:
         return sequence
@@ -714,13 +582,12 @@ def augment_device(sequence, rng, rate_range_hz=TEMPORAL_DEVICE_AUG_RATE_HZ,
     curved = gain * np.clip(out[:, 2], 0.0, 1.0) ** gamma
     out[:, 2] = np.round(np.clip(curved, 0.0, 1.0) * steps) / steps
     if dt_channel is not None and out.shape[1] > dt_channel:
-        # A slower effective clock lengthens every regular gap by 1 / factor.
         out[:, dt_channel] = np.clip(out[:, dt_channel] / factor, 0.0, 1.0)
     return out
 
 
 class TemporalSignatureDataset(Dataset):
-    """PyTorch Dataset loading temporal signature trajectory pairs for Siamese training."""
+    """PyTorch Dataset yielding trajectory pairs for Siamese training."""
 
     def __init__(self, pairs, labels, augment=False, augment_scale=1.0, seed=42,
                  device_augment=False, tilt_hide_prob=0.0):
@@ -729,13 +596,12 @@ class TemporalSignatureDataset(Dataset):
         self.augment = augment
         self.augment_scale = augment_scale
         self.device_augment = device_augment
-        # dt_tilt_flag research arm only; 0 draws nothing, so other recipes cannot move.
         self.tilt_hide_prob = tilt_hide_prob
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
     def _maybe_hide_tilt(self, sequence):
-        """Hide real tilt (cols 4-5) and clear `present` (col 6) with tilt_hide_prob."""
+        """Clear tilt columns and presence flag with tilt_hide_prob."""
         if not self.tilt_hide_prob:
             return sequence
         sequence = np.asarray(sequence)
@@ -749,7 +615,6 @@ class TemporalSignatureDataset(Dataset):
         return hidden
 
     def _augment(self, sequence):
-        """Perturb a trajectory with scaled augmentation parameters."""
         return augment_trajectory(sequence, self._rng,
                                   max_rotation_deg=TEMPORAL_AUG_MAX_ROTATION_DEG * self.augment_scale,
                                   jitter=TEMPORAL_AUG_JITTER * self.augment_scale,
@@ -761,11 +626,9 @@ class TemporalSignatureDataset(Dataset):
     def __getitem__(self, index):
         seq1, seq2 = self.pairs[index]
         if self.augment:
-            # Perturb each sequence independently.
             seq1 = self._augment(seq1)
             seq2 = self._augment(seq2)
         if self.device_augment:
-            # Each side as if captured on its own tablet inside the spec.
             seq1 = augment_device(seq1, self._rng)
             seq2 = augment_device(seq2, self._rng)
         seq1 = self._maybe_hide_tilt(seq1)

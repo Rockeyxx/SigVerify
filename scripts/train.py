@@ -52,10 +52,7 @@ from src.models.siamese import (
 
 
 class EarlyStopping:
-    """
-    Early stopping monitor tracking validation loss to halt training when convergence plateaus.
-    Saves state parameters corresponding to lowest validation error.
-    """
+    """Stop training once validation loss fails to improve for `patience` epochs."""
 
     def __init__(self, patience=EARLY_STOPPING_PATIENCE, min_delta=EARLY_STOPPING_MIN_DELTA):
         self.patience = patience
@@ -65,11 +62,9 @@ class EarlyStopping:
         self.early_stop = False
 
     def state_dict(self):
-        """The two fields a resume needs; patience and min_delta come from the flags."""
         return {"counter": self.counter, "best_loss": self.best_loss}
 
     def load_state(self, state):
-        """Restore a saved counter, or start fresh for a checkpoint predating the field."""
         if state:
             self.counter = state["counter"]
             self.best_loss = state["best_loss"]
@@ -93,18 +88,7 @@ class EarlyStopping:
             return False
 
 
-
-# Options for closed experiments were removed on 18 November 2026. Each one was measured
-# worse and closed in docs/ENG_REPORT.md:
-#   --triplet-weight, --triplet-margin, --cross-session-positives   time-gap arms (F32 to F37)
-#   --conv-filters, --conv-kernel                                    conv before the LSTM (C15)
-#   --utsig-forgery-types, --utsig-hold-pairs                        UTSig forgery types (D11)
-#   --temporal-features derived                                      derived time functions
-# They are all in commit 3c80324. To rerun one of those arms:
-#   git show 3c80324:scripts/train.py > /tmp/train_3c80324.py   (and the matching
-#   src/data/dataset.py and src/models/siamese.py from the same commit)
-# TemporalSiamese still loads a checkpoint that has a conv stage, and benchmark.py
-# still scores a derived-features checkpoint, so the archived weights stay usable.
+# Closed experiment CLI flags live at commit 3c80324.
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train Siamese signature verification models")
     parser.add_argument("--branch", choices=["spatial", "temporal"], required=True,
@@ -287,21 +271,11 @@ def parse_args(argv=None):
 
 
 def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
-    """Parse and merge every requested dataset into one writer-keyed mapping.
-
-    float32_parse reads SVC2004 and DeepSignDB as training does
-    (TEMPORAL_TRAIN_FLOAT32_PARSE); every scorer leaves it off.
-    """
+    """Parse and merge datasets into {writer_id: {"genuine": [...], "forged": [...]}}."""
     writer_samples = {}
     for directory in data_dirs:
-        # Refusing here is the point. Every corpus in one run must return the
-        # same width, so a corpus that cannot supply the channel has to stop the
-        # run rather than quietly contribute narrower samples to the same merge.
         kwargs = {}
-        # Only the temporal corpora are asked for the channel. A fused run lists
-        # image and trajectory corpora together, and demanding `dt` from CEDAR
-        # aborted the whole run — `--branch fused` was unrunnable under the
-        # shipped default the moment `dt` became it.
+        # Pass extra_channels only to temporal corpora so fused runs can mix image and pen dirs.
         if extra_channels and is_temporal_dataset(directory):
             if is_known_dataset(directory) and not supports_extra_channel(
                     directory, extra_channels):
@@ -320,13 +294,7 @@ def build_writer_samples(data_dirs, extra_channels=None, float32_parse=False):
 
 
 def add_train_only_writers(writer_samples, train_ids, data_dirs, writers):
-    """
-    Add the listed writers of `data_dirs` to training, after the split.
-
-    The split is drawn on --data-dir alone, so validation, test and the base
-    training writers stay exactly where they were. writer_samples gains the
-    listed writers in place; the returned list is train_ids plus them.
-    """
+    """Append extra training-only writers after the main writer split is drawn."""
     extra = {}
     for directory in data_dirs:
         merge_datasets(extra, parse_dataset(directory))
@@ -342,15 +310,7 @@ def add_train_only_writers(writer_samples, train_ids, data_dirs, writers):
 
 
 def _seed_worker(worker_id):
-    """
-    Give each DataLoader worker its own augmentation RNG stream.
-
-    Workers are forked, so without this they inherit one already-initialized
-    generator and replay the *same* rotation/shear/stroke-width draws in
-    lockstep — the augmentation still runs, but its diversity silently collapses
-    toward a single worker's worth. Deriving each stream from the dataset's own
-    seed keeps the run reproducible from `--seed`.
-    """
+    """Give each forked DataLoader worker its own deterministic RNG stream."""
     info = torch.utils.data.get_worker_info()
     if info is None:
         return
@@ -364,20 +324,10 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
                  augment=SPATIAL_AUGMENT, random_impostor_ratio=RANDOM_IMPOSTOR_RATIO,
                  augment_scale=1.0, pairs_per_writer=None, augment_params=None,
                  device_augment=False, tilt_hide_prob=0.0):
-    """
-    Build a DataLoader over skilled-forgery pairs drawn from `writer_ids` only.
-
-    Pairs are generated *after* the writer split, so no writer's signatures can
-    appear on both sides of the partition boundary.
-
-    The temporal branch draws more pairs per writer than the spatial one, since
-    SVC2004 offers a fraction of the writers the image datasets do.
-    """
+    """Build a DataLoader over pairs sampled from writer_ids only."""
     subset = {w: writer_samples[w] for w in writer_ids}
 
-    # Random impostors are a training-time supervision signal, never an
-    # evaluation one: `shuffle` is true only for the training loader, so val and
-    # test keep the pure skilled-forgery pairing every reported metric uses.
+    # Only the training loader shuffles, adds random impostors, or runs augmentation.
     ratio = random_impostor_ratio if shuffle else 0.0
 
     if branch == "spatial":
@@ -385,9 +335,6 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
         forged_n = pairs_per_writer or PAIRS_IMPOSTOR_PER_WRITER
         pairs, labels = generate_skilled_pairs(subset, genuine_n, forged_n, seed=seed,
                                                random_impostor_ratio=ratio)
-        # `shuffle` is true only for the training loader, so validation and test
-        # are never augmented — an augmented val set would move the target the
-        # early-stopping rule is measuring against.
         dataset = SpatialSignatureDataset(pairs, labels,
                                           augment=shuffle and augment,
                                           seed=seed,
@@ -398,15 +345,6 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
             subset, pairs_per_writer or TEMPORAL_PAIRS_GENUINE_PER_WRITER,
             pairs_per_writer or TEMPORAL_PAIRS_IMPOSTOR_PER_WRITER, seed=seed,
             random_impostor_ratio=ratio)
-        # `shuffle` is true only for the training loader, which is also the only
-        # split that may be augmented.
-        #
-        # This read `shuffle and TEMPORAL_AUGMENT`, which pinned the branch to the
-        # config constant and made `--augment` a no-op for temporal while the
-        # spatial path above honoured it. `augment_trajectory` had therefore never
-        # run. The symptom that exposed it: temporal best-validates at epoch 1,
-        # which is the same data-variety starvation augmentation fixed on spatial
-        # (best epoch 1 -> 6, 11.78% -> 11.19%). Config still supplies the default.
         dataset = TemporalSignatureDataset(pairs, labels,
                                            augment=shuffle and augment,
                                            augment_scale=augment_scale,
@@ -422,12 +360,7 @@ def build_loader(writer_samples, writer_ids, branch, batch_size, num_workers, sh
 
 
 def unpack_batch(batch, device):
-    """
-    Normalize a batch from either collate path into a uniform call signature.
-
-    Spatial batches are (x1, x2, labels). Temporal batches carry the true
-    sequence lengths the packing needs: (x1, len1, x2, len2, labels).
-    """
+    """Normalize spatial and temporal batches into (x1, x2, labels, lengths)."""
     if len(batch) == 5:
         x1, lengths1, x2, lengths2, labels = batch
         return x1.to(device), x2.to(device), labels.to(device), (lengths1, lengths2)
@@ -436,28 +369,19 @@ def unpack_batch(batch, device):
 
 
 def epoch_label(epoch, total_epochs=None):
-    """Human-facing 1-based epoch tag for progress bars ('Epoch 003/100')."""
     if total_epochs is None:
         return f"Epoch {epoch + 1:03d}"
     return f"Epoch {epoch + 1:03d}/{total_epochs:03d}"
 
 
 def train_one_epoch(model, dataloader, loss_fn, optimizer, device, epoch, total_epochs=None):
-    """
-    Train model for a single epoch.
-    Returns average training loss across all batches.
-
-    Progress reports through `tqdm.auto`, which renders a widget under
-    Colab/Jupyter and a plain bar in a terminal, so the notebook and the CLI both
-    get live feedback from this one call site.
-    """
+    """Run one training epoch and return mean loss."""
     model.train()
     total_loss = 0.0
     num_batches = 0
 
     bar = tqdm(dataloader, desc=f"{epoch_label(epoch, total_epochs)} [train]", leave=False)
     for batch in bar:
-        # Transfer batch tensors to active computing device (GPU or CPU)
         x1, x2, labels, lengths = unpack_batch(batch, device)
 
         optimizer.zero_grad()
@@ -474,10 +398,7 @@ def train_one_epoch(model, dataloader, loss_fn, optimizer, device, epoch, total_
 
 
 def validate_one_epoch(model, dataloader, loss_fn, device, epoch=None, total_epochs=None):
-    """
-    Evaluate validation loss on holdout set without computing gradients.
-    Returns average validation loss.
-    """
+    """Run one validation epoch without gradients and return mean loss."""
     model.eval()
     total_loss = 0.0
     num_batches = 0
@@ -495,9 +416,7 @@ def validate_one_epoch(model, dataloader, loss_fn, device, epoch=None, total_epo
 
 
 def rng_state(dataset=None):
-    """Every random stream an epoch draws from: torch on CPU and CUDA (shuffle order, dropout,
-    worker seeds) and the training set's own augmentation generator. Reading it draws nothing,
-    so saving it leaves an uninterrupted run exactly as it was."""
+    """Snapshot CPU, CUDA, and dataset RNG states without advancing them."""
     generator = getattr(dataset, "_rng", None)
     return {"torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
@@ -505,7 +424,7 @@ def rng_state(dataset=None):
 
 
 def set_rng_state(state, dataset=None):
-    """Put back what rng_state() saved, so the next epoch draws what it would have drawn."""
+    """Restore RNG states saved by rng_state()."""
     torch.set_rng_state(state["torch"])
     if state["cuda"] and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["cuda"])
@@ -515,19 +434,7 @@ def set_rng_state(state, dataset=None):
 
 def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
                     early_stopping=None, scheduler=None, rng=None):
-    """
-    Save full training checkpoint for resuming later.
-
-    `loss` is this epoch's validation loss; `best_val_loss` is the best seen
-    across the whole run. Both are stored because they answer different
-    questions, and resuming needs the second one. Restoring from `loss` alone
-    re-baselines the run against whatever the final epoch happened to score, so
-    an epoch worse than the true best still reads as an improvement and
-    overwrites the good weights.
-
-    `scheduler` and `rng` make a resumed run end with the same weights as one
-    that never stopped (tests/test_scripts.py::TestResumeIsExact).
-    """
+    """Save full training state for exact resume."""
     os.makedirs(os.path.dirname(path), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     torch.save({
         "epoch": epoch,
@@ -535,7 +442,6 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
         "optimizer_state_dict": optimizer.state_dict(),
         "loss": loss,
         "best_val_loss": best_val_loss,
-        # Save early stopping state so resuming training preserves the patience counter.
         "early_stopping": early_stopping.state_dict() if early_stopping else None,
         "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
         "rng_state": rng,
@@ -544,7 +450,7 @@ def save_checkpoint(model, optimizer, epoch, loss, path, best_val_loss=None,
 
 
 def save_weights(model, path):
-    """Save model weights (state_dict only) for distribution and deployment."""
+    """Save model state_dict for inference."""
     os.makedirs(os.path.dirname(path), exist_ok=True)  # skylos: ignore[SKY-D215] operator-supplied --weights-dir
     torch.save(model.state_dict(), path)
     tqdm.write(f"  Best model weights saved: {path}")
@@ -554,17 +460,7 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         weights_path, checkpoint_path, start_epoch=0, early_stopping=None,
         scheduler=None, resume_best=None, resume_early_stopping=None,
         resume_scheduler=None, resume_rng=None):
-    """
-    Run the full training loop: per-epoch checkpoint, best-validation weight
-    save, and early stopping.
-
-    Kept as a standalone function so the notebook can drive the same loop the
-    CLI does instead of carrying its own copy.
-
-    Returns a history dict of "train_loss" / "val_loss" lists, which is
-    everything a loss curve needs, so callers can plot after the run without
-    training again. The best validation loss is `min(history["val_loss"])`.
-    """
+    """Run training with per-epoch checkpoints, best-val weight saving, and early stopping."""
     if early_stopping is None:
         early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE,
                                        min_delta=EARLY_STOPPING_MIN_DELTA)
@@ -576,11 +472,7 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         set_rng_state(resume_rng, train_dataset)
 
     history = {"train_loss": [], "val_loss": []}
-    # Resuming must inherit the best validation loss reached so far. Starting
-    # from infinity makes the first resumed epoch "best" by definition, so a
-    # *worse* model overwrites good weights and early stopping restarts its
-    # count against an inflated baseline. Measured: a run stopped at val 0.1153
-    # and resumed recorded the next epoch's 0.1202 as its new best.
+    # Inherit best_val_loss on resume so worse epochs cannot overwrite better weights.
     best_val_loss = float("inf") if resume_best is None else resume_best
 
     for epoch in range(start_epoch, epochs):
@@ -591,8 +483,6 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
         history["val_loss"].append(val_loss)
         tqdm.write(f"{epoch_label(epoch, epochs)} | train {train_loss:.4f} | val {val_loss:.4f}")
 
-        # Stepped on validation, not training, loss: the point is to decay when
-        # generalization stalls, which is the only signal that matters here.
         if scheduler is not None:
             previous_lr = optimizer.param_groups[0]["lr"]
             scheduler.step(val_loss)
@@ -600,16 +490,13 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
             if current_lr < previous_lr:
                 tqdm.write(f"  LR decayed: {previous_lr:.2e} -> {current_lr:.2e}")
 
-        # Count this epoch before saving: a checkpoint written first carries the
-        # previous epoch's counter, and a resumed run falls one stall behind.
+        # Update early stopping before saving so checkpoint reflects this epoch's count.
         stop = early_stopping(val_loss)
         save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path,
                         best_val_loss=min(best_val_loss, val_loss),
                         early_stopping=early_stopping, scheduler=scheduler,
                         rng=rng_state(train_dataset))
 
-        # Only the best-validation weights ship — the final epoch is not
-        # necessarily the best one once early stopping has been counting.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_weights(model, weights_path)
@@ -622,7 +509,7 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, device, epochs,
 
 
 def build_model(args, device):
-    """The model the flags describe, and the file name its weights are saved under."""
+    """Instantiate the requested branch model and its default output weight filename."""
     if args.branch == "spatial":
         model = SpatialSiamese(embedding_dim=args.embedding_dim or SPATIAL_EMBEDDING_DIM,
                                head_dropout=args.head_dropout,
@@ -637,14 +524,10 @@ def build_model(args, device):
               f"pool grid {args.pool_grid}x{args.pool_grid}, "
               f"embedding {model.embedding_dim}, "
               f"grad checkpoint {args.grad_checkpoint or 'off'}")
-        # The size is not in the weights, so it is stated here and in the record.
         print(f"  Input size: {SPATIAL_INPUT_SIZE[1]}x{SPATIAL_INPUT_SIZE[0]} (HxW)"
               + (" from SIGVER_SPATIAL_INPUT_SIZE" if os.environ.get("SIGVER_SPATIAL_INPUT_SIZE") else ""))
         weights_filename = "spatial_cnn.pth"
     else:
-        # Pressure-channel dropout only teaches robustness if real pressure exists
-        # to drop. A Task1 (4-column) dataset has none, so the branch would train
-        # permanently pressure-blind — surface that rather than let it pass silently.
         pressure_dropout = (args.pressure_dropout if args.pressure_dropout is not None
                             else PRESSURE_DROPOUT_RATE)
         has_pressure = True
@@ -675,8 +558,6 @@ def build_model(args, device):
             pressure_dropout=pressure_dropout,
         ).to(device)
 
-        # Distinct filenames so pressure-blind runs do not overwrite
-        # the shipped pressure-aware weights.
         weights_filename = ("temporal_lstm.pth" if has_pressure
                             else "temporal_lstm_task1.pth")
     return model, weights_filename
@@ -685,8 +566,6 @@ def build_model(args, device):
 def main(argv=None):
     args = parse_args(argv)
 
-    # Seed Python, NumPy, and PyTorch RNGs and enforce deterministic algorithms
-    # to guarantee exact run reproducibility.
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -695,7 +574,6 @@ def main(argv=None):
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
 
-    # Dynamic hardware selection: utilize CUDA GPU acceleration when available, else fallback to CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Training {args.branch} branch")
@@ -703,28 +581,16 @@ def main(argv=None):
     print("Discovering writers:")
     writer_samples = build_writer_samples(
         args.data_dir,
-        # The flag is temporal-only. A spatial run reaches image corpora that
-        # have no trajectory at all, so forwarding it there would ask CEDAR for
-        # a timing channel and abort a perfectly valid run.
         extra_channels=(None if args.branch != "temporal"
                         or args.temporal_channels == "xyp"
                         else args.temporal_channels),
-        # The recipe's only training noise; see TEMPORAL_TRAIN_FLOAT32_PARSE.
         float32_parse=TEMPORAL_TRAIN_FLOAT32_PARSE)
 
-    # Each branch keeps its own documented default; --augment/--no-augment override.
     if args.augment is None:
         args.augment = SPATIAL_AUGMENT if args.branch == "spatial" else TEMPORAL_AUGMENT
 
-    # Writer-independent partitioning (ISO/IEC 23053) happens on writer IDs
-    # before any pair is formed, so no signer can straddle two partitions.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
         TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
-    # The split seed is separate from the training seed so a config can be
-    # re-run on the *same* held-out writers. Without that, changing --seed
-    # reshuffles the partition and the two runs score different people, which
-    # measures split variance and training variance together — useless for
-    # deciding whether one arm actually beat another.
     if args.holdout_writers:
         train_ids, val_ids, test_ids = pin_holdout(
             sorted(writer_samples), args.holdout_writers, *ratios,
@@ -801,10 +667,6 @@ def main(argv=None):
     resume_rng = None
 
     if args.resume:
-        # Every line that reports a resume used to live inside an `os.path.exists`
-        # guard, so a typo'd path made the whole block a no-op: the run started from
-        # epoch 0 with no message, discarded hours of progress, and could then
-        # overwrite the very checkpoint it was meant to continue.
         if not os.path.exists(args.resume):
             raise FileNotFoundError(
                 f"--resume {args.resume!r} does not exist. Refusing to silently "
@@ -814,11 +676,6 @@ def main(argv=None):
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        # Prefer the run's best validation loss over the checkpointed epoch's
-        # own loss. Older checkpoints predate the `best_val_loss` field and fall
-        # back to `loss`, which re-baselines against the final epoch rather than
-        # the best one — so a resumed run can still overwrite better weights.
-        # When that matters, copy the current best weights aside first.
         resume_best = checkpoint.get("best_val_loss")
         if resume_best is None:
             resume_best = checkpoint.get("loss")
@@ -832,10 +689,6 @@ def main(argv=None):
               + (f", best val loss {resume_best:.4f}" if resume_best is not None else ""))
 
     if args.init_weights:
-        # Fine-tuning, not resuming: take the weights and nothing else. The
-        # optimizer state and epoch counter belong to the pre-training dataset,
-        # and carrying them over would start this run mid-schedule against data
-        # the optimizer has never seen.
         model.load_state_dict(
             torch.load(args.init_weights, map_location=device, weights_only=True))
         print(f"Initialized from pre-trained weights: {args.init_weights}")
@@ -844,8 +697,7 @@ def main(argv=None):
     checkpoint_path = os.path.join(
         args.weights_dir, f"checkpoint_{os.path.splitext(weights_filename)[0]}.pth")
 
-    # Decay patience sits below early-stopping patience on purpose: the run gets
-    # at least one decayed-LR epoch to prove itself before stopping is allowed.
+    # Decay patience < early-stopping patience so LR decay gets a chance before stopping.
     scheduler = None
     if args.lr_schedule == "plateau":
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -863,7 +715,6 @@ def main(argv=None):
     best_val_loss = min(history["val_loss"]) if history["val_loss"] else float("inf")
     print(f"\nDone. Best validation loss: {best_val_loss:.4f}")
     print(f"Weights: {weights_path}")
-    # Save the writer split record so evaluation can verify partition integrity.
     save_split_record(weights_path, train_ids, val_ids, test_ids,
                       data_dirs=args.data_dir, split_seed=args.split_seed,
                       holdout_writers=args.holdout_writers,

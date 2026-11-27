@@ -1,6 +1,4 @@
-"""Issue #33 at the database level: key slots per employee, the admin role, company-wide
-clients with an audit trail, the pen set kept on re-save, stale sets, the replay check,
-backup / restore, and the migration of v3 / v4 databases. Temporary databases only."""
+"""Database tests: per-employee key slots, admin roles, client sets, audit log, replay checks, backup/restore, and migrations."""
 import itertools
 import json
 import os

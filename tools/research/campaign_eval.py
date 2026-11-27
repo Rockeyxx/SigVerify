@@ -1,15 +1,4 @@
-"""The shipped weights on the XPPen in-house campaign, and the D6 threshold check.
-
-Campaign spec (docs/superpowers/specs/2026-11-02-xppen-capture-campaign-design.md):
-M2 shipped weights, M3 calibration by rule D6, M7 warm-up, and the forgers' second attempt
-(two approved forgeries per victim) for the step-up decision. Product order: each writer's first 5 genuine
-signings (tablet and paper of the same index) are the references, the later genuines and the
-team forgeries are probes. A forger code (byP01) names a forger, not participant P01.
-Prints aggregates only: no file name and no signature leaves this script.
-
-    python tools/research/campaign_eval.py            # paper as scanned
-    python tools/research/campaign_eval.py --faint    # paper made to look like a phone photo
-"""
+"""Evaluate shipped weights on the XPPen in-house campaign (`--faint` simulates phone photos)."""
 from __future__ import annotations
 
 import argparse
@@ -32,13 +21,12 @@ from src.data.dataset import quality_gate, trajectory_gate
 from src.gui.image_cleanup import SignatureNotFoundError, crop_to_ink
 from src.verification import load_model, nearest_reference_distances, similarity_from_distance
 
-MIN_GENUINE = 10            # spec 6: fewer usable genuines per modality leaves the headline arm
+MIN_GENUINE = 10
 BOOTSTRAP, HALF_SPLITS = 1000, 200
 
 
 def faint(image):
-    """A scan made to look like a phone photo (ENG_REPORT A10): grey paper (x 183/255), ink
-    contrast x 0.7, Gaussian blur sigma 1."""
+    """Simulate a dim, slightly blurred phone photo (grey paper, 0.7x contrast, sigma-1 blur)."""
     paper = 183.0
     x = image.astype(np.float32) * (paper / 255.0)
     x = paper - (paper - x) * 0.7
@@ -52,12 +40,7 @@ def _faint_copy(path):
 
 
 def embed_campaign(writers, spatial, temporal, faint_paper=False):
-    """{writer: {"genuine": (scan, pen), "forged": (scan, pen), "attempt", "os", "lost"}}.
-
-    Only signings with both sides count. The scan goes through the app's own crop
-    (crop_to_ink). A signing the app would refuse (no ink found, or either input gate fails)
-    is dropped and counted in "lost": at enrolment the operator retakes it, so the next
-    signing becomes a reference; as a probe it would be decided on one branch, not fused."""
+    """Embed paired tablet/paper signings through crop_to_ink and both input gates, counting drops in 'lost'."""
     out = {}
     for writer, record in writers.items():
         lost = 0
@@ -97,9 +80,7 @@ def _score(probes, references):
 
 
 def product_rows(embedded, ref=range(NUM_ENROLLMENT_REFERENCES), probe_from=None):
-    """One "draw" in product order: genuines are index-sorted, so `ref` positions are the
-    first signings; probes are every later genuine (from probe_from, default after the refs)
-    and all forgeries. Same shape as calibrate_fusion.draw_scores."""
+    """Score later genuines and all forgeries against the fixed `ref` indices in signing order."""
     ref = list(ref)
     start = max(ref) + 1 if probe_from is None else probe_from
     rows = {}
@@ -139,8 +120,7 @@ def _eer(rows, alpha):
 
 
 def spread(rows, alpha, rng):
-    """D6 spread: writer bootstrap of the EER and its threshold, and 200 writer-disjoint half
-    splits (threshold at the EER point of one half, FAR and FRR on the other)."""
+    """Compute bootstrap 90% intervals and 200 half-split cross-checks for EER and tau."""
     names = list(rows)
     boot = []
     for _ in range(BOOTSTRAP):
@@ -183,8 +163,7 @@ def report_branch(name, rows, alpha, tau, rng):
 
 
 def held_out(rows, record, alpha, shipped):
-    """Issue #44 item 11: tau at the EER point of the split record's train writers, FAR and
-    FRR on its test writers, beside the shipped tau on the same test writers."""
+    """Tune tau on split train writers and score FAR/FRR on test writers alongside shipped tau."""
     train = {w: r for w, r in rows.items() if w in record["train"]}
     test = {w: r for w, r in rows.items() if w in record["test"]}
     tau = _eer(train, alpha)[1]

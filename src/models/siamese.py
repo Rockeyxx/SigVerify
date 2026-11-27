@@ -1,12 +1,4 @@
-"""
-Dual-Siamese Signature Verification — Model Architectures
-
-This module defines the neural network components for signature verification:
-  - SpatialSiamese: CNN for offline (scanned image) signatures
-  - TemporalSiamese: LSTM for online (pen trajectory) signatures
-  - ContrastiveLoss: Distance-based loss with hard-negative mining
-  - FusionEngine: Late-fusion combining spatial and temporal scores
-"""
+"""Siamese CNN (SpatialSiamese), LSTM (TemporalSiamese), ContrastiveLoss, and FusionEngine."""
 
 import math
 
@@ -25,10 +17,7 @@ from config.settings import (
 )
 
 
-# Convolutional trunk configurations for the spatial branch.
-# Each stage specifies (out_channels, kernel_size, pool_after, dropout_after).
-#   - compact: 5 convolutional stages with pooling after each stage.
-#   - wide: 4 convolutional stages based on the SigNet architecture.
+# Trunk specs: (out_channels, kernel_size, pool_after, dropout_after).
 SPATIAL_TRUNKS = {
     "compact": (
         (32, 5, True, False),
@@ -47,49 +36,33 @@ SPATIAL_TRUNKS = {
 
 
 def _group_norm(channels):
-    """
-    Create a GroupNorm layer with roughly 4 channels per group (up to 32 groups).
-    GroupNorm works well with small batch sizes in Siamese training.
-    """
+    """GroupNorm with ~4 channels per group (capped at 32) for pair-sampled batches."""
     groups = min(32, channels // 4)
     return nn.GroupNorm(groups, channels)
 
 
 def _adaptive_windows(length, grid):
-    """Calculate pooling window start and end coordinates along one dimension."""
     return [(i * length // grid, -(-(i + 1) * length // grid)) for i in range(grid)]
 
 
 def _pool_windows(x, grid, reduce):
-    """Apply a reduction function over a 2D grid of pooling windows."""
     rows, cols = _adaptive_windows(x.shape[-2], grid), _adaptive_windows(x.shape[-1], grid)
     return torch.stack([torch.stack([reduce(x[..., r0:r1, c0:c1]) for c0, c1 in cols], dim=-1)
                         for r0, r1 in rows], dim=-2)
 
 
 def adaptive_max_pool2d_deterministic(x, grid):
-    """
-    Adaptive max pooling with a deterministic backward pass.
-    Standard PyTorch CUDA adaptive max pooling can introduce non-determinism.
-    """
+    """Deterministic replacement for CUDA AdaptiveMaxPool2d backward pass."""
     return _pool_windows(x, grid, lambda win: win.amax(dim=(-2, -1)))
 
 
 def adaptive_avg_pool2d_deterministic(x, grid):
-    """
-    Adaptive average pooling with a deterministic backward pass.
-    Produces repeatable results across different runs.
-    """
+    """Deterministic replacement for CUDA AdaptiveAvgPool2d backward pass."""
     return _pool_windows(x, grid, lambda win: win.mean(dim=(-2, -1)))
 
 
 class SpatialSiamese(nn.Module):
-    """
-    Siamese CNN for offline signature verification.
-
-    Accepts grayscale signature images [B, 1, H, W] and projects them into
-    a continuous embedding space for distance comparison.
-    """
+    """Siamese CNN mapping [B, 1, H, W] grayscale signatures to embeddings."""
 
     def __init__(self, embedding_dim=SPATIAL_EMBEDDING_DIM, head_dropout=SPATIAL_HEAD_DROPOUT,
                  trunk=SPATIAL_TRUNK, conv_dropout=SPATIAL_CONV_DROPOUT,
@@ -119,10 +92,8 @@ class SpatialSiamese(nn.Module):
             in_channels = out_channels
         self.features = nn.Sequential(*layers)
 
-        # Regional pooling grid size (pool_grid x pool_grid regions).
         self.pool_grid = int(pool_grid)
 
-        # Optional 1x1 convolution before pooling to reduce feature channels.
         self.pool_channels = None if pool_channels is None else int(pool_channels)
         if self.pool_channels is not None:
             self.reduce = nn.Conv2d(in_channels, self.pool_channels, kernel_size=1)
@@ -131,10 +102,8 @@ class SpatialSiamese(nn.Module):
         self.pool_avg = nn.AdaptiveAvgPool2d((self.pool_grid, self.pool_grid))
         self.pool_max = nn.AdaptiveMaxPool2d((self.pool_grid, self.pool_grid))
 
-        # Combine average and max pooling features to capture both density and peaks.
         pooled_features = 2 * in_channels * self.pool_grid * self.pool_grid
 
-        # Linear projection layers to produce the final embedding vector.
         head: list[nn.Module] = [nn.Dropout(head_dropout)]
         if fc_hidden:
             head += [
@@ -149,10 +118,7 @@ class SpatialSiamese(nn.Module):
 
     @classmethod
     def from_state_dict(cls, state_dict, **overrides):
-        """
-        Reconstruct a SpatialSiamese model using parameters saved in state_dict.
-        Recovers the convolutional trunk, pooling grid, and head dimensions.
-        """
+        """Reconstruct a SpatialSiamese model from checkpoint parameter shapes."""
         convs = sorted(
             (int(key.split(".")[1]), tuple(value.shape))
             for key, value in state_dict.items()
@@ -172,7 +138,7 @@ class SpatialSiamese(nn.Module):
                 f"longer defines — re-add the trunk rather than scoring it as another."
             )
 
-        # Detect whether the checkpoint uses a two-layer FC head or a single linear layer.
+        # Two-layer FC head vs single linear projection.
         if "embedding.4.weight" in state_dict:
             fc_hidden, embedding_dim = state_dict["embedding.4.weight"].shape[::-1]
         elif "embedding.1.weight" in state_dict:
@@ -206,10 +172,7 @@ class SpatialSiamese(nn.Module):
         return model.eval()
 
     def encode(self, x):
-        """
-        Extract the continuous embedding vector for an input image.
-        Input shape: [B, 1, H, W], output shape: [B, embedding_dim].
-        """
+        """Encode [B, 1, H, W] images into [B, embedding_dim] embeddings."""
         if self.grad_checkpoint and self.training and torch.is_grad_enabled():
             x = checkpoint_sequential(self.features, self.grad_checkpoint, x,
                                       use_reentrant=False)
@@ -225,17 +188,11 @@ class SpatialSiamese(nn.Module):
         return self.embedding(pooled)
 
     def forward(self, x1, x2):
-        """Forward pass for a pair of images. Returns embeddings for both branches."""
         return self.encode(x1), self.encode(x2)
 
 
 class TemporalSiamese(nn.Module):
-    """
-    Siamese LSTM for online (dynamic) signature verification.
-
-    Processes trajectory sequences containing coordinates and pressure.
-    Extracts time dynamics and maps signatures to continuous embeddings.
-    """
+    """Siamese LSTM mapping [B, L, C] pen trajectories to embeddings."""
 
     def __init__(self, input_features=TEMPORAL_INPUT_FEATURES, hidden_size=TEMPORAL_HIDDEN_SIZE,
                  num_layers=TEMPORAL_NUM_LAYERS, embedding_dim=TEMPORAL_EMBEDDING_DIM,
@@ -248,16 +205,12 @@ class TemporalSiamese(nn.Module):
         self.pressure_dropout = pressure_dropout
         self.derive_deltas = derive_deltas
 
-        # Save delta flag in state_dict buffer to preserve model configuration.
         self.register_buffer("derive_deltas_flag",
                              torch.tensor(float(derive_deltas)), persistent=True)
 
-        # When derive_deltas is True, per-frame velocity deltas double the input features.
         lstm_features = input_features * 2 if derive_deltas else input_features
 
-        # Research arm (off by default): local stroke context. The conv output is joined to
-        # each sample, so the LSTM keeps every channel it has today. No normalisation layer:
-        # its statistics would differ between a padded batch and a single signature.
+        # Optional local Conv1d stage; omits normalization so batch padding cannot shift statistics.
         self.conv = None
         if conv_filters:
             if conv_kernel % 2 == 0:
@@ -266,7 +219,6 @@ class TemporalSiamese(nn.Module):
                                   padding=conv_kernel // 2)
             lstm_features += conv_filters
 
-        # Bidirectional LSTM to process trajectory sequence in both time directions.
         self.lstm = nn.LSTM(
             input_size=lstm_features,
             hidden_size=hidden_size,
@@ -276,15 +228,11 @@ class TemporalSiamese(nn.Module):
             bidirectional=self.bidirectional,
         )
 
-        # Linear projection from final hidden state to embedding space.
         self.embedding = nn.Linear(hidden_size * (2 if self.bidirectional else 1), embedding_dim)
 
     @classmethod
     def from_state_dict(cls, state_dict, **overrides):
-        """
-        Reconstruct a TemporalSiamese model using parameters saved in state_dict.
-        Recovers input features, hidden size, layers, and delta settings.
-        """
+        """Reconstruct a TemporalSiamese model from checkpoint parameter shapes."""
         weight = state_dict["lstm.weight_ih_l0"]
         hidden_size = weight.shape[0] // 4
         conv_weight = state_dict.get("conv.weight")
@@ -326,16 +274,13 @@ class TemporalSiamese(nn.Module):
 
     @staticmethod
     def _add_dynamics(x):
-        """Calculate per-frame deltas and concatenate them with the input trajectory."""
+        """Append per-frame deltas along the feature axis."""
         delta = torch.zeros_like(x)
         delta[:, 1:] = x[:, 1:] - x[:, :-1]
         return torch.cat([x, delta], dim=-1)
 
     def _apply_pressure_dropout(self, x):
-        """
-        Randomly set pressure values to 1.0 during training to improve robustness
-        when evaluated on devices without pressure sensors.
-        """
+        """Impute pressure to 1.0 on random training samples."""
         if self.training and self.pressure_dropout > 0:
             batch_size = x.size(0)
             mask = torch.rand(batch_size, device=x.device) < self.pressure_dropout
@@ -345,10 +290,7 @@ class TemporalSiamese(nn.Module):
         return x
 
     def encode(self, x, lengths=None):
-        """
-        Extract the continuous embedding from a pen trajectory sequence.
-        Input shape: [B, L, C], output shape: [B, embedding_dim].
-        """
+        """Encode [B, L, C] trajectories into [B, embedding_dim] embeddings."""
         x = self._apply_pressure_dropout(x)
 
         if self.derive_deltas:
@@ -356,8 +298,7 @@ class TemporalSiamese(nn.Module):
 
         if self.conv is not None:
             if lengths is not None:
-                # Zero everything past each signature's end: the appended deltas are not zero
-                # there, and the conv must read what a single signature's own padding gives.
+                # Zero padded tail so conv sees only real steps, matching unpadded inference.
                 keep = (torch.arange(x.size(1), device=x.device)[None, :]
                         < lengths.to(x.device)[:, None])
                 x = x * keep[:, :, None]
@@ -379,18 +320,11 @@ class TemporalSiamese(nn.Module):
         return self.embedding(h_combined)
 
     def forward(self, x1, x2, lengths1=None, lengths2=None):
-        """Forward pass for a pair of trajectory sequences."""
         return self.encode(x1, lengths1), self.encode(x2, lengths2)
 
 
 class ContrastiveLoss(nn.Module):
-    """
-    Contrastive loss function for Siamese metric learning.
-
-    Minimizes Euclidean distance for genuine pairs and pushes impostor
-    pairs beyond the contrastive margin threshold.
-    Supports hard-negative mining to focus on difficult forgeries.
-    """
+    """Contrastive loss with hard-negative mining over impostor pairs."""
 
     def __init__(self, margin=1.0, hard_negative_ratio=0.5):
         super().__init__()
@@ -420,12 +354,7 @@ class ContrastiveLoss(nn.Module):
 
 
 class FusionEngine:
-    """
-    Combines similarity scores from spatial and temporal branches.
-
-    Formula: S_final = alpha * S_spatial + (1 - alpha) * S_temporal
-    Falls back to single-branch verification if one modality is absent.
-    """
+    """Late score fusion: S_final = alpha * S_spatial + (1 - alpha) * S_temporal."""
 
     def __init__(self, alpha=ALPHA_DEFAULT, threshold=DECISION_THRESHOLD,
                  spatial_norm=None, temporal_norm=None):
@@ -435,19 +364,13 @@ class FusionEngine:
         self.temporal_norm = temporal_norm
 
     def _normalize(self, score, norm_params):
-        """Normalize score using mean and standard deviation if available."""
         if norm_params is None:
             return score
         mean, std = norm_params
         return (score - mean) / std if std != 0 else score - mean
 
     def fuse(self, spatial_score=None, temporal_score=None, pressure_imputed=False):
-        """
-        Combine branch scores and compare against the decision threshold.
-
-        Returns a dictionary with the verification verdict, confidence percentage,
-        routing mode, and degraded status indicator.
-        """
+        """Combine available branch scores and apply the decision threshold."""
         if spatial_score is not None and temporal_score is not None:
             s = self.alpha * self._normalize(spatial_score, self.spatial_norm) + \
                 (1 - self.alpha) * self._normalize(temporal_score, self.temporal_norm)

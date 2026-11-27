@@ -1,8 +1,6 @@
-"""
-Enrollment Panel — Signature Verification System
+"""Client enrollment panel.
 
-Any employee can load a client and add a set it lacks. Replacing a set the client
-already has is a re-enrolment, for the admin only (the controls are disabled for others).
+Any employee can add missing reference sets; replacing an existing set requires admin privileges.
 """
 
 import os
@@ -286,12 +284,7 @@ class EnrollmentPanel(QWidget):
             self._set_status_error(f"Already have {REQUIRED_IMAGE_REFERENCES} references — remove one first")
             return
 
-        # Run the same cleanup pipeline the model will see (crop_to_ink),
-        # but here purely so the employee can confirm the result before
-        # committing to it. This runs again later, inside interfaces.py's
-        # enroll_client(), as part of the real processing pipeline —
-        # that duplication is intentional, not a bug: it keeps preview
-        # and processing independent and simple.
+        # Preview runs crop_to_ink before worker enrollment so the user confirms the exact crop.
         try:
             cropped_preview = crop_to_ink(self._selected_new_image_path)
         except SignatureNotFoundError as e:
@@ -302,8 +295,6 @@ class EnrollmentPanel(QWidget):
                 "That image file could not be found. Select it again.")
             return
 
-        # The preview is a temporary file: delete it once the employee has answered,
-        # whatever the answer (or an error) is.
         try:
             dialog = CropConfirmDialog(cropped_preview, parent=self)
             accepted = dialog.exec_() == QDialog.Accepted
@@ -357,7 +348,7 @@ class EnrollmentPanel(QWidget):
         self.dynamicCountLabel.setText(text)
 
     def capture_pen_signatures(self):
-        """Open the tablet window for the K enrolment signings (issue #23, item 2)."""
+        """Open the tablet capture dialog for K enrollment signings."""
         from src.capture.collect import collect_signatures
         captured = collect_signatures(count=REQUIRED_DYNAMIC_REFERENCES, parent=self)
         if captured is None:      # window closed: keep whatever was there
@@ -398,7 +389,6 @@ class EnrollmentPanel(QWidget):
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
 
-        # نعطل الزر ونعرض مؤشر تحميل عشان المستخدم يعرف فيه شي يشتغل
         self.enrollButton.setEnabled(False)
         self.enrollButton.setText("Processing…")
         self.statusLabel.setText("")
@@ -406,7 +396,7 @@ class EnrollmentPanel(QWidget):
         self._pending_client_id = client_id
         self._pending_new_pen = bool(self.pen_signatures)
         self._pending_capture_device = self._capture_device
-        # Copies: an edit or a capture while the worker runs must not change its input.
+        # Copy lists so edits while the worker runs do not mutate its inputs.
         self._enroll_worker = EnrollWorker(list(self.image_references), list(self.pen_signatures))
         self._enroll_worker.finished.connect(self._on_enroll_success)
         self._enroll_worker.failed.connect(self._on_enroll_failure)
