@@ -1,8 +1,4 @@
-"""
-Session labels on genuine signatures ("genuine_session"), parsed per corpus and kept
-aligned when corpora merge. The cross-session and triplet training arms that first
-used them were removed on 18 November 2026; they are in commit 3c80324.
-"""
+"""Tests for per-corpus genuine session labels and alignment across merged corpora (commit 3c80324)."""
 
 import os
 

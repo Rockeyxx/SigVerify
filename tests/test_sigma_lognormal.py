@@ -1,21 +1,4 @@
-"""
-Tests for the Sigma-Lognormal (SigmaLambda) signature model.
-
-This is phase 1 of a clean-room SynSig2Vec (Lai et al., AAAI 2020). The method
-synthesises training data from genuine signatures alone, which is why it is
-worth having here: it needs no skilled forgeries and no licensed corpus.
-
-**The reference implementation is GPL-3.0 and this repository is MIT, so no code
-was taken from it.** Everything below is written from the paper's equations.
-
-The whole method rests on one property: signatures synthesised at a *low*
-distortion level must sit closer to their template than ones at a *median*
-level, because the AP loss learns to rank exactly that ordering. If the
-decomposition is poor the synthetics are noise, the ordering is random, and
-every downstream number is meaningless — silently. So reconstruction fidelity
-and distortion ordering are the two gates, and they are tested rather than
-assumed.
-"""
+"""Tests for clean-room Sigma-Lognormal synthesis (Lai et al., AAAI 2020): reconstruction fidelity and distortion ordering."""
 
 import numpy as np
 import pytest
@@ -49,15 +32,7 @@ def _fit_cached(sig):
 
 
 def _spiral(length=90, turns=1.5):
-    """
-    A looping path with a *modulated* speed profile.
-
-    Constant-speed curves are the wrong fixture here: the Kinematic Theory
-    segments handwriting at velocity peaks, and a curve traced at uniform speed
-    has exactly one. Real signatures accelerate and decelerate several times per
-    stroke, so the phase is warped to produce that oscillation — otherwise the
-    decomposition is being asked to fit something no hand ever produced.
-    """
+    """Looping path with speed modulation to produce multiple velocity peaks per stroke."""
     u = np.linspace(0, 1, length)
     phase = u + 0.06 * np.sin(2 * np.pi * 6 * u)      # speed-up / slow-down
     t = phase * turns * 2 * np.pi
@@ -180,14 +155,7 @@ class TestSynthesize:
 
 
 def test_draw_applies_scale_inside_the_annulus():
-    """
-    `scale` must act in both branches of `_draw`.
-
-    It used to be dropped whenever an annulus was set, which silently made
-    level 2's per-parameter scales inert: `mu` was declared at 0.43 against
-    `D`'s 0.65 and then drew from the identical band anyway. Halving `scale`
-    must halve the magnitude of the draw.
-    """
+    """`_draw` applies `scale` inside both the uniform and annulus branches."""
     import numpy as np
 
     from tools.research.sigma_lognormal import _draw
@@ -202,18 +170,7 @@ def test_draw_applies_scale_inside_the_annulus():
 
 
 def test_distortion_levels_keep_a_learnable_ranking_margin():
-    """
-    The radii are a *data* property and cannot be gated here — but the shape of
-    the table can be.
-
-    Calibrating these to real corpus statistics was tried and measured worse:
-    pooled EER 8.78% -> 10.62% over three seeds, ranges disjoint. The AP loss
-    needs a cleanly learnable ordering, not a realistic one. Level 2 must
-    therefore stay strictly outside level 1's band.
-
-    Level 2's scale is 1.0 by design: `_draw` once ignored `scale` under an
-    annulus, so 1.0 is what reproduces the measured baseline.
-    """
+    """Level 2 distortion band stays strictly outside level 1 to preserve ranking separation."""
     from tools.research.sigma_lognormal import _ADMISSIBLE, _LEVELS
 
     assert set(_LEVELS) == {1, 2}

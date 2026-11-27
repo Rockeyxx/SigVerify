@@ -1,10 +1,4 @@
-"""
-Trajectory-to-Raster Stroke Renderer.
-
-Converts an online pen trajectory [L, 4] (X, Y, P, dt) into a synthetic
-grayscale image [1, 155, 220] with white ink on black background.
-This allows a single online signature to be verified by the spatial branch.
-"""
+"""Render online [L, >=3] trajectories into [1, H, W] spatial-branch images."""
 
 from __future__ import annotations
 
@@ -21,16 +15,10 @@ from config.settings import (
     SPATIAL_SQUARE_PAD,
 )
 
-# Threshold to detect a single point or line to avoid division by zero.
 _DEGENERATE_SPAN = 1e-4
 
 
 def _canvas_scale(span_x, span_y, avail_w, avail_h):
-    """
-    Calculate scaling factors along X and Y axes to match image preprocessing.
-    If SPATIAL_SQUARE_PAD is True, aspect ratio is preserved.
-    Otherwise, the signature is scaled directly to fill the canvas width and height.
-    """
     wide = span_x > _DEGENERATE_SPAN
     tall = span_y > _DEGENERATE_SPAN
 
@@ -46,10 +34,6 @@ def _canvas_scale(span_x, span_y, avail_w, avail_h):
 
 
 def _pen_up_dt_threshold(dt):
-    """
-    Determine the time gap threshold that marks a pen lift for this trajectory.
-    Calculated relative to the signature's median sampling interval.
-    """
     if dt is None or len(dt) == 0:
         return None
     period = float(np.median(dt))
@@ -59,10 +43,6 @@ def _pen_up_dt_threshold(dt):
 
 
 def _pen_is_up(pressure_a, pressure_b, dt_next, dt_threshold):
-    """
-    Check if the stroke segment between two points represents a pen lift.
-    Detected by either near-zero pressure or a large time gap between points.
-    """
     if pressure_a <= RENDER_PEN_UP_PRESSURE or pressure_b <= RENDER_PEN_UP_PRESSURE:
         return True
     return (dt_threshold is not None and dt_next is not None
@@ -73,19 +53,7 @@ def render_trajectory_to_image(trajectory, target_size=SPATIAL_INPUT_SIZE,
                                margin_ratio=RENDER_MARGIN_RATIO,
                                base_thickness=RENDER_BASE_THICKNESS,
                                min_thickness=RENDER_MIN_THICKNESS):
-    """
-    Render a trajectory sequence into a [1, H, W] float32 image array.
-
-    Args:
-        trajectory: Array with shape [L, >=3] containing (X, Y, Pressure, [dt]).
-        target_size: Output image dimensions as (width, height).
-        margin_ratio: Margin fraction left empty around the edges.
-        base_thickness: Base line thickness in pixels at full pressure.
-        min_thickness: Minimum line thickness for visible strokes.
-
-    Returns:
-        np.ndarray with shape [1, H, W], normalized to [0.0, 1.0] with inverted polarity.
-    """
+    """Render a [L, >=3] trajectory to a [1, H, W] float32 image (white ink on black)."""
     width, height = target_size
     canvas = np.zeros((height, width), dtype=np.uint8)
 
@@ -93,8 +61,7 @@ def render_trajectory_to_image(trajectory, target_size=SPATIAL_INPUT_SIZE,
     if trajectory.ndim != 2 or len(trajectory) < 2:
         return canvas[np.newaxis, :, :].astype(np.float32)
 
-    # Pen trajectories grow y upward (SVC2004, SigComp2011, and XPPen captures once capture
-    # flips them); image rows grow downward, so y is negated before mapping (ENG_REPORT A4).
+    # Trajectory Y grows upward while image rows grow downward.
     x, y, p = trajectory[:, 0], -trajectory[:, 1], trajectory[:, 2]
     dt = trajectory[:, 3] if trajectory.shape[1] > 3 else None
 

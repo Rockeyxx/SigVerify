@@ -1,17 +1,4 @@
-"""
-view_database.py
-=================
-Read-only inspection script for one company's signatures.db (debugging only).
-Prints every client with the shape of their decrypted references, and the audit log.
-
-The whole file is encrypted, so the script asks for a User ID and password
-(SIGVER_DB_PASSPHRASE unlocks a test database instead), after the company. The database
-is decrypted in memory only; the script writes nothing. Close the app first: one
-instance per vault. SIGVER_HOME picks the folder, as in the app.
-
-Run from the repository root:
-    python -m tools.view_database
-"""
+"""Read-only inspector for an encrypted company signatures.db (`python -m tools.view_database`)."""
 
 import getpass
 import os

@@ -1,6 +1,4 @@
-"""
-profile_page.py — Employee profile editing screen
-"""
+"""Employee profile editing screen."""
 
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
@@ -12,7 +10,7 @@ from src.gui.password_field import PasswordField, new_password_helpers
 
 
 class ProfilePage(QWidget):
-    profile_updated = pyqtSignal(dict)  # يرسل بيانات الموظف المحدثة
+    profile_updated = pyqtSignal(dict)  # emits updated employee record
 
     def __init__(self):
         super().__init__()

@@ -1,21 +1,4 @@
-"""
-One spatial dataset holding scans and pen trajectories at the same time.
-
-`SpatialSignatureDataset` used to accept only paths, so an online corpus could
-never contribute to the spatial branch even though `render_trajectory_to_image`
-has produced the branch's exact input contract since the fusion work. This suite
-gates the mixed loader.
-
-**The whole risk is in one line of the fork.** A trajectory `[L, 4]` and a raw
-scan `[H, W]` are both 2-D float arrays, so nothing about "is this an image or a
-motion record" is visible in the type. Guessing wrong is silent in both
-directions: a scan handed to the renderer draws a scribble out of pixel
-intensities, and a trajectory handed to `preprocess_image` gets resized onto
-220x155 and inverted, producing a perfectly well-formed tensor that means
-nothing. Four earlier defects had exactly that shape:
-plausible output, no exception, green suite. `TestTheDisambiguationRule` below is
-the part of this file that has to survive; the rest is geometry.
-"""
+"""Tests for `SpatialSignatureDataset` handling both image paths and rendered temporal trajectories."""
 import numpy as np
 import pytest
 import torch
@@ -37,15 +20,7 @@ WIDTH, HEIGHT = SPATIAL_INPUT_SIZE
 
 
 def _trajectory(num_points=120, columns=TEMPORAL_INPUT_FEATURES, phase=0.0):
-    """
-    A normalized `[L, C]` pen trajectory, shaped like what the parsers emit.
-
-    Width follows the capture contract rather than a literal, so this fixture
-    moves with `TEMPORAL_CHANNELS` instead of agreeing with a stale gate — the
-    failure mode seen before, where every fixture in the suite built
-    3-column trajectories and therefore agreed with a gate the shipped weights
-    had already outgrown.
-    """
+    """Normalized `[L, C]` trajectory matching `TEMPORAL_INPUT_FEATURES`."""
     t = np.linspace(0, 4 * np.pi, num_points) + phase
     x = (t * np.cos(t)).astype(np.float32)
     y = (t * np.sin(t)).astype(np.float32)
@@ -141,11 +116,7 @@ class TestRenderedSideMatchesTheScanContract:
         assert first.shape == (1, HEIGHT, WIDTH) == second.shape
 
     def test_polarity_is_inverted_background_zero(self):
-        """
-        Background 0, ink high — worth 4.86% to 0.00% EER on CEDAR. A rendered
-        side that arrived un-inverted would put half the batch in the opposite
-        polarity from the other half.
-        """
+        """Rendered spatial images keep background at 0 and ink high."""
         first, _, _ = _item([(_trajectory(), _trajectory())])
         image = first.numpy()
         assert image[0, 0, 0] == 0.0
@@ -162,26 +133,7 @@ class TestRenderedSideMatchesTheScanContract:
 
 
 class TestTheDisambiguationRule:
-    """
-    A trajectory and a scan are both 2-D float arrays. The fork keys on the
-    **column count**, which is the one property whose two admissible ranges
-    cannot overlap:
-
-    * a trajectory carries `TEMPORAL_CHANNEL_WIDTHS` columns, 3 to 7. Widths 6
-      and 7 are the research-only tilt modes; the capture contract stays 4
-      under AGENTS.md Drift Prevention;
-    * a scan is at least `MIN_BBOX_PIXELS` (64) wide, because the ink bounding
-      box cannot exceed the canvas and anything under that floor already fails
-      `quality_gate`.
-
-    Everything in between is **refused**, not guessed at. Value range and dtype
-    were rejected as the discriminator: a `[0, 1]` float scan is a legitimate
-    canonical array, a trajectory's pressure and `dt` columns are also in
-    `[0, 1]`, and a trajectory still in raw device units looks exactly like a
-    scan by magnitude.
-
-    Delete the fork and these tests fail. That is the point of them.
-    """
+    """Column count disambiguates trajectories (3 to 7 cols) from scans (>= 64 cols) without value guessing."""
 
     def test_a_trajectory_is_rendered_not_resized(self):
         """

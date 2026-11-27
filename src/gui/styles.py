@@ -1,16 +1,10 @@
-"""
-styles.py — Centralized visual theme: Teal + Ink palette
+"""Centralized visual theme (Teal + Ink palette), applied at QApplication level."""
 
-Card-focused layout: sidebar and content live in distinct panels with
-subtle background contrast instead of heavy borders. Applied once at
-the QApplication level via app.setStyleSheet(STYLE).
-"""
-
-# ---- Palette: Teal + Ink ----
-PRIMARY_DARK   = "#0B1A17"   # deep ink-teal — page/window background
-PRIMARY        = "#122822"   # panel/card background (one step lighter)
+# Palette: Teal + Ink
+PRIMARY_DARK   = "#0B1A17"   # page/window background
+PRIMARY        = "#122822"   # panel/card background
 PRIMARY_LIGHT  = "#1A362E"   # nested card / hover background
-ACCENT         = "#1D9E75"   # teal accent — primary buttons, active nav
+ACCENT         = "#1D9E75"   # primary buttons, active nav
 ACCENT_HOVER   = "#28B98A"
 ACCENT_DARK    = "#085041"   # dark teal for text-on-light-teal
 TEXT_LIGHT     = "#EAF7F2"

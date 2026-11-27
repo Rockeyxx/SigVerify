@@ -1,11 +1,4 @@
-"""Profile the end-to-end verification decision against latency constraints.
-
-Evaluates performance under two conditions:
-  * first Enter: a fresh process imports and calls warm_up(), as the app does when it
-    opens (reported, not budgeted); then the budgeted clock runs from Enter, after the
-    references are submitted, through enrolling them and one multimodal verify.
-  * warm: verification against stored references with the models already in memory.
-"""
+"""Profile first-Enter latency (enrol + multimodal verify) and warm verify() latency."""
 
 import argparse
 import os
@@ -26,7 +19,6 @@ from config.settings import (
 
 
 def _synthetic_probe(tmpdir):
-    """A signature-shaped image that clears the quality gate, so no dataset is required."""
     import cv2
     import numpy as np
 
@@ -39,7 +31,6 @@ def _synthetic_probe(tmpdir):
 
 
 def _synthetic_trajectory(length=200):
-    """A gate-passing trajectory at whatever width `TEMPORAL_CHANNELS` selects."""
     import numpy as np
 
     rng = np.random.default_rng(0)
@@ -51,14 +42,7 @@ def _synthetic_trajectory(length=200):
 
 
 def measure_first_enter(tmpdir):
-    """
-    Time the first Enter in a freshly opened app: the budgeted path.
-
-    A new process imports, builds `SignatureService` and calls `warm_up()`, as the app
-    does when its window opens; that is reported as `startup`, outside the budget. The
-    clock for `enter_to_result` starts after the references are submitted and covers
-    enrolling them and one `multimodal` verify.
-    """
+    """Measure startup/warm-up (unbudgeted) and first-Enter enroll + verify latency in a fresh process."""
     import json
 
     probe = _synthetic_probe(tmpdir)

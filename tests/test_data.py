@@ -1,4 +1,4 @@
-"""Tests for the data pipeline — preprocessing, quality gates, splitting, datasets."""
+"""Tests for the data pipeline: preprocessing, quality gates, splitting, and datasets."""
 
 import os
 import tempfile
@@ -87,7 +87,7 @@ class TestTrajectoryGate:
         assert "z-scored" in details["error"]
 
     def test_offset_but_scaled_trajectory_is_rejected(self):
-        """A capture that centred nothing still fails — the mean gives it away."""
+        """An uncentered trajectory fails the mean gate even with valid variance."""
         shifted = self._normalized()
         shifted[:, :2] += 4.0
         passed, _ = trajectory_gate(shifted)
@@ -166,15 +166,7 @@ class TestPreprocessImage:
         os.unlink(path)
 
     def test_background_is_zero_and_ink_is_high(self, tmp_path):
-        """
-        Published pipelines invert so background reads 0 and ink reads high, and
-        the reason is mechanical: ink covers about 1% of the canvas (measured —
-        cedar mean pixel 0.9496, bhsig260 0.9901), so an un-inverted image feeds
-        every convolution a large constant offset carrying no identity signal.
-
-        Asserted per region rather than on min/max, which are 0.0 and 1.0 either
-        way round and so cannot tell the two polarities apart.
-        """
+        """Verify polarity inversion (background 0, ink high) directly on paper vs stroke regions."""
         path = str(tmp_path / "stroke.png")
         img = np.full((200, 200), 255, dtype=np.uint8)
         img[90:110, 40:160] = 0                      # a horizontal stroke
@@ -288,10 +280,7 @@ class TestGenerateSkilledPairs:
         }
 
     def test_impostor_pairs_are_same_writer_forgeries(self):
-        """
-        The whole point of A8: every label-0 pair must be
-        (genuine, that same writer's forgery) — never a random cross-writer sample.
-        """
+        """Label-0 pairs use that writer's own skilled forgeries by default."""
         pairs, labels = generate_skilled_pairs(self._writers(),
                                                num_genuine_per_writer=5,
                                                num_forged_per_writer=5,
@@ -579,15 +568,7 @@ class TestTemporalDatasetAugmentation:
 
 
 class TestSkilledPairBalance:
-    """
-    A writer must contribute equal numbers of positives and negatives.
-
-    UTSig ships 27 genuine but only 6 skilled forgeries per writer, so it
-    supports C(27,2)=351 genuine combinations against 27*6=162 impostor ones.
-    Capping each arm only by its own supply gave UTSig a 1.70:1 genuine-heavy
-    batch at a 276 budget while every other dataset stayed 1:1 — and UTSig's EER
-    rose 38.83% -> 43.43% when the budget was raised.
-    """
+    """Balance positive and negative pair counts by the scarcer supply per writer."""
 
     def _dataset(self, num_genuine, num_forged):
         return {"utsig_1": {"genuine": [f"g{i}" for i in range(num_genuine)],
@@ -748,16 +729,7 @@ def _one_pair(tmp_path, identical=False):
 
 
 class TestPinnedHoldout:
-    """
-    `pin_holdout` exists so a corpus can be *added* without moving the writers a
-    previous result was measured on.
-
-    `writer_independent_split` shuffles every ID it is given, so adding 498
-    DeepSignDB writers silently relocates the 31 SVC2004/SigComp writers the
-    current numbers were scored against — some of them into training. That is
-    both a broken comparison and writer leakage, and it is invisible: the run
-    completes and reports a plausible EER.
-    """
+    """Verify `pin_holdout` keeps the held-out writer set fixed when new corpora are merged."""
 
     def test_pinned_writers_all_land_in_test(self):
         ids = [f"w{i}" for i in range(100)]
@@ -819,18 +791,7 @@ class TestPinnedHoldout:
 
 
 class TestChannelContractFollowsConfig:
-    """
-    `TEMPORAL_CHANNELS` is the single knob for the capture width.
-
-    `xyp` -> 3 (what shipped before), `dt` -> 4 (what ships now, and what
-    `models/weights/temporal_lstm.pth` was trained as), `tilt` -> 5 (available
-    once the device is confirmed to report azimuth and altitude). Flipping that
-    one setting must move the gate with it, so a checkpoint trained under any
-    setting stays reproducible without a code change.
-
-    These assert the *relationship* to config rather than a fixed number, so
-    they keep their meaning across every one of those settings.
-    """
+    """Verify capture gates and fixtures derive channel width from `TEMPORAL_CHANNELS`."""
 
     def _at_width(self, width, length=60):
         rng = np.random.default_rng(3)
@@ -928,7 +889,7 @@ class TestSpatialScannerAugmentation:
         return img
 
     def test_default_recipe_consumes_the_same_random_stream(self):
-        # Captured on the code before the scanner effects existed (2026-10-08).
+        # Baseline RNG consumption without scanner augmentation.
         rng = np.random.default_rng(5)
         out = augment_image(self._image(), rng)
         assert rng.random() == 0.40847320541999865

@@ -184,7 +184,7 @@ class TestSplitRecord:
                                           input_size=(110, 78)) is not None
 
     def test_record_without_an_input_size_is_scored_at_the_config_size(self, tmp_path):
-        weights = self._record(tmp_path, ["a"], ["b"], ["c"])   # pre-2026-09-19 record shape
+        weights = self._record(tmp_path, ["a"], ["b"], ["c"])   # legacy record without input_size
         assert "input_size" not in load_split_record(weights) or load_split_record(weights)["input_size"] is None
         assert check_split_against_record(weights, test_ids=["c"], input_size=(220, 155)) is not None
 

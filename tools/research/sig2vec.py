@@ -1,8 +1,4 @@
-"""Sig2Vec model and average-precision ranking loss for synthetic trajectories.
-
-Learns representations from genuine signature templates and their synthetic
-distortions (G1 and G2) without requiring skilled forgery samples during training.
-"""
+"""Sig2Vec model and average-precision ranking loss for synthetic trajectories."""
 
 import numpy as np
 import torch
@@ -24,16 +20,7 @@ EMBEDDING_DIM = 512
 
 
 def velocity_features(trajectory):
-    """
-    The paper's three input channels: `vx`, `vy`, `|v|` — equations 20-22.
-
-    Note what is absent: **pressure**. SynSig2Vec keys entirely on how the pen
-    moved, not how hard it pressed, so this is a strictly narrower input than the
-    project's `(X, Y, P)` contract and needs no capture change at all.
-
-    Central differences, then per-channel standardisation to zero mean and unit
-    variance, as the paper specifies before the CNN.
-    """
+    """Return standardized `(vx, vy, |v|)` channels (equations 20 to 22) via central differences."""
     xy = np.asarray(trajectory, dtype=np.float64)[:, :2]
     n = len(xy)
     if n < 3:
@@ -48,39 +35,21 @@ def velocity_features(trajectory):
     speed = np.sqrt(vx ** 2 + vy ** 2)
 
     out = np.stack([vx, vy, speed], axis=1)
-    # A stationary pen has zero variance on every channel; divide by one rather
-    # than clean up the NaN afterwards.
+    # Guard stationary pens where channel std is zero.
     std = out.std(axis=0)
     out = (out - out.mean(axis=0)) / np.where(std < _EPS, 1.0, std)
     return out.astype(np.float32)
 
 
 def time_functions(trajectory):
-    """
-    The 12 time functions this lab's later work uses — DsDTW (Jiang et al.).
-
-    The AAAI SynSig2Vec paper feeds the CNN three channels (`velocity_features`
-    above, equations 20-22). Its own authors moved to a richer 12-function set
-    in the follow-up work, and this project's temporal branch is already
-    diagnosed as channel-starved, so the wider set is offered as an alternative
-    input rather than a replacement — both are measurable.
-
-    In order: `vx, vy, v, theta, cos(theta), sin(theta), z, v_dot, theta_dot,
-    rho, c, a`, where `rho = log(v / |theta_dot|)` is the log curvature radius,
-    `c = v * theta_dot` the centripetal acceleration and `a` the total.
-
-    **Pressure is `z`.** SigmaLambda reconstructs `x, y` only, so a synthetic
-    trajectory arrives here two columns wide and its pressure channel is zero
-    unless the caller attaches the template's own profile first. That is a real
-    deviation from the synthesis model, which does not describe pressure at all.
-    """
+    """Return 12 standardized time functions `(vx, vy, v, theta, cos, sin, z, v_dot, theta_dot, rho, c, a)`."""
     arr = np.asarray(trajectory, dtype=np.float64)
     n = len(arr)
     if n < 3:
         return np.zeros((n, 12), dtype=np.float32)
 
     def _d(series):
-        """Central differences, endpoints copied — same convention as above."""
+        """Central differences with endpoints copied."""
         out = np.zeros(n)
         out[1:-1] = (series[2:] - series[:-2]) / 2.0
         out[0], out[-1] = out[1], out[-2]
@@ -111,25 +80,13 @@ FEATURES = {"velocity": (velocity_features, 3), "full": (time_functions, 12)}
 
 
 class Sig2Vec(nn.Module):
-    """
-    Six-layer 1D CNN over velocity sequences, Table 2 of the paper.
-
-    SELU rather than ReLU, and **no batch normalisation**: a training batch here
-    is one signature plus its own synthetics, which are highly correlated, so
-    normalising across the batch would mix a sample with near-copies of itself.
-    SELU self-normalises instead.
-
-    Masked average pooling collapses variable length to a fixed 512-d vector.
-    The mask is the load-bearing part — without it a padded batch would let a
-    sample's embedding depend on the longest sequence beside it.
-    """
+    """Six-layer 1D CNN over velocity sequences (Table 2) with SELU and masked average pooling."""
 
     def __init__(self, in_channels=3, embedding_dim=EMBEDDING_DIM):
         super().__init__()
         self.embedding_dim = embedding_dim
 
-        # Held as a ModuleList rather than a Sequential so the padded region can
-        # be re-zeroed between layers — see `forward`.
+        # Use ModuleList so padded frames can be re-zeroed between layers in forward().
         self.blocks = nn.ModuleList()
         self.pools = []
         channels = in_channels
@@ -152,14 +109,7 @@ class Sig2Vec(nn.Module):
         return (index < lengths[:, None].to(device)).to(dtype)[:, None, :]
 
     def forward(self, x, lengths=None):
-        """
-        Args:
-            x:       `[B, 3, L]` velocity features.
-            lengths: optional `[B]` true lengths, before pooling. Required for a
-                     padded batch, or padded frames contaminate the average.
-
-        Returns: `[B, embedding_dim]`.
-        """
+        """Encode `[B, C, L]` velocity features into `[B, embedding_dim]`, masking padded tails."""
         h = x
         if lengths is None:
             for block, pool in zip(self.blocks, self.pools):
@@ -168,13 +118,7 @@ class Sig2Vec(nn.Module):
                     h = self.pool(h)
             return self.embedding(h.mean(dim=2))
 
-        # Re-zero the padded tail after **every** layer, not just before pooling.
-        # Conv1d carries a bias, so conv(0) = bias != 0: the padded region stops
-        # being zero after the first layer and then bleeds one kernel-radius
-        # further inward per layer. Masking only at the pooling stage (as the
-        # paper describes) leaves a sample's embedding dependent on the longest
-        # sequence batched beside it — measured, and the reason
-        # `test_padded_batch_matches_a_single_sample` failed before this.
+        # Re-zero the padded tail after each block so Conv1d bias never leaks across batch padding.
         current = lengths.to(h.device)
         for block, pool in zip(self.blocks, self.pools):
             h = block(h) * self._mask(current, h.shape[2], h.device, h.dtype)
@@ -190,19 +134,7 @@ class Sig2Vec(nn.Module):
 
 
 def average_precision_loss(g1_similarity, g2_similarity, temperature=0.01):
-    """
-    `1 - AP` for ranking the low-distortion pool above the median-distortion one.
-
-    `g1_similarity` and `g2_similarity` are each sample's similarity to the
-    template. G1 samples are the positives; ranking every one of them above
-    every G2 sample gives AP = 1 and a loss of 0.
-
-    AP counts, for each positive, how many items outrank it — a step function of
-    score differences, and therefore not differentiable. The step is replaced by
-    a sigmoid of width `temperature`, so the count becomes a soft one and
-    gradients flow. Smaller temperature is closer to true AP and harder to
-    optimise; 0.01 keeps the relaxation tight on cosine-scale inputs.
-    """
+    """Differentiable `1 - AP` loss ranking `g1_similarity` above `g2_similarity` via sigmoid temperature."""
     if g1_similarity.numel() == 0 or g2_similarity.numel() == 0:
         raise ValueError("average precision is undefined for an empty pool")
 
@@ -213,7 +145,7 @@ def average_precision_loss(g1_similarity, g2_similarity, temperature=0.01):
     pos_vs_pos = torch.sigmoid((positives[None, :] - positives[:, None]) / temperature)
     pos_vs_neg = torch.sigmoid((negatives[None, :] - positives[:, None]) / temperature)
 
-    # Positives at or above i — the numerator of Prec@i.
+    # Positives ranked at or above index i (Prec@i numerator).
     positives_above = 1.0 + (pos_vs_pos.sum(dim=1) - torch.diagonal(pos_vs_pos))
     # Rank of positive i: itself, plus everything scoring above it.
     rank = positives_above + pos_vs_neg.sum(dim=1)
@@ -223,13 +155,7 @@ def average_precision_loss(g1_similarity, g2_similarity, temperature=0.01):
 
 
 def template_similarity(template_embedding, sample_embeddings):
-    """
-    Cosine similarity of each sample to the template — equation 16.
-
-    Cosine rather than Euclidean because the verifier normalises embeddings
-    before comparing them (equation 23), so the ranking the loss optimises and
-    the distance the verifier thresholds measure the same geometry.
-    """
+    """Cosine similarity of each sample embedding to `template_embedding` (equation 16)."""
     t = torch.nn.functional.normalize(template_embedding.reshape(1, -1), dim=1)
     s = torch.nn.functional.normalize(sample_embeddings, dim=1)
     return (s @ t.T).reshape(-1)

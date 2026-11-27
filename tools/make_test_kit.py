@@ -1,13 +1,4 @@
-"""Build the whole-system test kit (issue #43) a team member runs on the installed app.
-
-    python tools/make_test_kit.py          # dist/SigVerify-test-kit.zip, a made-up signer
-    python tools/make_test_kit.py --p01    # in-house participant P01's real signings (send privately)
-
-The kit holds one signer (paper scans and the signing window's event logs), the scores the
-shipped model gives those files scored directly, run_test.bat / run_test.sh and a README. The
-member installs the app, unzips the kit, runs the script, watches the app test itself, and
-sends back SigVerify-test-results.txt (src/self_test.py writes it).
-"""
+"""Build the self-test kit zip (`dist/SigVerify-test-kit.zip` or `--p01`) for installed apps."""
 import argparse
 import csv
 import json
@@ -30,9 +21,9 @@ from src.data.renderer import render_trajectory_to_image  # noqa: E402
 from src.gui.image_cleanup import crop_to_ink  # noqa: E402
 from src.verification import load_model, nearest_reference_distances, similarity_from_distance  # noqa: E402
 
-BLUE_INK_BGR = (170, 60, 20)            # the app reads blue pen on white paper only (ENG_REPORT A6)
+BLUE_INK_BGR = (170, 60, 20)            # ink_crop expects blue ink on white paper
 KIT_NAME = "SigVerify-test-kit"
-PRESS, MOVE, RELEASE = 92, 87, 93       # Qt tablet event types, as the signing window logs them
+PRESS, MOVE, RELEASE = 92, 87, 93       # Qt tablet event types
 
 RUN_BAT = r"""@echo off
 rem SigVerify whole-system test (issue #43). Double-click this file.

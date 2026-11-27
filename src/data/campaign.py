@@ -1,12 +1,4 @@
-"""The XPPen in-house campaign as data: what tools/capture_session.py saved, read back.
-
-Files per participant (tools/capture_session.py `signature_path`):
-  P05/P05_tablet_genuine_01.csv              every Qt tablet event the signing box saw
-  P05/P05_paper_genuine_01.png               the raw paper box (its _ink.png crop is ignored:
-                                             callers apply the app's own image preparation)
-  P05/P05_<tablet|paper>_forgery_byP02_a1.*  forger P02's attempt 1 at P05
-The forger copy has no pen pair and is ignored; so is tilt (dropped by the owner, ENG_REPORT B11).
-"""
+"""Parser for XPPen in-house capture sessions saved by tools/capture_session.py."""
 import csv
 import hashlib
 import json
@@ -44,17 +36,7 @@ def _tablet_os(root, participants):
 
 def parse_inhouse(root=INHOUSE_DIR, participants=None, exclude=INHOUSE_EXCLUDED,
                   no_driver=INHOUSE_NO_DRIVER, no_driver_scale=INHOUSE_NO_DRIVER_PRESSURE_SCALE):
-    """Pair each pen signing with its paper box, by the number in the file name.
-
-    Returns {"inhouse_P05": {"genuine": [{"index", "tablet", "paper", "os"}], "forged":
-    [{"forger", "attempt", "tablet", "paper", "os"}]}}, sorted by index or (forger, attempt).
-    A side that was not saved is None: never shifted, so a gap cannot misalign the pairs.
-    "os" is the pen file's own manifest entry (None without a pen file): Windows pressure is on
-    another scale (ENG_REPORT G10), so never pool it unscaled. participants limits the read;
-    exclude names sessions never read. "pressure_scale" is what load_inhouse_tablet_file must
-    multiply the pen pressure by: no_driver_scale for the forgeries of a no_driver writer
-    (Wintab forgeries of Windows Ink genuines), 1.0 everywhere else.
-    """
+    """Pair tablet CSVs and paper PNGs per participant by index or (forger, attempt)."""
     _require_dir(root, "In-house campaign")
     os_of = _tablet_os(root, participants)
     writers = {}
@@ -97,9 +79,7 @@ def parse_inhouse(root=INHOUSE_DIR, participants=None, exclude=INHOUSE_EXCLUDED,
 
 
 def _strokes(rows):
-    """The signing box's own rule (src/capture/tablet.py DrawingCanvas.tabletEvent): a press
-    starts a new stroke, a lift or leaving the box ends one, and only samples with pressure
-    inside the box are ink."""
+    """Split recorded Qt events into pen-down strokes inside the canvas box."""
     strokes, current = [], []
 
     def end():
@@ -124,13 +104,11 @@ def _strokes(rows):
 
 
 def load_inhouse_tablet_file(path, pressure_scale=1.0):
-    """One saved tablet signature as the [L, 4] trajectory the app made of it at signing,
-    pressure multiplied by pressure_scale (parse_inhouse's entry says which)."""
+    """Load a saved tablet CSV into a normalized [L, 4] trajectory."""
     with open(path, newline="") as f:  # skylos: ignore[SKY-D215,SKY-D325] tablet file enumerated by parse_inhouse from the campaign folder
         strokes = _strokes(csv.DictReader(f))
     if not strokes:
         raise ValueError(f"{path}: no pen-down samples inside the box.")
-    # Qt pressure is already 0..1, as in DrawingCanvas.trajectory.
     return strokes_to_trajectory([np.asarray(s, dtype=np.float64) for s in strokes],
                                  pressure_max=1.0 / pressure_scale)
 
@@ -141,16 +119,14 @@ def _goes_to_test(writer, seed, test_fraction):
 
 
 def inhouse_split(writers, seed=SEED, test_fraction=INHOUSE_TEST_FRACTION):
-    """Train and test writers. Each writer's side depends only on their own code, so nobody
-    moves when volunteers are added (splits must not shift). A forger code (forgery_byP01)
-    names a forger, not the participant with that code: the forgers signed no genuines here."""
+    """Deterministic hash-based train/test split per participant code."""
     test = sorted(w for w in writers if _goes_to_test(w, seed, test_fraction))
     return {"train": sorted(set(writers) - set(test)), "test": test}
 
 
 def write_inhouse_split(writers, path=INHOUSE_SPLIT_PATH, seed=SEED,
                         test_fraction=INHOUSE_TEST_FRACTION):
-    """Save the split for training to hold out: `train.py --holdout-writers <test...>`."""
+    """Write the in-house train/test split JSON."""
     record = {"seed": seed, "test_fraction": test_fraction,
               "rule": "test when sha256(seed:writer) < test_fraction",
               **inhouse_split(writers, seed, test_fraction)}

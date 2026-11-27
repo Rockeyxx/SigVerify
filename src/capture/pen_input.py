@@ -1,10 +1,4 @@
-"""Which pen input Qt reads on Windows, chosen before QApplication starts (ENG_REPORT G10).
-
-Windows Ink, Qt 5.15's default, reports pressure in 1024 steps. Wintab, the tablet driver's own
-input, passes the device's full range (1/16383 measured with XPPen driver 4.0.21). Wintab needs
-the driver's wintab32.dll: without it the pen would draw nothing, so the default falls back to
-Windows Ink. Qt picks the input once at startup.
-"""
+"""Select the Windows Qt pen backend (Wintab or Windows Ink) before QApplication starts."""
 import ctypes
 import os
 import platform

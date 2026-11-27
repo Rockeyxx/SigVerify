@@ -1,9 +1,4 @@
-"""GUI interfaces for signature verification.
-
-This module provides a GUI wrapper around SignatureService (src/verification.py).
-It converts between GUI storage formats (base64-encoded strings) and raw embedding
-byte formats used by the service.
-"""
+"""GUI wrapper around SignatureService, converting stored base64 templates to bytes."""
 
 import os
 import base64
@@ -12,7 +7,7 @@ import tempfile
 import threading
 import uuid
 
-import torch  # noqa: E402 — must load before PyQt5 elsewhere; harmless here too
+import torch  # noqa: E402 - load before PyQt5 on Windows
 import cv2    # noqa: E402
 
 from config.settings import MIN_LAPLACIAN_VARIANCE
@@ -24,10 +19,6 @@ _service_lock = threading.Lock()
 
 
 def _get_service() -> RealSignatureService:
-    # One SignatureService for the whole session (AGENTS.md). The lock only makes sure
-    # two threads (warm-up and a worker) do not both create the service object; that is
-    # instant. The models load lazily inside the service (spatial_model / temporal_model),
-    # outside this lock.
     global _service
     with _service_lock:
         if _service is None:
@@ -35,13 +26,11 @@ def _get_service() -> RealSignatureService:
         return _service
 
 def warm_up() -> None:
-    """Load both models and run a blank sample through each.
-    Call once when the app opens, on a background thread (AGENTS.md)."""
+    """Warm up both models once on a background thread at app launch."""
     _get_service().warm_up()
 
 
 def _remove_quietly(paths) -> None:
-    """Delete temporary files; a file that is already gone is fine."""
     for p in paths:
         try:
             os.remove(p)
@@ -50,17 +39,9 @@ def _remove_quietly(paths) -> None:
 
 
 def _prepare_image(path: str, temp_files: list) -> str:
-    """Prepare an image before sending it to the model.
-
-    Steps:
-      1. Crop to ink and clean background noise.
-      2. Copy to an ASCII-safe temporary path to prevent filename encoding issues.
-
-    Every temporary file created is appended to `temp_files`, so the caller can
-    delete them in a `finally` (the originals are never touched).
-    """
+    """Crop image to ink and copy to an ASCII-safe temp path; tracks created files for cleanup."""
     cleaned_path = crop_to_ink(path)
-    if os.path.abspath(cleaned_path) != os.path.abspath(path):   # never delete the employee's own file
+    if os.path.abspath(cleaned_path) != os.path.abspath(path):   # never delete the user's original
         temp_files.append(cleaned_path)
 
     try:
@@ -75,7 +56,7 @@ def _prepare_image(path: str, temp_files: list) -> str:
 
 
 class ImageRejectedError(ValueError):
-    """Reference images were rejected. The message names each image and says why."""
+    """Reference images rejected by the crop or quality gate."""
 
 
 def _is_gate_error(error) -> bool:
@@ -91,8 +72,7 @@ ROUTING_LABELS = {
 
 
 def modality_state(result: dict) -> str:
-    """The audit-log text for one verify() result: what actually ran, why it was degraded,
-    and the threshold applied, so a decision can be explained later (issue #23, item 16)."""
+    """Format routing, degradation reason, and threshold for the audit log."""
     routing = result.get("routing", "unknown")
     parts = [ROUTING_LABELS.get(routing, routing)]
     if result.get("degraded"):
@@ -104,12 +84,7 @@ def modality_state(result: dict) -> str:
 
 
 def _rejection_reason(prepared_path: str) -> str:
-    """Why the model's quality gate rejects an image that was already cropped.
-
-    The gate itself only says "failed the quality gate", so the reason is measured here
-    with the documented rule (Laplacian variance >= MIN_LAPLACIAN_VARIANCE). It is used only to
-    explain a rejection the model has already made, never to reject anything itself.
-    """
+    """Estimate why the quality gate rejected an already-cropped image."""
     gray = cv2.imread(prepared_path, cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return "the image could not be read"
@@ -121,10 +96,7 @@ def _rejection_reason(prepared_path: str) -> str:
 
 
 def _explain_rejections(service, names: list, safe_paths: list, original: ValueError):
-    """The batch was rejected: embed each image alone to find which ones, and why.
-
-    Returns an ImageRejectedError naming every rejected image, or `original` if no single
-    image reproduces the rejection."""
+    """Probe each image individually to report which reference(s) failed the gate."""
     problems = []
     for number, (name, path) in enumerate(zip(names, safe_paths), start=1):
         try:
@@ -152,22 +124,7 @@ def _is_pen_gate_error(error) -> bool:
 
 
 def enroll_client(image_paths: list, trajectories: list = None) -> dict:
-    """Enroll a client from paper images, tablet signatures, or both.
-
-    image_paths: NUM_ENROLLMENT_REFERENCES photos/scans, or empty for a tablet-only client.
-    trajectories: NUM_ENROLLMENT_REFERENCES [L, 4] arrays from collect_signatures(), or
-        None/empty for a paper-only client. With both, they are enrolled together
-        (enroll_multimodal), so the same count is needed for each.
-
-    Returns:
-        A dictionary containing:
-          - "embeddings": base64 spatial embeddings (512 values each), empty when tablet-only.
-          - "dynamic_embeddings": base64 pen embeddings (128 values each), empty when paper-only.
-          - "spatial_origin": "scan". Paper images are scans; a tablet-only client has no
-            spatial set, and pen signatures are never rendered into one (pen alone measured
-            better than pen plus a picture drawn from it).
-    The raw trajectories are not kept (ISO/IEC 24745): only the embeddings are returned.
-    """
+    """Enroll a client from paper scans, tablet trajectories, or both; returns base64 embeddings."""
     image_paths = list(image_paths or [])
     trajectories = list(trajectories or [])
     if not image_paths and not trajectories:
@@ -211,12 +168,7 @@ def enroll_client(image_paths: list, trajectories: list = None) -> dict:
 
 
 def choose_mode(has_image: bool, has_pen: bool, has_spatial_refs: bool, has_temporal_refs: bool):
-    """Which verify() mode a visit can use, or None if the probes and references do not meet.
-
-    Returns "multimodal" (paper + pen, fused), "spatial" or "temporal" (one branch only).
-    A probe whose references are missing is not used: a client enrolled from the tablet only
-    is verified on the pen alone, even when a photo is also given.
-    """
+    """Return 'multimodal', 'temporal', 'spatial', or None based on available probes and refs."""
     use_image = has_image and has_spatial_refs
     use_pen = has_pen and has_temporal_refs
     if use_image and use_pen:
@@ -230,16 +182,7 @@ def choose_mode(has_image: bool, has_pen: bool, has_spatial_refs: bool, has_temp
 
 def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_image_path=None,
                   reference_temporal_b64: list = None, probe_trajectory=None) -> dict:
-    """Verify a visit against the client's stored references.
-
-    probe_image_path: one image path, a list of them (several signings, or the two signings
-        of a step-up, first first), or None for a pen-only visit.
-    probe_trajectory: one [L, 4] array from collect_signatures(), a list of them in the same
-        order, or None for a paper-only visit.
-    With both probes and both reference sets the visit is fused ("multimodal"); otherwise the
-    one branch that has a probe and references is used (single branch, reported as degraded).
-    The result's "decision" may be "Sign again" once step-up is on and the visit is fused.
-    """
+    """Verify probe image(s) and/or trajectory(s) against stored base64 references."""
     ref_spatial = [base64.b64decode(b) for b in (reference_embeddings_b64 or [])]
     ref_temporal = [base64.b64decode(b) for b in (reference_temporal_b64 or [])]
     mode = choose_mode(probe_image_path is not None, probe_trajectory is not None,
@@ -285,12 +228,7 @@ def verify_client(reference_embeddings_b64: list, spatial_origin: str, probe_ima
 
 
 def embed_confirmed_signing(probe_image_path=None, trajectory=None) -> dict:
-    """Embed one confirmed signing for adding to the client's references.
-
-    Same path as enrollment, so the same input gates apply. Pass the signing's image, its
-    pen trajectory, or both (a fused visit adds both). Returns
-    {"spatial": base64 or None, "temporal": base64 or None}.
-    """
+    """Embed one confirmed signing for appending to a client's reference set."""
     temp_files = []
     out = {"spatial": None, "temporal": None}
     try:

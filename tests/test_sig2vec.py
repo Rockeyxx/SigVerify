@@ -1,20 +1,4 @@
-"""
-Tests for Sig2Vec and the average-precision ranking loss — phase 2 of SynSig2Vec.
-
-Clean-room from the paper (arXiv:1911.05358, Tables 1-2). The reference
-implementation is GPL-3.0 and this repository is MIT, so no code was taken.
-
-Two properties carry the whole method:
-
-1. **Padding must be invisible.** Signatures are ragged, batches are padded, and
-   masked average pooling is the only thing standing between a sample and an
-   embedding that depends on which batch it landed in. The temporal LSTM has the
-   same invariant pinned in `tests/test_models.py`; this is its Sig2Vec twin.
-2. **The AP loss must actually reward the right ranking.** It is trained to rank
-   the low-distortion pool above the median-distortion one. If the loss does not
-   fall when that ordering improves, the network learns nothing from the
-   synthesis and the whole pipeline is decorative.
-"""
+"""Tests for clean-room Sig2Vec and average-precision ranking loss (arXiv:1911.05358): padding invariance and AP monotonic ranking."""
 
 import numpy as np
 import pytest
@@ -34,7 +18,7 @@ def _stroke(length, seed=0):
 
 
 class TestVelocityFeatures:
-    """The paper feeds three channels — vx, vy, |v| — and no pressure at all."""
+    """Three velocity channels `(vx, vy, |v|)` without pressure."""
 
     def test_emits_three_channels(self):
         assert velocity_features(_stroke(50)).shape == (50, 3)
@@ -75,7 +59,7 @@ class TestTimeFunctions:
             assert len(time_functions(_stroke(n))) == n
 
     def test_channels_are_standardized(self):
-        """All twelve, pressure included — so it needs a trajectory that has one."""
+        """All 12 channels (including pressure) are standardized to zero mean and unit std."""
         sig = _stroke(300)
         pressure = np.linspace(0.2, 0.8, 300, dtype=np.float32)[:, None]
         f = time_functions(np.hstack([sig, pressure]))
@@ -88,7 +72,7 @@ class TestTimeFunctions:
         assert np.allclose(time_functions(sig), time_functions(sig + 5.0), atol=1e-4)
 
     def test_reads_pressure_when_present(self):
-        """Channel 6 is pressure — it must track column 2, not be invented."""
+        """Channel 6 tracks input column 2 (pressure)."""
         sig = _stroke(120)
         pressure = np.linspace(0.1, 0.9, 120, dtype=np.float32)[:, None]
         with_pressure = time_functions(np.hstack([sig, pressure]))
@@ -105,7 +89,7 @@ class TestTimeFunctions:
         assert np.all(np.isfinite(flat))
 
     def test_is_finite_on_a_straight_line(self):
-        """A straight stroke has zero curvature — the log curvature radius must survive it."""
+        """Zero-curvature straight strokes keep finite log curvature radius."""
         line = np.stack([np.linspace(0, 10, 60), np.zeros(60)], axis=1).astype(np.float32)
         assert np.all(np.isfinite(time_functions(line)))
 

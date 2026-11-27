@@ -1,11 +1,4 @@
-"""Download the two shipped weights of the MODEL_VERSION release into models/weights and check
-their SHA-256 against config/settings.py. Used by the installer build (issue #42).
-
-    python bundle/fetch_weights.py        (from the repository root; needs the gh CLI)
-
-A file that does not match never reaches models/weights: all files are checked in a temporary
-folder first, and the script exits non-zero.
-"""
+"""Download MODEL_VERSION weights into models/weights after verifying SHA-256 digests."""
 
 import hashlib
 import shutil

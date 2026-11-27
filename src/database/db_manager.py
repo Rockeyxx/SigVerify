@@ -1,42 +1,4 @@
-"""
-Encrypted template store: one SQLite database per vault, encrypted as a whole file.
-
-Boundary (AGENTS.md): this layer holds the keys. It receives plain embeddings
-from SignatureService.enroll_*() as float32 bytes (or np.ndarray), encrypts them
-for storage, and returns decrypted float32 arrays for SignatureService.verify().
-
-The file at rest (one file, so one os.replace saves the header and the body together):
-  "SIGVAULT" | format version (2 bytes) | header length (4 bytes) | header (JSON) |
-  nonce (12 bytes) | AES-256-GCM(data key, nonce, the serialized database, AAD = all before the nonce)
-The header is plaintext and holds only what login needs: each active member's User ID
-and key slot (scrypt salt and cost, nonce, wrapped data key), and the passphrase slot if
-any. No name, no owner flag, no signer and no audit row. Every other byte is encrypted,
-and the header is authenticated as the AAD: changing any byte makes the file refuse to
-open, and nothing loads. The header is rebuilt from the encrypted `key_slots` table at
-every save, so the two always agree.
-
-In use, the database exists only in memory: login decrypts the body into one in-memory
-SQLite connection (Connection.deserialize). Every committed write saves the whole file:
-serialize, encrypt with a fresh random nonce, write an owner-only temp file beside the
-vault, fsync, os.replace. A crash leaves the previous file or the new one, never half of
-one; at worst the last write is lost. No plaintext copy, journal or temp file reaches the
-disk. One app instance per vault: an OS lock on `<vault>.lock` is held from login to logout.
-
-Keys: one random 256-bit data key (DEK) encrypts the file and, again, every template row
-(with associated data that binds the row to its signer). The DEK is never stored in the
-clear. It is wrapped once per member, with a key derived (scrypt) from that member's
-password. Logging in IS unwrapping the slot: AES-GCM refuses a wrong password, so no
-password hash is stored at all. At most one "passphrase" slot exists, for tests and CI
-only (SIGVER_DB_PASSPHRASE). If every password is lost, nothing can be recovered.
-
-Employees: the first account on an empty database is the admin. Only the admin adds
-employees, resets a password, removes an employee, deletes a client, replaces a
-client's existing references, or backs up or restores the database. Any employee
-enrols new clients and verifies any client: clients belong to the company, not to the
-employee who enrolled them (`enrolled_by` is recorded, never used to block). Every
-enrolment, re-enrolment, deletion and restore, and every refused attempt, is written to
-the audit log with the employee; the owner reads it after login.
-"""
+"""Encrypted per-vault SQLite store using whole-file AES-256-GCM and scrypt key slots."""
 import base64
 import hashlib
 import json
@@ -913,22 +875,11 @@ class DatabaseManager:
     def save_client(self, user_id: str, display_name: str, employee_id: int, *,
                     spatial_embeddings, spatial_origin, temporal_embeddings,
                     model_version: str, capture_device: dict = None) -> None:
-        """
-        Enroll or re-enroll a client in ONE transaction, logged with the employee.
+        """Enroll or re-enroll a client in one transaction.
 
-          spatial_embeddings: replace the `spatial_origin` set ("scan" or "render");
-                              None or [] leaves every spatial set untouched.
-          temporal_embeddings: None keeps the stored pen set as it is (source and
-                              model_version untouched); [] removes it; a list replaces it.
-          capture_device:     {"device_model", "os", ...} of the tablet the pen set was
-                              signed on, stored with the new pen set.
-
-        Any employee enrols a new client or adds a set the client does not have yet.
-        Replacing or removing a set the client already holds, or changing the display
-        name, is a re-enrolment: admin only (PermissionError, and the refused attempt is
-        logged; a non-admin's differently-cased name is simply not applied). Every change
-        is logged. A row with no owner (made by add_references) is treated as new: its
-        templates are dropped first, so nobody inherits sets they never enrolled.
+        spatial_embeddings replaces the spatial_origin set if non-empty; temporal_embeddings=None
+        keeps the existing pen set, [] clears it, and a list replaces it. Replacing/removing an
+        existing set or renaming display_name requires an admin.
         """
         self._check_user(user_id)
         if not model_version:
@@ -1163,19 +1114,7 @@ class DatabaseManager:
 
     def add_confirmed_reference(self, user_id: str, modality: str, embedding, model_version: str,
                                 spatial_origin: str = None, max_per_set: int = MAX_REFERENCES) -> None:
-        """
-        Append a confirmed signing to an existing client's references.
-
-        CALLER'S RESPONSIBILITY (the database cannot check this): call only after a
-        verification with decision == "Genuine", degraded == False AND the employee's
-        confirmation. Never add a rejected, degraded or unconfirmed signing.
-
-        Keeps at most `max_per_set` templates per (user, modality, origin) set by
-        dropping the oldest *added* templates first; enrolled templates are never dropped.
-        Insert and trim are one transaction: both or neither.
-        Raises LookupError when the client has no such set, and ValueError when any row of
-        the set was made by other weights than `model_version` (a stale set takes no rows).
-        """
+        """Append a confirmed Genuine, non-degraded signing and trim oldest added rows past max_per_set."""
         self._check_user(user_id)
         self._check_modality(modality, spatial_origin)
         if not model_version:
@@ -1209,12 +1148,7 @@ class DatabaseManager:
                     (user_id, modality, spatial_origin, excess))
 
     def purge_expired(self, employee_id: int) -> None:
-        """
-        ISO/IEC 24745: delete every reference set past expiry_of() its enrolment date, and a
-        signer left with no set. One audit row per signer, logged under `employee_id` (the
-        login that ran the purge). A set's date is its first enrolled row, as _fetch_set reads
-        it, so added references never renew it. Writes the vault only when something expired.
-        """
+        """Delete reference sets past expiry_of() their initial enrolment date (ISO/IEC 24745)."""
         now = datetime.now()
         with self._read() as conn:
             firsts = conn.execute(
@@ -1401,27 +1335,7 @@ class DatabaseManager:
         return dest_path
 
     def restore_from(self, actor_id, backup_path: str, username: str, password: str, company: str = None) -> dict:
-        """
-        Replace this vault with a backup. If this vault has employees, only its logged-in
-        active admin (`actor_id`) may do it (PermissionError). The backup is read once and
-        checked in memory only: `username` / `password` is an employee of the backup whose
-        key slot opens it, its body decrypts and authenticates, it holds no trigger, no view
-        and no table this app does not create, it is a sound database of the schema this
-        code reads (an older one is refused), and that employee is an ADMIN of the backup.
-        With `company`, a backup that records another company name is refused ("This backup
-        belongs to vault ..."); one with no name recorded is allowed.
-        Then the live file is copied byte for byte to `<name>.before-restore-<YYYYmmdd-HHMMSS>`
-        beside it (owner-only, encrypted like any backup). Every live audit row the backup
-        does not hold (compared by content, not by time, so a row from the backup's last
-        second or after the clock stepped back is kept) is added to the backup's body in live
-        order, with employee_id NULL and the employee's username as employee_label, so a
-        restore never erases the log. Then a "restore" row (who, which file, how many rows
-        were carried, the safety copy's name) is added, and only then is the live file
-        replaced, atomically. Any failure before that leaves the live file byte-identical.
-        Afterwards the store is open with the backup's key. Returns that admin's employee dict.
-        Raises ValueError (not a usable backup, another company's), PermissionError (not an
-        admin, wrong password).
-        """
+        """Verify and restore an encrypted backup over this vault, preserving newer live audit rows."""
         live_admin = None
         if self.has_employees():
             try:

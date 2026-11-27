@@ -45,18 +45,7 @@ def _blank_image():
 
 
 def _valid_trajectory(length=50, seed=1):
-    """
-    A gate-passing trajectory of whatever width the shipped contract declares.
-
-    Built from `TEMPORAL_INPUT_FEATURES` rather than a literal so that flipping
-    `TEMPORAL_CHANNELS` in `config/settings.py` — the single knob selecting
-    3 (`xyp`), 4 (`dt`) or 5 (`tilt`) channels — moves the whole suite with it.
-    A checkpoint trained under any of those settings stays reproducible without
-    anyone editing a test.
-
-    X/Y are z-scored per signature; every trailing channel (P, dt, ...) is a
-    physical quantity the parsers have already scaled onto [0, 1].
-    """
+    """Gate-passing `[length, TEMPORAL_INPUT_FEATURES]` trajectory following `TEMPORAL_CHANNELS`."""
     rng = np.random.default_rng(seed)
     columns = [rng.standard_normal((length, 2)),
                rng.uniform(0.0, 1.0, size=(length, 1))]
@@ -125,7 +114,7 @@ class TestEmbeddingBytes:
         assert len(embedding_to_bytes(np.zeros(128, dtype=np.float32))) == 512
 
     def test_round_trip_is_exact(self):
-        """Serialization must be lossless — a drifted embedding is a wrong identity."""
+        """Serialization must be lossless."""
         original = np.random.default_rng(0).standard_normal(512).astype(np.float32)
         assert np.array_equal(bytes_to_embedding(embedding_to_bytes(original)), original)
 
@@ -134,7 +123,7 @@ class TestEmbeddingBytes:
         assert len(embedding_to_bytes(torch.zeros(512))) == 2048
 
     def test_decoded_embedding_is_writable(self):
-        """np.frombuffer aliases read-only memory — callers must get a real array."""
+        """Decoded embeddings must be writable copies, not read-only buffer views."""
         decoded = bytes_to_embedding(embedding_to_bytes(np.zeros(128, dtype=np.float32)))
         decoded[0] = 1.0  # must not raise
 
@@ -171,8 +160,7 @@ class TestEmbed:
         os.unlink(path)
 
     def test_temporal_embed_from_array(self):
-        # Not a literal 3 — same reason as test_temporal_round_trip above: the
-        # constructor's default width now follows TEMPORAL_INPUT_FEATURES.
+        # Width follows TEMPORAL_INPUT_FEATURES.
         trajectory = np.random.default_rng(0).standard_normal(
             (60, TEMPORAL_INPUT_FEATURES)).astype(np.float32)
         embedding = embed(TemporalSiamese(embedding_dim=128).eval(), trajectory, "temporal")
@@ -202,10 +190,7 @@ class TestVerify:
         return model, references, path
 
     def _temporal_setup(self):
-        # Width follows `TEMPORAL_CHANNELS`, so this fixture keeps working across
-        # a 3 -> 4 -> 5 channel change without being rewritten. Pressure and the
-        # trailing channels are in [0, 1] — they are scaled by a fixed device
-        # maximum, not z-scored like X/Y.
+        # Width follows TEMPORAL_CHANNELS; trailing channels (P, dt, etc.) are scaled in [0, 1].
         model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
                                 embedding_dim=128).eval()
         trajectory = _valid_trajectory()
@@ -213,12 +198,7 @@ class TestVerify:
         return model, references, trajectory
 
     def test_unnormalized_trajectory_raises_instead_of_scoring(self):
-        """
-        The defect this gate exists for: raw device units used to produce a
-        confident *wrong* verdict, not an error. Measured on real data — one
-        writer's own signature scored 0.9370 normalized and 0.4888 in tablet
-        units, so the system rejected a genuine user and said nothing was amiss.
-        """
+        """Raw device units must fail `trajectory_gate` rather than silently mis-scoring."""
         model, references, trajectory = self._temporal_setup()
         raw = trajectory.copy()
         raw[:, 0] = raw[:, 0] * 1200 + 8000
@@ -304,17 +284,7 @@ class TestVerify:
             assert (result["decision"] == "Genuine") == (result["confidence"] / 100 >= expected)
 
     def test_failed_quality_gate_drops_the_spatial_branch(self):
-        """
-        A probe that fails the quality gate must be excluded from fusion, not
-        merely flagged.
-
-        This assertion was inverted deliberately: it previously required the
-        gate-failing image to keep contributing to a `multimodal` verdict, which
-        let a blurry or undersized capture carry the same weight as a clean one
-        and flip the decision. The README's Capture Contract says the gate
-        rejects such an image, so the route must collapse to the modality that
-        still has evidence.
-        """
+        """A quality-gate failure drops the spatial branch from fusion rather than weighting it."""
         smodel, srefs, good_path = self._spatial_setup()
         tmodel, trefs, traj = self._temporal_setup()
         bad_path = _blank_image()
@@ -369,14 +339,7 @@ class TestVerify:
         os.unlink(path)
 
     def test_empty_reference_list_names_the_real_problem(self):
-        """
-        An identity with no enrolled templates used to surface as numpy's
-        "need at least one array to concatenate", raised from inside
-        `np.vstack` — a message about numpy's argument, not about the caller's
-        empty enrolment. `SignatureService.verify()` truthy-checks its reference
-        lists, so only the free function is exposed, and a GUI holding an empty
-        row is exactly the caller that reaches it.
-        """
+        """Empty reference list raises a clear enrollment error instead of an internal numpy failure."""
         model, _, path = self._spatial_setup()
 
         with pytest.raises(ValueError, match="empty reference list"):
@@ -408,13 +371,7 @@ class TestProbeEmbeddingsForTheReplayCheck:
 
 
 class TestSeveralSignings:
-    """
-    `VERIFICATION_SIGNINGS` > 1: the app asks for several signings of each kind and
-    `verify()` scores their mean. Measured 2026-10-21 on BiosecureDS2 (140 writers,
-    K = 5, references from one session): two signings took the pen EER from 16.06% to
-    13.70% a session later and from 8.42% to 6.04% at the same sitting. At a fixed
-    threshold averaging can only lower FAR, which is why the thresholds are shared.
-    """
+    """Multiple verification probes are averaged at scoring time under a shared threshold."""
 
     def _temporal(self):
         model = TemporalSiamese(input_features=TEMPORAL_INPUT_FEATURES,
@@ -609,17 +566,7 @@ def _embedded_writer(genuine, forged):
 
 
 class TestWriterDependentClassifier:
-    """
-    A per-user decision boundary instead of one global distance threshold.
-
-    This is the stage published systems have and this project did not. On the
-    same features, SigNet-F reports 1.78% EER with a global threshold against
-    0.4% with per-user thresholds, and every "99%+ on CEDAR" result in the
-    literature is writer-dependent.
-
-    The classifier lives entirely downstream of the Siamese encoder — it reads
-    embeddings and never touches the model.
-    """
+    """Per-user linear boundary operating downstream on Siamese embeddings."""
 
     def test_separates_a_writer_from_random_others(self):
         rng = np.random.default_rng(0)
@@ -632,17 +579,7 @@ class TestWriterDependentClassifier:
         assert classifier.decision_function(negatives).max() < 0
 
     def test_writers_own_forgeries_do_not_affect_the_fitted_boundary(self):
-        """
-        Skilled forgeries of the enrolled user are the attack being measured, so
-        fitting on them leaks the evaluation — and the deployed system never
-        holds a labelled forgery of a real customer, so a result that needed
-        them could not ship.
-
-        Tested by moving the forgeries somewhere completely different and
-        asserting the *genuine* probe scores do not budge. Those scores depend
-        only on the fitted boundary, so if a forgery had entered the fit as a
-        negative the boundary would shift and they would change.
-        """
+        """Verify skilled forgeries of the target writer never enter boundary fitting."""
         rng = np.random.default_rng(1)
         w1_genuine = rng.normal(0.0, 0.05, size=(9, 4)).astype(np.float32)
         w2 = _embedded_writer(rng.normal(9.0, 0.05, (9, 4)),
@@ -708,17 +645,7 @@ class TestWriterDependentClassifier:
 
 
 class TestThresholdFollowsRouting:
-    """
-    A branch dropped by its own gate must not change the surviving branch's verdict.
-
-    `verify()` used to pick the decision threshold from *which arguments were
-    passed*, before either gate ran. So a probe that ended up scored
-    `spatial_only` was compared against the fused threshold (0.8196) whenever a
-    temporal probe had merely been offered and rejected, instead of against
-    SPATIAL_DECISION_THRESHOLD (0.6299). The fused bar is the highest of the
-    three, so the error only ever pushed toward `Forged`: a genuine signer whose
-    tablet timed out was rejected where the same image alone was accepted.
-    """
+    """Decision threshold matches active routing mode rather than unvalidated input arguments."""
 
     def _spatial_at_score(self, target_score):
         """A spatial setup whose nearest-reference score is exactly `target_score`."""
@@ -731,7 +658,7 @@ class TestThresholdFollowsRouting:
         return model, [probe + offset], path
 
     def _rejected_trajectory(self):
-        """Raw tablet units — passes nothing, so the temporal branch is dropped."""
+        """Raw tablet units rejected by the temporal gate."""
         raw = _valid_trajectory()
         raw[:, 0] = raw[:, 0] * 1200 + 8000     # back into raw tablet units
         raw[:, 1] = raw[:, 1] * 1200 + 6000
@@ -796,16 +723,7 @@ class TestShippedChannelContract:
 
 
 class TestSpatialArrayInputsAreCanonicalized:
-    """
-    An array reaching the spatial branch must be treated like the path it stands
-    in for.
-
-    `SpatialSiamese` pools adaptively, so a wrong-sized, un-inverted uint8 scan
-    produces a perfectly plausible 512-d embedding and raises nothing — and
-    enrolment writes that template to the database. Polarity inversion alone is
-    recorded as worth 4.86% -> 0.00% EER on CEDAR, so the failure is silent and
-    expensive. Shape and dtype are therefore gated here rather than trusted.
-    """
+    """In-memory spatial arrays enforce canonical `[1, 155, 220]` `[0, 1]` float32 geometry."""
 
     def _model(self):
         from config.settings import SPATIAL_WEIGHTS_PATH
@@ -863,15 +781,7 @@ class TestSpatialArrayInputsAreCanonicalized:
             _as_spatial_input(np.zeros((3, 64, 64), dtype=np.float32))
 
     def test_canonical_array_carrying_nan_is_refused(self):
-        """
-        The range check cannot see a NaN: every comparison against NaN is False,
-        so `low < -1e-6 or high > 1.0 + 1e-6` was False for a poisoned array and
-        it passed straight through. `embed()` then returned a 512-d embedding of
-        NaN, which enrolment stores and which every later distance against it
-        reports as NaN — a template that can never match anything, silently.
-        `trajectory_gate` has always checked this explicitly; the spatial path
-        did not.
-        """
+        """Non-finite pixels must fail canonical array validation."""
         from config.settings import SPATIAL_INPUT_SIZE
         from src.verification import _as_spatial_input
 

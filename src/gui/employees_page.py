@@ -1,6 +1,4 @@
-"""
-employees_page.py — Admin page: employee accounts, backup and restore
-"""
+"""Admin page for employee accounts, backup, and restore."""
 
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (

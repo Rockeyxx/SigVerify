@@ -24,22 +24,13 @@ MODALITIES = [
 
 
 def threshold_for(result: dict):
-    """The threshold (0-100, same scale as the score) verify() decided against, or None.
-
-    verify() returns the threshold it applied as result["threshold"] (0-1), including under
-    step-up (STEP_UP_ACCEPT / STEP_UP_TWO), so the line on the bar is always the real one.
-    "confidence" is a similarity x 100, not a probability: it is shown as a match score
-    against this threshold, never as "% sure".
-    """
+    """Return the applied threshold on a 0-100 scale, or None."""
     threshold = result.get("threshold")
     return None if threshold is None else threshold * 100
 
 
 def visit_signings(images, trajectories) -> list:
-    """Pair a visit's signings as (image or None, trajectory or None), first signing first.
-
-    images / trajectories: one probe, a list of probes, or None when that kind was not used.
-    """
+    """Pair a visit's signings as (image or None, trajectory or None)."""
     def as_list(x):
         if x is None:
             return []
@@ -257,7 +248,7 @@ class VerificationPanel(QWidget):
             self.probeFileLabel.setText("No file selected")
 
     def capture_pen_probe(self):
-        """One signing on the tablet (issue #23, item 2). Closing the window changes nothing."""
+        """Capture one probe signature on the tablet."""
         from src.capture.collect import collect_signatures
         captured = collect_signatures(count=1, parent=self)
         if captured is None:

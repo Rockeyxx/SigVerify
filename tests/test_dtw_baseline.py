@@ -1,19 +1,4 @@
-"""
-Tests for the DTW diagnostic baseline.
-
-DTW is not shipped and not fused (AGENTS.md) — it exists to answer one
-question: is the temporal branch's SVC2004 gap a *feature* problem or an
-*alignment* problem. That makes two properties load-bearing.
-
-1. **DTW must actually warp.** A signature traced at a different speed is the
-   same signature. If the implementation does not collapse that difference to
-   zero it is measuring Euclidean distance with extra steps, and every
-   conclusion drawn from it about alignment is void.
-2. **It must be scored under the same enrollment draw as the LSTM.** The whole
-   point is a like-for-like comparison, so the reference selection has to come
-   from `enrolled_trial_scores` itself rather than a reimplementation that can
-   drift away from it.
-"""
+"""Tests for the DTW diagnostic baseline: warping invariance and enrollment scoring parity."""
 
 import numpy as np
 import pytest
@@ -26,7 +11,7 @@ from tools.research.dtw_baseline import (dtw_distance, dtw_distance_batch,
 
 
 def _stroke(length, phase=0.0):
-    """A smooth 2-channel path — stands in for a normalized (X, Y) trajectory."""
+    """Smooth 2-channel path representing a normalized `(X, Y)` trajectory."""
     t = np.linspace(0.0, 2.0 * np.pi, length)
     return np.stack([np.sin(t + phase), np.cos(t + phase)], axis=1).astype(np.float32)
 
@@ -38,10 +23,7 @@ class TestDtwDistance:
         assert dtw_distance(a, a) == pytest.approx(0.0, abs=1e-6)
 
     def test_a_time_warped_copy_is_zero(self):
-        """
-        The defining property. Holding each frame for two samples is the same
-        path drawn at half speed — DTW must warp that away entirely.
-        """
+        """Time-warped copies must produce zero DTW distance."""
         a = _stroke(40)
         slowed = np.repeat(a, 2, axis=0)
         assert dtw_distance(a, slowed) == pytest.approx(0.0, abs=1e-6)
@@ -149,7 +131,7 @@ class TestBatchedDtw:
         return pairs
 
     def test_matches_the_reference_on_ragged_pairs(self):
-        """Different (n, m) per pair — padding must not leak into the result."""
+        """Ragged `(n, m)` pairs must match unbatched results without padding leaks."""
         pairs = self._pairs()
         expected = [dtw_distance(a, b) for a, b in pairs]
         assert dtw_distance_batch(pairs).tolist() == pytest.approx(expected, rel=1e-6)
@@ -245,11 +227,7 @@ class TestTrajectoryWriters:
         assert out["svc_2"]["forged"] == []
 
     def test_samples_are_passed_through_unmodified(self):
-        """
-        `embed_samples` applies no temporal preprocessing — the parsers already
-        normalized. DTW must see exactly those arrays, or it is not measuring
-        the same input as the LSTM.
-        """
+        """Default transform passes normalized trajectories through unmodified."""
         samples = self._samples()
         out = trajectory_writers(samples, ["svc_1"])
         assert np.array_equal(out["svc_1"]["genuine"][0], samples["svc_1"]["genuine"][0])

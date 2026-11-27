@@ -131,10 +131,7 @@ class TestSpatialTrunks:
             SpatialSiamese(trunk="signet")
 
     def test_fc_hidden_inserts_one_layer_and_keeps_a_linear_output(self):
-        """
-        The FC head adds a hidden ReLU layer but must still END on a plain Linear —
-        a ReLU on the output would confine every embedding to one convex cone.
-        """
+        """An `fc_hidden` head inserts a ReLU layer before the final Linear output."""
         model = SpatialSiamese(embedding_dim=512, fc_hidden=1024)
         linears = [m for m in model.embedding if isinstance(m, torch.nn.Linear)]
         assert [l.out_features for l in linears] == [1024, 512]
@@ -147,7 +144,7 @@ class TestSpatialTrunks:
         ("wide", 1024, 512),
     ])
     def test_from_state_dict_recovers_the_architecture(self, trunk, fc_hidden, embedding_dim):
-        """A checkpoint carries its own architecture — no config lookup involved."""
+        """Checkpoints recover their own architecture from saved shapes without config."""
         original = SpatialSiamese(embedding_dim=embedding_dim, trunk=trunk,
                                   fc_hidden=fc_hidden).eval()
         restored = SpatialSiamese.from_state_dict(original.state_dict()).eval()
@@ -171,11 +168,7 @@ class TestSpatialTrunks:
             SpatialSiamese.from_state_dict(state_dict)
 
     def test_dropout_rates_do_not_move_the_parameter_shapes(self):
-        """
-        Dropout is inert at eval time, so it must not change the state_dict —
-        otherwise a checkpoint could not be reloaded without knowing the rate
-        it happened to be trained with.
-        """
+        """Dropout settings do not change `state_dict` parameter shapes."""
         dry = SpatialSiamese(trunk="wide", conv_dropout=0.0, head_dropout=0.0)
         wet = SpatialSiamese(trunk="wide", conv_dropout=0.3, head_dropout=0.5)
         assert {k: v.shape for k, v in dry.state_dict().items()} == \
@@ -214,19 +207,7 @@ class TestTemporalSiamese:
                               torch.ones(4, 30))
 
     def test_pressure_dropout_eval(self):
-        """
-        Pressure dropout must not fire under `.eval()`.
-
-        The previous version encoded the same input twice and asserted the two
-        embeddings matched. At `pressure_dropout=1.0` the substitution is
-        deterministic, so both calls agreed whether or not the `self.training`
-        gate existed: verified by deleting `and self.training` from
-        `_apply_pressure_dropout`, after which that test still passed.
-
-        Compare against a model that cannot substitute instead. Eval mode must
-        reproduce the `pressure_dropout=0.0` result exactly, and must differ from
-        what the same weights produce in training mode.
-        """
+        """Pressure dropout is disabled in `.eval()` and matches `pressure_dropout=0.0`."""
         model = TemporalSiamese(input_features=3, pressure_dropout=1.0)
         reference = TemporalSiamese(input_features=3, pressure_dropout=0.0)
         reference.load_state_dict(model.state_dict())
@@ -596,8 +577,7 @@ class TestTemporalArchitectureRecovery:
         assert restored.lstm.num_layers == 2
 
     def test_a_pre_dynamics_checkpoint_is_rejected(self):
-        # An odd LSTM input width cannot be 2 * input_features, so it predates
-        # derived dynamics and must fail loudly instead of being rounded.
+        # An odd LSTM input width cannot be 2 * input_features and must fail loudly.
         broken = TemporalSiamese(input_features=3).state_dict()
         broken["lstm.weight_ih_l0"] = broken["lstm.weight_ih_l0"][:, :5]
         with pytest.raises(ValueError, match="odd"):
@@ -605,17 +585,7 @@ class TestTemporalArchitectureRecovery:
 
 
 class TestDeriveDeltas:
-    """
-    `_add_dynamics` appends first differences to whatever it is given. That is
-    right for the 3-channel capture contract, where velocity has to be derived,
-    and wrong for the derived feature set in `src/data/features.py`, which
-    already carries dx, dy, ddx and ddy — appending deltas there makes ddx a
-    *third* derivative of raw tablet coordinates, which is amplified noise.
-
-    The width alone cannot say which case a checkpoint is: a 6-wide LSTM is
-    either 3 channels with deltas or 6 channels without. So the flag has to be
-    stored in the checkpoint, not inferred, or every load path guesses.
-    """
+    """Verify `derive_deltas_flag` in checkpoints disambiguates delta-appending vs pre-derived inputs."""
 
     def test_disabling_deltas_halves_the_lstm_input_width(self):
         with_deltas = TemporalSiamese(input_features=16)
@@ -632,18 +602,13 @@ class TestDeriveDeltas:
             assert restored.lstm.input_size == original.lstm.input_size
 
     def test_six_wide_is_not_silently_read_as_three_channels(self):
-        """
-        Without a stored flag, a 6-channel no-delta model and a 3-channel
-        with-delta model are indistinguishable and one would be scored as the
-        other — a plausible wrong number, the exact failure this contract exists
-        to prevent.
-        """
+        """Stored flag separates 6-channel no-delta models from 3-channel with-delta models."""
         no_deltas = TemporalSiamese(input_features=6, derive_deltas=False)
         restored = TemporalSiamese.from_state_dict(no_deltas.state_dict())
         assert restored.derive_deltas is False
 
     def test_a_checkpoint_without_the_flag_defaults_to_deriving(self):
-        """Every existing checkpoint predates the flag and used deltas."""
+        """Legacy checkpoints without `derive_deltas_flag` default to deriving deltas."""
         legacy = TemporalSiamese(input_features=3).state_dict()
         legacy.pop("derive_deltas_flag", None)
         restored = TemporalSiamese.from_state_dict(legacy)
@@ -677,13 +642,7 @@ class TestDeriveDeltas:
 
 
 class TestPoolingGridIsRecoverable:
-    """
-    `pool_grid` decides how much spatial detail reaches the embedding, and it was
-    a bare `self.pool_grid = 4` — unreachable from config or the CLI, so never
-    swept. Making it tunable is only safe if a checkpoint still carries its own
-    architecture, which for this parameter means recovering it from the
-    projection width: in_features = 2 (avg+max) x trunk_channels x grid^2.
-    """
+    """Recover `pool_grid` from the projection input width (`2 * trunk_channels * grid^2`)."""
 
     @pytest.mark.parametrize("grid", [2, 4, 8])
     def test_grid_round_trips_through_from_state_dict(self, grid):
@@ -701,13 +660,7 @@ class TestPoolingGridIsRecoverable:
         assert SpatialSiamese().pool_grid == 4
 
     def test_unrecoverable_width_raises_instead_of_reshaping(self):
-        """
-        A projection width that is not 2 x channels x grid^2 means the grid cannot
-        be recovered. Falling back to the default would silently score the
-        checkpoint under a different embedding geometry — a plausible wrong
-        number rather than an error, which is the failure mode `from_state_dict`
-        exists to prevent.
-        """
+        """Unrecognized projection width must raise rather than silently falling back to a default grid."""
         state = SpatialSiamese(pool_grid=4).state_dict()
         state["embedding.1.weight"] = torch.zeros(512, 8191)
         with pytest.raises(ValueError, match="grid"):
@@ -715,13 +668,7 @@ class TestPoolingGridIsRecoverable:
 
     @pytest.mark.parametrize("grid", [2, 8])
     def test_grid_round_trips_with_the_fc_hidden_head(self, grid):
-        """
-        `from_state_dict` reads the projection width off `embedding.1.weight`,
-        but the branch above it keys the FC-1024 variant on `embedding.4.weight`.
-        Index 1 exists in both head shapes — this asserts that rather than
-        leaving it to reasoning, since a wrong read here recovers the wrong grid
-        and reshapes the embedding silently.
-        """
+        """Verify `pool_grid` recovery works with both linear and `fc_hidden` heads."""
         from config.settings import SPATIAL_INPUT_SIZE
         width, height = SPATIAL_INPUT_SIZE
         original = SpatialSiamese(pool_grid=grid, fc_hidden=1024).eval()

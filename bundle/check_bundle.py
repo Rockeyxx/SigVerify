@@ -1,13 +1,4 @@
-"""Checks on the built package (issue #42), run after PyInstaller:
-
-    python bundle/check_bundle.py dist/SigVerify
-
-1. layout: the two weights, the icon, the common-password list and VERSION are where
-   config/settings.py, src/gui/app.py and src/app_version.py look.
-2. start: the shipped app runs for 30 s with --debug, offscreen, on an empty data folder,
-   without exiting and without a Traceback in debug.log. It does not catch a weight that
-   fails to load (warm-up hides that error); the layout check and the manual test cover it.
-"""
+"""Post-build checks for the PyInstaller bundle: `python bundle/check_bundle.py dist/SigVerify`."""
 
 import os
 import subprocess

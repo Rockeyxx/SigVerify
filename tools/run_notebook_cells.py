@@ -1,13 +1,4 @@
-"""Execute the notebook's code cells headlessly, to regenerate results/ plots.
-
-Lives in the repo rather than a scratch directory so it survives session
-restarts. Skips cell 0 (the Colab clone/install) and every markdown cell.
-
-Everything runs under a `__main__` guard. Without it, merely *importing* this
-module executed the whole notebook — a full spatial evaluation over the real
-dataset — so any dead-code scanner, IDE indexer or `pytest --collect-only`
-that touched the file kicked off a training-scale run.
-"""
+"""Execute the notebook's code cells headlessly to regenerate `results/` plots (skips cell 0)."""
 import json, sys, matplotlib
 
 

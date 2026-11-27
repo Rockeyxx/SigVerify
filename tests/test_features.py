@@ -1,25 +1,4 @@
-"""
-Tests for the derived time functions.
-
-The temporal branch feeds the LSTM six channels: (X, Y, P) plus first-order
-deltas. Every competitive online-verification system feeds a derived kinematic
-set instead — TA-RNN 23 time functions, DsDTW 12 — and all of them are
-computable from the three channels the capture contract already allows
-(AGENTS.md permits derived features; it bans widening the *captured* contract).
-
-Three properties are load-bearing here.
-
-1. **Length is preserved.** `collate_temporal_pairs` pads to the batch maximum
-   and `pack_padded_sequence` trims by the recorded length. A derivation that
-   dropped or added a frame would desynchronize those two and corrupt every
-   padded batch silently.
-2. **Nothing is NaN or infinite.** Curvature is a ratio and log-curvature takes
-   a logarithm of it, so a stationary pen — a dot, a pause, a repeated sample —
-   divides by zero. Real signatures contain all three.
-3. **The first three channels stay (X, Y, P).** `trajectory_gate` bounds-checks
-   z-scored X/Y at indices 0 and 1. A reordering would disable the gate without
-   failing anything.
-"""
+"""Tests for derived temporal time functions: length preservation, finiteness, and leading `(X, Y, P)` order."""
 
 import numpy as np
 import pytest
@@ -28,7 +7,7 @@ from src.data.features import NUM_DERIVED_CHANNELS, derive_time_functions
 
 
 def _signature(length=120, seed=0):
-    """A looping path with varying speed — stands in for a normalized trajectory."""
+    """Looping path with varying speed representing a normalized trajectory."""
     rng = np.random.default_rng(seed)
     t = np.linspace(0, 4 * np.pi, length)
     xy = np.stack([np.sin(t) + 0.3 * np.sin(3 * t), np.cos(t)], axis=1)
@@ -85,16 +64,7 @@ class TestDeriveTimeFunctions:
         assert np.array_equal(derive_time_functions(sig), derive_time_functions(sig))
 
     def test_translation_leaves_the_derived_channels_alone(self):
-        """
-        Derivatives cannot see an offset, so the derived block carries dynamics
-        rather than placement.
-
-        Tolerance is float32-sized, not exact. Adding an offset to a z-scored
-        coordinate spends mantissa bits before any differencing happens, and
-        `log(v / |dtheta|)` amplifies what is left — classic cancellation. It
-        does not bite in practice because `normalize_trajectory` centres X and
-        Y at zero, so a large offset never reaches this function.
-        """
+        """Constant `(X, Y)` translations leave derived kinematic channels unchanged within float32 tolerance."""
         sig = _signature()
         shifted = sig.copy()
         shifted[:, :2] += 3.0

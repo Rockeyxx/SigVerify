@@ -1,7 +1,4 @@
-"""Verify signature images using the spatial branch model.
-
-Runs probe images against reference signatures using the standard verification pipeline.
-"""
+"""Verify signature images using the spatial branch model."""
 import argparse
 import os
 import shutil
@@ -29,8 +26,7 @@ def dump_model_input(path, destination):
 
 
 def crop_to_ink(path, destination):
-    """Crop a phone photo exactly as the app does (src/gui/image_cleanup.crop_to_ink, which
-    uses ink_crop) and move the result to destination, so the tool scores what the app scores."""
+    """Crop a phone photo via app_crop_to_ink and save to destination."""
     shutil.move(app_crop_to_ink(path), destination)  # skylos: ignore[SKY-D215] operator-supplied --crop-dir
     print(f"  cropped {os.path.basename(path)} -> {destination}")
     return destination
@@ -95,16 +91,12 @@ def main():
         print(f"  NOTE: the reported accuracy assumes "
               f"{NUM_ENROLLMENT_REFERENCES} references. With fewer, "
               "expect worse — this is the harder pair-scoring regime.")
-    # This script is spatial-only, so verify() decides against the spatial
-    # threshold. Printing the fused one showed a negative margin beside a
-    # "Genuine" verdict for any score between the two (0.6299 to 0.8196).
     print(f"Threshold t = {SPATIAL_DECISION_THRESHOLD:.4f}\n")
 
     stacked = np.vstack(reference_embeddings)
     for path in args.probes:
         result = verify(spatial=(model, reference_embeddings, path), device=args.device)
-        # Recomputed here only so the raw numbers can be shown; verify() already
-        # did this internally to reach its decision.
+        # Recompute distance locally to print raw score and threshold margin.
         distance = float(np.linalg.norm(
             stacked - embed(model, path, "spatial", args.device)[None, :], axis=1).min())
         score = similarity_from_distance(distance)

@@ -1,50 +1,4 @@
-"""
-storage.py - persistent data layer for the GUI (SQLite + AES-256-GCM).
-
-All reads/writes to persistent data go through this file ONLY.
-
-Companies: Register creates a COMPANY, with its own folder, encrypted database, data key,
-admin (the person registering), employees and clients. Companies cannot read each other's
-data. Pick one with open_company() (or create_company() / restore_company()); every other
-function works on that current company. With no company chosen they raise
-StorageLockedError("Choose a vault first."). logout() keeps the company chosen.
-
-Inside a company, everything lives in one SQLite database managed by
-src.database.db_manager.DatabaseManager, encrypted as a whole file:
-
-  * at rest, the file is AES-256-GCM ciphertext behind a small plaintext header that holds
-    only each member's User ID and wrapped key slot. A copied file reveals those User IDs
-    and the format, nothing else, and a changed byte makes it refuse to open.
-  * login: an employee's password unwraps their own copy of the data key (one key slot
-    per employee). Nothing that opens the data is on disk: no key file, no password, no
-    password hash. Until a login, nothing but the header can be read.
-  * in use, the database lives in memory; every save rewrites the whole encrypted file
-    atomically (no half-written or wiped files, no plaintext on disk)
-  * signature embeddings (spatial 512-d, temporal 128-d) are also encrypted one by one,
-    bound to the owning client with associated data
-  * one app instance per company: a second one is refused at login
-
-Clients belong to their company. Any logged-in employee of it finds, enrols and verifies
-any of its clients. On a lookup, `employee_username` only narrows the list to the clients
-that employee enrolled ("my clients"); pass None for the whole list. A write is always
-done, and logged, as the LOGGED-IN employee: the username a write is given must be
-theirs, or it is refused. Only the admin (who registered the company) adds employees,
-resets a password, removes an employee, deletes a client, replaces a set a client already
-holds, or changes a client's name; a refused attempt is logged too. Each employee edits only their own
-profile, and a new password needs the current one.
-
-Where the data lives (never relative to the working directory):
-  ~/.sigverify/companies/<slug>/signatures.db   (override ~/.sigverify with SIGVER_HOME)
-  ~/.sigverify/companies/<slug>/company.txt     the company name as typed (not secret: the
-                                                login screen lists it)
-<slug> is the name case-folded, every run of characters other than letters and digits
-(of any script) made one "-"; a Windows device name (con, nul, com1, ...) is refused.
-SIGVER_DB_PASSPHRASE unlocks without a login, for tests and CI only. A plaintext database
-made by an older version of the app is refused; clients enrol again.
-
-Only embeddings are stored: never an image, an image path or a pen trajectory. The
-View button works only for photos picked in the current session.
-"""
+"""GUI persistence layer: per-company encrypted SQLite vaults under ~/.sigverify/companies/<slug>/."""
 
 import base64
 import binascii
@@ -68,7 +22,7 @@ from src.database.db_manager import (
     DatabaseManager,
     VaultFileError,
     VaultInUseError,
-    probe_fingerprint,  # noqa: F401 — re-exported: the GUI hashes verify()'s probe_embeddings
+    probe_fingerprint,  # noqa: F401 (re-exported for GUI replay checks)
 )
 
 MODEL_VERSION = _settings.MODEL_VERSION
@@ -526,20 +480,7 @@ def _decode_embeddings(values, what: str) -> list:
 def save_client_enrollment(client_id: str, dynamic_refs, employee_username: str, *,
                            spatial_embeddings: list = None, spatial_origin: str = "scan",
                            capture_device: dict = None) -> tuple:
-    """
-    spatial_embeddings: base64 float32 vectors (512 values each). They replace the
-        `spatial_origin` set ("scan" or "render"); None or [] leaves every spatial set as it was.
-    dynamic_refs: base64 float32 pen vectors (128 values each). None keeps the stored pen
-        set exactly as it is (do this when no new pen signatures were captured); [] removes
-        it; a list replaces it.
-    capture_device: what collect_signatures() returned about the tablet ("device_model",
-        "os", ...), stored with a new pen set so verification can insist on the same tablet.
-
-    Any employee enrols a new client or adds a set the client lacks. Replacing or removing
-    a set the client already has is a re-enrolment, for the admin only. One transaction,
-    written to the audit log with the employee.
-    Returns (success: bool, message: str).
-    """
+    """Save or replace a client's base64 embeddings and capture metadata; returns (ok, message)."""
     key = _norm(client_id or "")
     if not key:
         return False, "Signer ID is required"
@@ -718,16 +659,7 @@ def _expired_message(what: str, found: dict) -> str:
 
 def check_references(client_id: str, spatial_origin: str = None, use_pen: bool = False,
                      capture_device: dict = None) -> list:
-    """
-    Reasons NOT to verify against the stored references, as messages for the employee
-    (empty list = go ahead):
-      * a set the visit uses was embedded by other weights (model_version differs from
-        MODEL_VERSION): scores against it mean nothing, the client must re-enrol it;
-      * a set the visit uses is past its retention date (expired, deleted at the next login);
-      * the pen set was signed on another tablet model or operating system than this
-        signing (capture_device): enrol and verify on the same device model (AGENTS.md).
-    A pen set stored without capture_device (enrolled before it was recorded) is not checked.
-    """
+    """Return user-facing error messages if stored references are expired, stale, or from another tablet."""
     record = get_client(client_id)
     if record is None:
         return []
@@ -766,19 +698,7 @@ def check_references(client_id: str, spatial_origin: str = None, use_pen: bool =
 
 def add_confirmed_reference(client_id: str, embedding_b64: str, employee_username: str,
                             modality: str = "spatial", spatial_origin: str = "scan") -> bool:
-    """Append one confirmed signing's embedding to the client's references.
-
-    modality "spatial" (paper, 512 values) or "temporal" (pen, 128 values).
-    spatial_origin: where the spatial signing came FROM: "scan" (a paper photo or scan,
-        every spatial probe the app makes today) or "render" (drawn from a pen signing).
-        It goes into that set only, never the client's other one (a render scored against
-        scans is worse than chance); False if the client has no such set.
-    Call it only when decision == "Genuine", degraded is False, and the employee
-    confirmed the person's identity (AGENTS.md). Stores the embedding only,
-    encrypted. When the cap (MAX_REFERENCES) is reached the OLDEST ADDED signing is
-    dropped; the enrolled references are never dropped. Any logged-in employee can add
-    to any client.
-    """
+    """Append a confirmed Genuine, non-degraded embedding to the matching set up to MAX_REFERENCES."""
     if modality not in ("spatial", "temporal"):
         raise ValueError(f"modality must be 'spatial' or 'temporal', got {modality!r}")
     if modality == "spatial" and spatial_origin not in ("scan", "render"):

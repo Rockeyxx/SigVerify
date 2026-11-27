@@ -1,14 +1,4 @@
-"""Entry point of the packaged app (issue #42).
-
-    SigVerify            starts the app
-    SigVerify --debug    also shows every error (a console window on Windows) and saves it to
-                         debug.log in the data folder, so a failed start can be seen and sent
-    SigVerify --self-test KIT    runs the whole-system test on a test kit (tools/make_test_kit.py)
-                                 and writes SigVerify-test-results.txt into it (issue #43)
-
-The Windows package has no console, so without --debug an error has nowhere to go. The CI
-start check runs the shipped app with --debug and reads debug.log.
-"""
+"""Entry point for the packaged app: supports --debug (console + debug.log) and --self-test KIT."""
 
 import os
 import sys

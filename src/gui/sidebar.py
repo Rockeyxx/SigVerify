@@ -1,6 +1,4 @@
-"""
-sidebar.py — Collapsible persistent left sidebar
-"""
+"""Collapsible persistent left navigation sidebar."""
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
@@ -29,7 +27,7 @@ class Sidebar(QWidget):
         self.main_layout.setContentsMargins(10, 16, 10, 16)
         self.main_layout.setSpacing(6)
 
-        # زر الطي/الفتح دائمًا ظاهر
+        # Collapse toggle button stays visible.
         toggle_row = QHBoxLayout()
         self.toggleButton = QPushButton("☰")
         self.toggleButton.setFixedWidth(32)
@@ -41,7 +39,7 @@ class Sidebar(QWidget):
 
         self.main_layout.addSpacing(10)
 
-        # العناصر اللي تختفي وقت الطي
+        # Hidden when collapsed.
         self.employeeNameLabel = QLabel("—")
         self.employeeNameLabel.setProperty("role", "sidebar-name")
         self.main_layout.addWidget(self.employeeNameLabel)
@@ -76,7 +74,7 @@ class Sidebar(QWidget):
         self.setLayout(self.main_layout)
         self.setFixedWidth(self.EXPANDED_WIDTH)
 
-        # كل العناصر اللي تختفي وقت الطي (ما عدا زر التوجل نفسه)
+        # Widgets hidden when collapsed (excluding the toggle button).
         self.collapsible_widgets = [
             self.employeeNameLabel, self.employeeUsernameLabel, self.companyLabel,
             self.logoutButton

@@ -1,8 +1,4 @@
-"""Benchmark suite for signature verification models.
-
-Evaluates embedding representation quality and discrimination metrics
-(EER, Cohen's d, separation margin) across held-out test writer partitions.
-"""
+"""Benchmark held-out EER, Cohen's d, and margin separation across trained checkpoints."""
 
 
 import argparse
@@ -32,17 +28,7 @@ from src.data.dataset import check_split_against_record, pin_holdout, writer_ind
 
 
 def cohens_d(impostor_distances, genuine_distances):
-    """
-    Effect size between the impostor and genuine distance distributions.
-
-    d = (mean(impostor) - mean(genuine)) / pooled_std, pooled across BOTH arms
-    (not just genuine) — a wide impostor arm should read as less separated
-    even if its mean is just as far from genuine, because more of it overlaps.
-
-    Returns NaN if either arm is empty (nothing to compare). Constant-valued
-    arms give a zero pooled std; that is guarded against as a divide-by-zero,
-    not surfaced as NaN, since the means may still be cleanly separated.
-    """
+    """Pooled-variance Cohen's d between impostor and genuine distances (NaN if either arm is empty)."""
     impostor = np.asarray(impostor_distances, dtype=float)
     genuine = np.asarray(genuine_distances, dtype=float)
     if impostor.size == 0 or genuine.size == 0:
@@ -53,24 +39,13 @@ def cohens_d(impostor_distances, genuine_distances):
     var2 = genuine.var(ddof=1) if n2 > 1 else 0.0
     dof = n1 + n2 - 2
     pooled_var = ((n1 - 1) * var1 + (n2 - 1) * var2) / dof if dof > 0 else 0.0
-    # Epsilon floor instead of a raw division: keeps the sign and magnitude
-    # meaningful for near-constant arms rather than producing inf/nan.
     pooled_std = max(np.sqrt(pooled_var), 1e-12)
 
     return float((impostor.mean() - genuine.mean()) / pooled_std)
 
 
 def separation_report(scores, labels, margin=CONTRASTIVE_MARGIN):
-    """
-    Bundle the threshold-independent separation diagnostics for one score set.
-
-    `scores` are similarities S = 1/(1+d); this inverts that mapping (d = 1/S
-    - 1) so genuine/impostor distances are directly comparable to `margin`,
-    the same quantity the contrastive loss optimizes against.
-
-    Returns a dict with: eer, threshold, cohens_d, genuine_mean_distance,
-    impostor_mean_distance, impostors_inside_margin, num_genuine, num_impostor.
-    """
+    """Compute EER, threshold, Cohen's d, mean distances, and margin violations from similarities."""
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels)
 
@@ -79,9 +54,7 @@ def separation_report(scores, labels, margin=CONTRASTIVE_MARGIN):
     genuine_d = 1.0 / genuine_scores - 1.0
     impostor_d = 1.0 / impostor_scores - 1.0
 
-    # A degenerate (single-class) split can't define an ROC curve — sklearn
-    # only warns and returns garbage in that case, so skip it explicitly
-    # rather than let a downstream nanargmin blow up mid-benchmark.
+    # Skip ROC on single-class splits to avoid undefined threshold warnings.
     if genuine_scores.size and impostor_scores.size:
         eer, threshold = compute_eer(genuine_scores, impostor_scores)
     else:
@@ -100,15 +73,7 @@ def separation_report(scores, labels, margin=CONTRASTIVE_MARGIN):
 
 
 def _limit_pairs(loader, limit_pairs, seed):
-    """
-    Subsample a shuffle-free loader down to `limit_pairs` pairs.
-
-    Lets the CLI reproduce a fixed measurement (e.g. 800 pairs) without
-    scoring the full held-out split every time. Sampling uses a fixed-seed
-    RNG so the subsample — and therefore the reported EER/Cohen's d — is
-    reproducible run to run. Reuses `torch.utils.data.Subset` rather than
-    touching the pairing logic in `src.data.dataset`.
-    """
+    """Deterministically subsample a shuffle-free DataLoader to limit_pairs items."""
     if limit_pairs is None or limit_pairs >= len(loader.dataset):
         return loader
 
@@ -239,18 +204,7 @@ def parse_args(argv=None):
 
 
 def select_test_writers(requested, train_ids, val_ids, test_ids):
-    """
-    Narrow the held-out split to an explicit writer list.
-
-    Two temporal models trained on different dataset lists get different splits,
-    because the partition is derived from whichever writers were loaded. Their
-    reported EERs are then not comparable — SVC2004 scored 29.62% on one run's
-    10 test writers and 16.92% on another's 13, and only 5 writers were common
-    to both. This exists to score both models on those 5.
-
-    A requested writer that this run trained on is a hard error, not a warning.
-    Reporting a leaked number as a comparison is the failure being prevented.
-    """
+    """Filter requested writers to held-out IDs, raising if any belong to train_ids."""
     requested = list(dict.fromkeys(requested))
     known = set(train_ids) | set(val_ids) | set(test_ids)
 
@@ -269,12 +223,7 @@ def select_test_writers(requested, train_ids, val_ids, test_ids):
 
 
 def apply_derived_features(writer_samples):
-    """Replace every trajectory with its 16 z-scored time functions in place.
-
-    Applied once before training to avoid recomputing filtering per epoch.
-    Note: Derived time functions improve discrimination on practiced signature
-    corpora, but can degrade performance when signatures lack consistent dynamic patterns.
-    """
+    """Replace each trajectory in writer_samples with its 16 z-scored time functions."""
     from tools.research.dtw_baseline import standardized_time_functions
 
     for record in writer_samples.values():
@@ -287,26 +236,19 @@ def apply_derived_features(writer_samples):
 def main(argv=None):
     args = parse_args(argv)
 
-    # GPU may be busy with a training run; CUDA_VISIBLE_DEVICES="" forces CPU
-    # from outside without needing a flag here.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Benchmark branch: {args.branch}")
     print(f"Hardware device: {device}")
 
-    # The same builder training uses, so a channel refused at train time is
-    # refused here too, rather than silently benchmarked at a different width.
     from scripts.train import build_writer_samples
     channels = getattr(args, "temporal_channels", "xyp")
     writer_samples = build_writer_samples(
         args.data_dir, None if channels == "xyp" else channels, float32_parse=args.float32_parse)
 
     if args.branch == "temporal" and args.temporal_features == "derived":
-        # Same transform, applied the same way as training. Importing it from
-        # train.py rather than duplicating it means the two can never drift.
         print("Deriving kinematic time functions to match the checkpoint's channel count")
         apply_derived_features(writer_samples)
 
-    # Re-derives the exact partition training used — same writer list, same seed.
     ratios = tuple(args.split_ratios) if args.split_ratios else (
         TEMPORAL_SPLIT_RATIOS if args.branch == "temporal" else SPATIAL_SPLIT_RATIOS)
     if args.holdout_writers:
@@ -322,7 +264,6 @@ def main(argv=None):
         test_ids = select_test_writers(args.writers, train_ids, val_ids, test_ids)
         print(f"Restricted to {len(test_ids)} explicitly requested held-out writers")
 
-    # Ensure evaluation partition matches the checkpoint's split record.
     record = check_split_against_record(args.weights, test_ids,
                                         require_same_test=not args.writers,
                                         max_gap_ms=MAX_GAP_MS,
@@ -338,11 +279,8 @@ def main(argv=None):
 
     embedded = None
     if args.enroll:
-        # Embedded once here; the per-dataset breakdown below reuses it.
         embedded = embed_writers(model, writer_samples, test_ids, args.branch, device,
                                  args.batch_size, desc=f"{args.branch} · benchmark · embedding")
-        # enrolled_scores prints the per-trial EER spread itself; main only
-        # forwards the representative draw.
         scores, labels, _ = enrolled_scores(args, writer_samples, test_ids, model, device,
                                             embedded=embedded)
     else:
@@ -361,24 +299,7 @@ def main(argv=None):
 
 def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="benchmark",
                     embedded=None):
-    """
-    Score `writer_ids` under the enrollment protocol, averaged over reference draws.
-
-    Every sample is embedded once, then each trial re-draws which K genuines act
-    as the enrolled references. That makes T trials cost one forward pass over
-    the dataset rather than T, and it is the same averaging the SVC2004
-    competition ran ("multiple sets of five genuine signatures each").
-
-    The returned (scores, labels) come from the **median-EER** trial, so the
-    downstream separation report describes a representative draw rather than a
-    lucky one. `spread` carries the EER of every trial, because the spread is
-    the interesting part: it says how much of a result is enrollment luck.
-
-    `embedded` (from embed_writers) is reused when given, so a subset of writers that
-    were already embedded is not run through the model again.
-
-    Returns: (scores, labels, spread) where spread is a numpy array of per-trial EERs.
-    """
+    """Score writer_ids across T enrollment draws and return (scores, labels, per_trial_eers) for the median draw."""
     if embedded is None:
         embedded = embed_writers(model, writer_samples, writer_ids, args.branch, device,
                                  args.batch_size, desc=f"{args.branch} · {desc} · embedding")
@@ -420,14 +341,7 @@ def enrolled_scores(args, writer_samples, writer_ids, model, device, desc="bench
 
 
 def per_dataset_report(args, writer_samples, test_ids, model, device, embedded=None):
-    """
-    Break the pooled EER down by source writer_samples.
-
-    A single averaged number is the wrong summary when the goal is one model
-    that works across capture devices and scripts: it hides a dataset the model
-    handles badly behind one it handles well. On the spatial branch a pooled
-    19% concealed CEDAR at 3.4% alongside UTSig at 36%.
-    """
+    """Print and return per-corpus metrics when test_ids span multiple datasets."""
     groups = {}
     for writer in test_ids:
         groups.setdefault(dataset_of(writer), []).append(writer)

@@ -1,11 +1,4 @@
-# src/data/__init__.py
-#
-# Nothing in the repo, the tests, or the notebook imports from this package
-# directly — every caller reaches for the submodule (`from src.data.dataset
-# import ...`). The list below is therefore documentation of the public surface
-# rather than the path anyone uses, so it is kept in step with what actually
-# ships: it previously advertised the orphaned `generate_pairs` while omitting
-# the functions every caller does use.
+# Re-exports for package discovery; callers normally import from submodules.
 from .dataset import (
     SpatialSignatureDataset,
     TemporalSignatureDataset,

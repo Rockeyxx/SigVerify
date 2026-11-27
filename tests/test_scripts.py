@@ -1,10 +1,4 @@
-"""
-End-to-end tests for the training and evaluation entry points.
-
-These run real (tiny) training loops on generated fixtures — a few writers,
-64×64 images, 2 epochs — purely to prove the wiring executes and produces
-artifacts. They are not a substitute for a real training run.
-"""
+"""Smoke tests for training and evaluation entry points using tiny synthetic fixtures."""
 
 import os
 
@@ -100,10 +94,7 @@ class TestTrainMain:
         assert not (train_ids & test_ids)
         assert not (val_ids & test_ids)
 
-        # `--temporal-channels` defaults to the shipped `dt`, but it is
-        # temporal-only: `build_writer_samples` forwards it solely to trajectory
-        # corpora. Asking CEDAR for a timing channel used to abort a valid
-        # spatial run, and this run reaching this point is that guard holding.
+        # Confirm temporal-only channel config skips spatial corpora.
         assert history["split"]
 
     def test_temporal_run_handles_variable_lengths(self, tmp_path):
@@ -129,9 +120,7 @@ class TestTrainMain:
         task1 = _make_svc_fixture(str(tmp_path / "svc2004_task1"), with_pressure=False)
         task2 = _make_svc_fixture(str(tmp_path / "svc2004_task2"), with_pressure=True)
 
-        # Pinned to xyp on both arms. Task1's four columns cannot supply `dt`, and
-        # the ablation is only meaningful if both halves see the same channels —
-        # so the shipped default is overridden here rather than compared across.
+        # Pin both arms to xyp since Task1 lacks dt and both must compare equal channels.
         common = ["--branch", "temporal", "--epochs", "1", "--batch-size", "4",
                   "--temporal-channels", "xyp",
                   "--weights-dir", weights, "--num-workers", "0", "--seed", "42"]
@@ -441,14 +430,7 @@ class TestEvaluateMain:
 
 
 class TestFusedChannelDispatch:
-    """
-    `extra_channels` is a temporal-only concept, and a fused run lists image and
-    trajectory corpora in one `--data-dir`.
-
-    `build_writer_samples` used to offer the channel to every directory, so with
-    the shipped default (`--temporal-channels dt`) the first spatial corpus
-    aborted the run: `--branch fused` was unrunnable out of the box.
-    """
+    """Fused runs apply `extra_channels` only to temporal directories, skipping spatial corpora."""
 
     def test_spatial_corpora_are_not_asked_for_a_temporal_channel(self, tmp_path):
         from scripts.train import build_writer_samples
@@ -536,11 +518,7 @@ class TestFloat32Parse:
 
 
 class TestResumeIsExact:
-    """A run stopped after epoch 1 and resumed must end with the same weights as a run
-    that never stopped. Before 2026-11-18 the checkpoint held the model, the optimizer and
-    the early-stopping counter but not the random-number state (shuffle order, dropout,
-    augmentation) or the learning-rate scheduler, so a resumed run replayed epoch 0's
-    draws and restarted the plateau count."""
+    """Resuming a stopped checkpoint matches an uninterrupted run including RNG and LR state."""
 
     @pytest.mark.parametrize("schedule", ["none", "plateau"])
     def test_a_resumed_run_ends_where_an_uninterrupted_one_does(self, tmp_path, schedule):

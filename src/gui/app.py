@@ -1,8 +1,6 @@
-"""
-Main Application — Signature Verification System
-"""
+"""Main application entry point for SigVerify."""
 
-# Must load before PyQt5 — Windows DLL search-path conflict otherwise
+# Load torch before PyQt5 to avoid Windows DLL search-path conflicts.
 import torch  # noqa: F401 (imported here only to force early DLL init)
 import cv2    # noqa: F401
 
@@ -335,9 +333,7 @@ class RegisterScreen(QWidget):
 
 
 class PageStack(QStackedWidget):
-    """The pages after login, each inside its own scroll area. A page taller or wider than the
-    window scrolls instead of forcing the window bigger, so every page is reachable on a
-    1366×768 screen (issue #23, item 25)."""
+    """Scroll-wrapped pages so small viewports (e.g. 1366x768) never force window growth."""
 
     def add_page(self, page):
         area = QScrollArea()
@@ -376,15 +372,11 @@ class MainWindow(QMainWindow):
             return
         self._build_auth_stack(first_run)
 
-        # AGENTS.md: call SignatureService.warm_up() once when the app opens, on a
-        # background thread, so the first verification does not pay the model load.
-        # Started here (not after login) and kept on self so the thread is not garbage-collected.
+        # Warm up on a background thread at launch; keep reference on self to avoid GC.
         self._warm_up_worker = WarmUpWorker()
         self._warm_up_worker.start()
 
     def closeEvent(self, event):
-        # Closing while a worker (warm-up, enrol, verify, confirm) is still running would print
-        # "QThread: Destroyed while thread is still running" or crash, so wait for all of them.
         wait_for_workers()
         super().closeEvent(event)
 

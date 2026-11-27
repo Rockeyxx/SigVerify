@@ -1,12 +1,4 @@
-"""
-Integration Facade — Signature Verification System
-
-This module provides the main application programming interface for signature
-verification and enrollment. It connects high-level application code (GUI and
-database services) with the underlying neural network models.
-
-Enrollment stores continuous embedding vectors in binary format (ISO/IEC 24745:2022).
-"""
+"""Enrollment and verification API connecting the GUI/storage layer to the Siamese models."""
 
 import os
 import threading
@@ -38,11 +30,7 @@ EMBEDDING_DTYPE = np.float32
 
 
 def load_model(branch, weights_path, device="cpu"):
-    """
-    Load a trained model checkpoint for inference.
-
-    Sets thread counts to prevent CPU contention and initializes the model in eval mode.
-    """
+    """Load a trained checkpoint in eval mode and cap CPU threads."""
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights not found: {weights_path}")
 
@@ -62,18 +50,7 @@ def load_model(branch, weights_path, device="cpu"):
 
 
 def embed(model, sample, branch, device="cpu"):
-    """
-    Generate an embedding vector from an input signature sample.
-
-    Args:
-        model: Loaded PyTorch Siamese model or ensemble wrapper.
-        sample: Image path / array for spatial, or normalized trajectory for temporal.
-        branch: Modality name ('spatial' or 'temporal').
-        device: Execution device ('cpu' or 'cuda').
-
-    Returns:
-        Numpy float32 embedding vector.
-    """
+    """Compute a float32 embedding for a spatial image or normalized trajectory."""
     if branch == "spatial":
         tensor = torch.from_numpy(_as_spatial_input(sample)).unsqueeze(0)
     elif branch == "temporal":
@@ -81,56 +58,39 @@ def embed(model, sample, branch, device="cpu"):
     else:
         raise ValueError(f"Unknown branch '{branch}' — expected 'spatial' or 'temporal'")
 
-    # Denormal floats in the CNN stall Intel CPUs: 1640 ms -> 94 ms per forward pass on Windows,
-    # embeddings identical (ENG_REPORT G37). The flag is per thread and each visit runs on a new
-    # worker thread, so it is set here, in the thread that runs the model.
+    # Denormal activations stall Intel CPUs; this flag is per thread, so set it here.
     torch.set_flush_denormal(True)
     with torch.no_grad():
         return model.encode(tensor.to(device)).squeeze(0).cpu().numpy().astype(EMBEDDING_DTYPE)
 
 
 def _as_spatial_input(sample):
-    """
-    Validate and format a spatial input sample into a [1, H, W] array.
-    Rejects raw trajectories to prevent unintended modality conversion.
-    """
     return as_spatial_input(sample, allow_trajectory=False)
 
 
 def embedding_to_bytes(embedding):
-    """Convert an embedding array or tensor to a contiguous binary bytes object."""
+    """Serialize an embedding array or tensor to float32 bytes."""
     if isinstance(embedding, torch.Tensor):
         embedding = embedding.detach().cpu().numpy()
     return np.ascontiguousarray(embedding, dtype=EMBEDDING_DTYPE).tobytes()
 
 
 def bytes_to_embedding(blob):
-    """Reconstruct a float32 numpy embedding vector from a binary byte buffer."""
+    """Deserialize float32 bytes into a numpy embedding."""
     return np.frombuffer(blob, dtype=EMBEDDING_DTYPE).copy()
 
 
 def similarity_from_distance(distance):
-    """
-    Convert Euclidean distance d into a similarity score S between 0.0 and 1.0.
-    Uses the reciprocal formula S = 1 / (1 + distance).
-    """
+    """Map Euclidean distance d to similarity S = 1 / (1 + d)."""
     return 1.0 / (1.0 + distance)
 
 
 def nearest_reference_distances(probes, references):
-    """Distance from each probe embedding [N, D] to its nearest reference [K, D], shape [N].
-
-    The one place the nearest-reference rule is written; verify(), the scripts and the
-    tools all score through it, so the production rule and the measured one cannot drift.
-    """
+    """Minimum L2 distance from each probe [N, D] to references [K, D]."""
     return np.linalg.norm(probes[:, None, :] - references[None, :, :], axis=2).min(axis=1)
 
 
 def _nearest_reference_score(references, probe_embedding):
-    """
-    Compute similarity between a probe embedding and a set of enrolled references.
-    Uses nearest-neighbor matching (minimum distance to enrolled templates).
-    """
     if references is None or len(references) == 0:
         raise ValueError(
             "Cannot score a probe against an empty reference list — this identity "
@@ -144,16 +104,11 @@ def _nearest_reference_score(references, probe_embedding):
 
 
 def _pressure_is_imputed(trajectory):
-    """Check if the trajectory uses fixed constant pressure values."""
     trajectory = np.asarray(trajectory, dtype=np.float32)
     return bool(np.allclose(trajectory[:, 2], PRESSURE_IMPUTATION_VALUE))
 
 
 def _gate_enrollment_sample(sample, modality, index):
-    """
-    Validate an enrollment sample against quality gates before storing it.
-    Prevents bad or corrupt references from entering the enrolled identity set.
-    """
     if modality == "spatial":
         passed, details = quality_gate(sample)
         fallback = "failed the quality gate"
@@ -169,20 +124,16 @@ def _gate_enrollment_sample(sample, modality, index):
 
 
 def _signings(probe, modality):
-    """One probe, or the list of signings of one kind the app collected (VERIFICATION_SIGNINGS)."""
     probes = list(probe) if isinstance(probe, (list, tuple)) else [probe]
     if not probes:
         raise ValueError(f"{modality}: a list of probes needs at least one signing.")
     return probes
 
 
-# The third decision of step-up verification (VERIFICATION_STEP_UP): the first signing was too
-# close to call, so the GUI asks for one more signing of each kind and calls verify() with both.
 SIGN_AGAIN = "Sign again"
 
 
 def _step_up_round(spatial_probes, temporal_probes):
-    """1 for the first signing of each kind, 2 for the first and the one asked for."""
     if len(spatial_probes) != len(temporal_probes):
         raise ValueError(
             "Step-up verification needs the same number of paper and tablet signings; got "
@@ -195,15 +146,7 @@ def _step_up_round(spatial_probes, temporal_probes):
 
 
 def _branch_score(model, references, probe, modality, gate, fallback, device):
-    """
-    Mean nearest-reference score over the signings, or None and the gate messages,
-    plus the probe embeddings as bytes (embedding_to_bytes, as at enrolment) for the
-    backend's replay check; [] when the branch is dropped.
-
-    If any signing fails its gate the whole branch is dropped: averaging only the
-    signings that pass would let a forger hand in one careful forgery and one
-    scribble and be scored on the forgery alone.
-    """
+    """Score one or more probes against references; drop the whole branch if any probe fails its gate."""
     probes = _signings(probe, modality)
     errors = []
     for index, sample in enumerate(probes):
@@ -220,28 +163,8 @@ def _branch_score(model, references, probe, modality, gate, fallback, device):
 
 def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_spatial=True,
            step_up=None):
-    """
-    Verify a signature probe against enrolled reference templates.
-
-    Args:
-        spatial: Optional tuple of (model, reference_embeddings, probe_image).
-        temporal: Optional tuple of (model, reference_embeddings, probe_trajectory).
-            Either probe may be a list of several signings of that kind; the branch
-            score is then their mean, and the same thresholds apply.
-        engine: Optional FusionEngine instance.
-        device: Device to run inference on.
-        auto_render_spatial: If True, renders temporal trajectory into image if spatial probe is missing.
-        step_up: Step-up verification; None reads VERIFICATION_STEP_UP. It applies to the
-            default fused decision only. One signing of each kind is accepted at
-            STEP_UP_ACCEPT, rejected below STEP_UP_REJECT, and anything between returns
-            SIGN_AGAIN; two signings of each kind are then decided at STEP_UP_TWO.
-
-    Returns:
-        Dictionary with decision, confidence score, routing mode, degraded flag,
-        reasons, the threshold the decision was taken against, and probe_embeddings:
-        {"spatial": [bytes, ...], "temporal": [bytes, ...]}, one per signing in order,
-        [] for a branch that did not run or was dropped by its gate.
-    """
+    """Verify probe(s) against enrolled references and return verdict, confidence, routing,
+    degraded flag, reasons, applied threshold, and serialized probe embeddings."""
     if auto_render_spatial and spatial is not None and temporal is not None:
         s_model, s_references, *s_probe_parts = spatial
         s_probe = s_probe_parts[0] if s_probe_parts else None
@@ -303,12 +226,9 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
     result = engine.fuse(spatial_score=spatial_score, temporal_score=temporal_score,
                          pressure_imputed=pressure_imputed)
-    # The acceptance bar applied, for the audit log. On a step-up first round it is
-    # STEP_UP_ACCEPT even when the outcome is SIGN_AGAIN or a reject below STEP_UP_REJECT.
     result["threshold"] = engine.threshold
-    # Kept in memory, never stored: the backend hashes them (db_manager.probe_fingerprint).
     result["probe_embeddings"] = probe_embeddings
-    # Below STEP_UP_ACCEPT on a first signing: the same fused score against the floor.
+    # Round-1 fused score between STEP_UP_REJECT and STEP_UP_ACCEPT requests a second signing.
     if step_up_round == 1 and result["decision"] == "Forged":
         floor = FusionEngine(alpha=ALPHA_DEFAULT, threshold=STEP_UP_REJECT)
         if floor.fuse(spatial_score=spatial_score, temporal_score=temporal_score)["decision"] == "Genuine":
@@ -329,9 +249,7 @@ def verify(spatial=None, temporal=None, engine=None, device="cpu", auto_render_s
 
 
 class TemporalEnsemble:
-    """
-    Ensemble wrapper that averages embeddings across multiple TemporalSiamese checkpoints.
-    """
+    """Averages embeddings across multiple TemporalSiamese checkpoints."""
 
     def __init__(self, models: list):
         self.models = models
@@ -345,8 +263,6 @@ class TemporalEnsemble:
 
 
 def _ensemble_paths(temporal_lstm_path=None, seeds=None):
-    """Member checkpoint paths: one per seed, in the folder of temporal_lstm_path (a file or a
-    folder), or in MODEL_WEIGHTS_DIR when no path is given."""
     from config.settings import (MODEL_WEIGHTS_DIR, TEMPORAL_ENSEMBLE_SEEDS,
                                  TEMPORAL_ENSEMBLE_TEMPLATE)
 
@@ -366,10 +282,7 @@ def load_temporal_ensemble(
     ensemble_seeds: list[int] | tuple[int, ...] | None = None,
     device: str = "cpu",
 ) -> TemporalEnsemble | None:
-    """
-    Load an ensemble of temporal checkpoints from multiple random seeds.
-    Returns None if any checkpoint file in the ensemble is missing.
-    """
+    """Load all ensemble seed checkpoints, or return None if any are missing."""
     paths = _ensemble_paths(temporal_lstm_path, ensemble_seeds)
     if not all(os.path.exists(p) for p in paths):
         return None
@@ -379,15 +292,7 @@ def load_temporal_ensemble(
 
 
 class SignatureService:
-    """
-    Main service interface for signature enrollment and verification.
-
-    Provides three operational verification modes:
-      1. unimodal: Verify using either an image probe OR a trajectory probe.
-      2. temporal-multi: Verify using a tablet trajectory by evaluating temporal
-         dynamics and auto-rendering the spatial stroke image for fusion.
-      3. multimodal: Verify using both a scanned image and a tablet trajectory.
-    """
+    """High-level enrollment and verification service for unimodal, temporal-multi, and multimodal modes."""
 
     def __init__(
         self,
@@ -403,8 +308,7 @@ class SignatureService:
         self.use_temporal_ensemble = use_temporal_ensemble
         self._spatial_model = None
         self._temporal_model = None
-        # warm_up() runs on its own thread while the user may already be verifying;
-        # without these locks both threads can find a model missing and load it twice.
+        # Guard lazy loads against concurrent warm_up() and user verify() calls.
         self._spatial_lock = threading.Lock()
         self._temporal_lock = threading.Lock()
 
@@ -426,13 +330,7 @@ class SignatureService:
             return self._temporal_model
 
     def warm_up(self) -> None:
-        """
-        Load both models and run a blank sample through each.
-
-        Call it once when the app opens, on a background thread, so the first Enter
-        pays neither the model load nor the first forward pass's kernel setup.
-        Calling it again does not reload the models.
-        """
+        """Load both models and run one blank pass to prime inference kernels."""
         width, height = SPATIAL_INPUT_SIZE
         embed(self.spatial_model, np.zeros((1, height, width), dtype=np.float32),
               "spatial", self.device)
@@ -440,7 +338,6 @@ class SignatureService:
               "temporal", self.device)
 
     def _load_temporal_ensemble(self):
-        """Load all temporal ensemble checkpoints or raise an error if any are missing."""
         paths = _ensemble_paths(self.temporal_weights)
         missing = [p for p in paths if not os.path.exists(p)]
         if missing:
@@ -591,21 +488,7 @@ class SignatureService:
         reference_temporal: list[bytes | np.ndarray] | None = None,
         reference_spatial_origin: str | None = None,
     ) -> dict:
-        """
-        Verify a signature probe against enrolled reference templates.
-
-        Args:
-            mode: Operational mode ('unimodal', 'temporal-multi', or 'multimodal').
-            probe_trajectory: Optional [L, 4] trajectory array (X, Y, P, dt), or a list
-                of them when the app asks for several signings (VERIFICATION_SIGNINGS).
-            probe_image: Optional image path or array, or a list of them.
-            reference_spatial: List of enrolled spatial reference templates.
-            reference_temporal: List of enrolled temporal reference templates.
-            reference_spatial_origin: Source type of spatial references ('scan' or 'render').
-
-        Returns:
-            Dictionary with verification decision, confidence percentage, routing, and degraded status.
-        """
+        """Verify probe(s) under 'unimodal', 'temporal-multi', or 'multimodal'."""
         ref_s = self._ensure_embeddings(reference_spatial)
         ref_t = self._ensure_embeddings(reference_temporal)
         if ref_s:

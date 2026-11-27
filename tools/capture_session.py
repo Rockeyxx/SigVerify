@@ -1,18 +1,7 @@
-"""Research capture session for the XPPen campaign (spec section 6): one volunteer, one sitting.
+"""Research capture session for the XPPen campaign: one volunteer, one sitting.
 
-Tablet: practice (never saved), then CAMPAIGN_GENUINE_PER_MODALITY genuine signatures with a
-break after CAMPAIGN_BREAK_AFTER; each is saved only after the signer approves it and the input
-gate passes. Paper: import the scanned sheets as images or a PDF (print them with --make-sheet);
-each sheet is cut into its grid of boxes, the fuller page first, in signing order. Forgery mode records a team forger's attempts at one
-volunteer. Files go to INHOUSE_DIR/<participant>/, one manifest row each. Raw streams are
-research data: keep INHOUSE_DIR on an encrypted disk, never in git or the app database.
-
-A code (or forger and victim) that already has files opens the operator menu instead: continue
-the tablet, import or review the paper, redo tablet signatures, or delete. The paper can wait:
-end after the tablet part and import it later from the menu.
-
-Run:  python tools/capture_session.py
-      python tools/capture_session.py --make-sheet sheet.png
+Supports genuine and forgery recording on tablet, scanned paper sheet import
+(--make-sheet to print), and an operator menu to resume, redo, review, or delete.
 """
 import argparse
 import csv

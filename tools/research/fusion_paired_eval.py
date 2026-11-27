@@ -1,8 +1,4 @@
-"""Late-fusion evaluation on paired multimodal signatures.
-
-Evaluates multimodal fusion performance on signatures where both scanned images
-and dynamic trajectory data are available for the same signing events.
-"""
+"""Late-fusion evaluation on paired multimodal signatures."""
 import argparse
 import collections
 import os
@@ -50,12 +46,7 @@ def _index(directory, exts):
 
 
 def build_paired_index(scripts=("Dutch", "Chinese")):
-    """
-    {writer_id: {"genuine": [(img, traj)], "forged": [(img, traj)]}}
-
-    A sample is kept only when BOTH modalities exist for that exact index, so
-    every retained probe is one real signing event seen two ways.
-    """
+    """Build `{writer_id: {"genuine": [(img, traj)], "forged": [(img, traj)]}}` for samples with both modalities."""
     paired, stats = {}, collections.Counter()
     for script in scripts:
         for label, off_dir, on_dir in (
@@ -76,14 +67,7 @@ def build_paired_index(scripts=("Dutch", "Chinese")):
 
 
 def load_paired_trajectory(path):
-    """
-    One online sample at the width the shipped temporal model expects.
-
-    `load_sigcomp2011_file` defaults to the legacy 3-channel `xyp`. Calling it
-    bare here crashed against the 4-channel `dt` weights and, before that, let
-    this tool report a fusion number for a model other than the one shipped.
-    `TEMPORAL_CHANNELS` is the single knob; nothing here may name a width.
-    """
+    """Load one SigComp2011 trajectory using `TEMPORAL_CHANNELS`."""
     extra = None if TEMPORAL_CHANNELS == "xyp" else TEMPORAL_CHANNELS
     return load_sigcomp2011_file(path, extra_channels=extra)
 
@@ -137,14 +121,7 @@ def _pool(per_writer, writers):
 
 
 def calibrated_fusion(embedded, num_references=5, repeats=25, base_seed=42):
-    """
-    Fit alpha on one set of writers, score it on a disjoint set.
-
-    `alpha_grid_search` selects the minimum of the very curve it reports, so its
-    EER is optimistically biased and cannot be quoted as a result. Here alpha is
-    chosen on calibration writers only and then applied, unchanged, to writers it
-    never saw. That is the number that survives review.
-    """
+    """Fit `alpha` on calibration writers and score on a disjoint test split."""
     rows = []
     for r in range(repeats):
         rng = np.random.default_rng(base_seed + r)
@@ -172,13 +149,7 @@ def calibrated_fusion(embedded, num_references=5, repeats=25, base_seed=42):
 
 
 def paired_scores(embedded, num_references=5, seed=42):
-    """
-    Enrollment protocol run once, with the SAME reference draw for both branches.
-
-    That shared draw is the whole point: it makes `spatial[i]` and
-    `temporal[i]` two views of one probe, so they can be fused and their errors
-    correlated. Returns four aligned arrays.
-    """
+    """Run enrollment protocol with a shared reference draw across both branches."""
     rng = np.random.default_rng(seed)
     sg, tg, si, ti = [], [], [], []
 
@@ -204,14 +175,7 @@ def paired_scores(embedded, num_references=5, seed=42):
 
 
 def error_correlation(sp_gen, sp_imp, tp_gen, tp_imp):
-    """
-    Do the two branches fail on the *same* probes?
-
-    Each branch is thresholded at its own EER point, giving a per-probe error
-    indicator. The phi coefficient between those indicators bounds what fusion
-    can deliver: near 1 means the branches are redundant and no alpha helps;
-    near 0 (or negative) means they fail independently and fusion has room.
-    """
+    """Compute per-probe error indicators and phi correlation across branches at EER."""
     out = {}
     _, sp_thr = compute_eer(sp_gen, sp_imp)
     _, tp_thr = compute_eer(tp_gen, tp_imp)

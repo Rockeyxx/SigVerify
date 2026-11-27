@@ -1,4 +1,4 @@
-"""The installer build (issue #42): weight check, runtime dependency list, --debug launcher."""
+"""Installer build checks: weight inclusion, runtime dependency list, and --debug launcher."""
 
 import ast
 import hashlib
@@ -129,7 +129,7 @@ def test_debug_flag_is_removed_before_qt_sees_it(tmp_path):
 
 
 def test_the_installer_ships_the_two_shipped_weights_and_no_ensemble():
-    """The six-seed temporal ensemble is not used (owner, 22 November 2026): never packaged."""
+    """Installer bundles only the two shipped weights without the 6-seed temporal ensemble."""
     import re
     spec = (REPO / "bundle" / "sigverify.spec").read_text()
     assert set(re.findall(r'"([\w.-]+\.pth)"', spec)) == {"spatial_cnn.pth", "temporal_lstm.pth"}

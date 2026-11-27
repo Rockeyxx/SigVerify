@@ -1,8 +1,4 @@
-"""
-password_field.py — The password field every screen uses (#58): an eye button that shows or
-hides the text, and for a new password a live rule hint and a Generate button. The rule itself
-is checked in DatabaseManager; the hint only repeats it early.
-"""
+"""Password input with visibility toggle, live rule hint, and random generator."""
 
 from PyQt5.QtCore import QPointF, Qt
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap

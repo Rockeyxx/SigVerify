@@ -1,15 +1,11 @@
-"""GUI tests without the model: routing to verify(), temp-file cleanup, messages, pen wiring.
-
-The service is replaced by a fake that records its calls, so these tests need no weights
-(issue #23, items 1, 2, 14, 15, 16).
-"""
+"""GUI tests without model weights: verify() routing, temp-file cleanup, messages, and pen wiring."""
 import base64
 import os
 import sys
 
 import numpy as np
 import pytest
-import torch  # noqa: F401 — before PyQt5: on Windows the other order fails to load c10.dll
+import torch  # noqa: F401 (import before PyQt5 to avoid Windows c10.dll load conflict)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
@@ -1249,7 +1245,7 @@ def test_employees_page_shows_last_backup_and_last_delete(app, alice_bob, tmp_pa
 
 
 
-# ------------------------------------------------------------------ small screens (issue #23, item 25)
+# Small screens layout checks
 from PyQt5.QtCore import QPoint, QRect  # noqa: E402
 
 SCREENS = [(1024, 700), (1366, 768)]

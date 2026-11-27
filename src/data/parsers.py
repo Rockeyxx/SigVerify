@@ -1,16 +1,4 @@
-"""Dataset parsers for signature verification.
-
-This module provides dataset parsers that convert signature files into a
-uniform dictionary format:
-
-    {writer_id: {"genuine": [...], "forged": [...]}}
-
-Writer IDs use prefixes (such as `cedar_7`, `bhsig_Hindi_042`, `utsig_3`, `svc_11`)
-so that writer IDs remain unique across different datasets.
-
-Offline parsers return file paths to images (loaded when needed by dataset classes).
-Online parsers return numpy float32 trajectory arrays with shape [L, C].
-"""
+"""Dataset parsers returning `{writer_id: {"genuine": [...], "forged": [...]}}`."""
 
 import csv
 import os
@@ -32,14 +20,13 @@ from config.settings import (
     UTSIG_DIR,
 )
 
-# Standard maximum pressure scale for SVC2004 digitizers.
 SVC_PRESSURE_MAX = 1023.0
-# Maximum tilt angles in tenths of a degree from digitizer hardware specifications.
 SVC_AZIMUTH_MAX = 3600.0
 SVC_ALTITUDE_MAX = 900.0
-# Maximum gap threshold in milliseconds applied to inter-sample duration deltas.
+
+
 def max_gap_ms_from_env(value, default):
-    """Parse SIGVER_MAX_GAP_MS environment override for the dt time gap limit."""
+    """Parse SIGVER_MAX_GAP_MS override in milliseconds."""
     if value is None:
         return default
     try:
@@ -53,15 +40,10 @@ def max_gap_ms_from_env(value, default):
 
 MAX_GAP_MS = max_gap_ms_from_env(os.environ.get("SIGVER_MAX_GAP_MS"), 100.0)
 
-# Maximum pen force value for SigComp2011 digitizers.
 SIGCOMP_PRESSURE_MAX = 1023.0
-
-# Decimation factor to align 200 Hz SigComp2011 recordings to the target 100 Hz rate.
-SIGCOMP_DECIMATION = 2
-# Sampling period in milliseconds after decimation.
+SIGCOMP_DECIMATION = 2                  # 200 Hz -> 100 Hz
 SIGCOMP_SAMPLE_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
-# DeepSignDB writer ID ranges and corresponding source sub-datasets.
 DEEPSIGN_SOURCE_RANGES = {
     "Development": ((1, 230, "MCYT"), (231, 498, "BiosecurID"),
                     (1009, 1038, "eBioSign_DS1"), (1039, 1084, "eBioSign_DS2")),
@@ -70,15 +52,11 @@ DEEPSIGN_SOURCE_RANGES = {
                    (408, 442, "eBioSign_DS2")),
 }
 
-# Column index for pen pressure in each sub-dataset.
 DEEPSIGN_PRESSURE_COLUMN = {"MCYT": 5, "BiosecurID": 6, "BiosecureDS2": 6,
                             "eBioSign_DS1": 3, "eBioSign_DS2": 3}
 
-# Sub-datasets collected using pen tablets.
 DEEPSIGN_PEN_SOURCES = ("MCYT", "BiosecurID", "BiosecureDS2")
 DEEPSIGN_PRESSURE_MAX = 1023.0
-
-# Target sampling period in milliseconds.
 DEEPSIGN_TARGET_PERIOD_MS = TEMPORAL_SAMPLE_PERIOD_MS
 
 _CEDAR_GENUINE = re.compile(r"^original_(\d+)_(\d+)\.png$", re.IGNORECASE)
@@ -88,7 +66,6 @@ _SVC_FILE = re.compile(r"^U(\d+)S(\d+)\.TXT$", re.IGNORECASE)
 _MOBISIG_FILE = re.compile(r"^SIGN_(GEN|FOR)_USER(\d+)_USER(\d+)_(\d+)\.csv$",
                            re.IGNORECASE)
 _DEEPSIGN_FILE = re.compile(r"^u(\d+)_([gs])_.+\.txt$", re.IGNORECASE)
-# BiosecurID names carry their session ("u1202s0003_sg0001"); MCYT names carry none.
 _DEEPSIGN_SESSION = re.compile(r"_u\d+s(\d{4})_sg\d+\.txt$", re.IGNORECASE)
 
 
@@ -102,21 +79,11 @@ def _new_writer():
 
 
 def normalize_trajectory(xy, pressure, extra=None):
-    """Normalize raw trajectory coordinates and pressure into a standard format.
-
-    Args:
-        xy: [L, 2] raw coordinates in device units.
-        pressure: [L] pressure values scaled to [0.0, 1.0], or None.
-        extra: optional [L, K] extra channels scaled to [0.0, 1.0].
-
-    Returns:
-        float32 array with shape [L, 3 + K] where X and Y are z-scored per signature.
-    """
+    """Z-score X/Y per signature and assemble float32 [L, 3 + K] trajectory."""
     xy = np.asarray(xy, dtype=np.float32)
 
     mean = xy.mean(axis=0)
     std = xy.std(axis=0)
-    # Avoid division by zero if variance is zero.
     std = np.where(std < 1e-8, 1.0, std)
     xy = (xy - mean) / std
 
@@ -132,11 +99,7 @@ def normalize_trajectory(xy, pressure, extra=None):
 
 
 def merge_datasets(target, incoming):
-    """Merge incoming writer samples into target dictionary, appending samples per writer.
-
-    "genuine_session", when either side has it, stays aligned with "genuine";
-    samples whose corpus records no session get None.
-    """
+    """Append writer samples from incoming into target, keeping genuine_session aligned."""
     for writer_id, record in incoming.items():
         existing = target.setdefault(writer_id, _new_writer())
         if "genuine_session" in existing or "genuine_session" in record:
@@ -149,11 +112,7 @@ def merge_datasets(target, incoming):
 
 
 def parse_dataset(path, float32_parse=False, **kwargs):
-    """Dispatch dataset folder to its parser based on folder name.
-
-    float32_parse reaches only the parsers that read a device clock (SVC2004 and
-    DeepSignDB); every other corpus is read the same either way.
-    """
+    """Dispatch a dataset folder to its parser; float32_parse applies to SVC2004 and DeepSignDB."""
     name = os.path.basename(os.path.normpath(path)).lower()
     if name not in _PARSERS:
         raise ValueError(
@@ -270,15 +229,11 @@ def _tilt_mode_extra(dt, tilt, mode):
 
 
 def load_svc2004_file(path, extra_channels=None, float32_parse=False):
-    """Load an SVC2004 signature file into a normalized trajectory array.
-
-    Supports 4-column Task1 (X, Y, T, Button) and 7-column Task2 (with pressure and angles).
-    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
-    """
+    """Load an SVC2004 Task1 (4-col) or Task2 (7-col) file into a normalized trajectory."""
     with open(path, "r") as fh:  # skylos: ignore[SKY-D215,SKY-D325] corpus file enumerated from --data-dir
         lines = [line.split() for line in fh.read().splitlines() if line.strip()]
 
-    # float64: the clock reaches 7.5e7 ms, past the 2**24 where float32 stops holding every integer.
+    # float64 avoids 1 ms quantization past 2**24 ms (SVC2004 clocks reach 7.5e7 ms).
     rows = np.array([[float(v) for v in row] for row in lines[1:]],
                     dtype=np.float32 if float32_parse else np.float64)
     if rows.size == 0:
@@ -343,7 +298,6 @@ def parse_svc2004(root=SVC2004_DIR, extra_channels=None, float32_parse=False):
         record[label].append(load_svc2004_file(os.path.join(root, filename), extra_channels,
                                                float32_parse))
         if label == "genuine":
-            # Ten genuines per session, recorded about two weeks apart (D8).
             record["genuine_session"].append(1 if sample <= 10 else 2)
 
     return writers
@@ -407,7 +361,6 @@ def _sigcomp_rows_to_sample(rows, extra_channels, path, corpus, decimation=SIGCO
 
     extra = None
     if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
-        # Compute elapsed time between pen-down samples based on sampling period.
         gaps = np.zeros(len(pen_down), dtype=np.float32)
         gaps[1:] = np.diff(pen_down) * SIGCOMP_SAMPLE_MS
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
@@ -436,15 +389,14 @@ def load_nfi2009_file(path, extra_channels=None):
     return _sigcomp_rows_to_sample(rows, extra_channels, path, "SigComp2009")
 
 
-# BiosecurID-SONOF: Wacom Intuos3 at 100 Hz (already the target rate), x, y and
-# pressure only, pen-up recorded as pressure 0, so the SigComp core applies undecimated.
-SONOF_ONLINE_ID_OFFSET = 1000          # pen file u1001 is scan folder u0001
-SONOF_GENUINE_SLOTS = (1, 2, 6, 7)     # per session; slots 3 to 5 are skilled forgeries
+# BiosecurID-SONOF is 100 Hz with pen-up force = 0 (no decimation needed).
+SONOF_ONLINE_ID_OFFSET = 1000          # pen file u1001 corresponds to scan folder u0001
+SONOF_GENUINE_SLOTS = (1, 2, 6, 7)     # slots 3-5 are skilled forgeries
 _SONOF_ONLINE_FILE = re.compile(r"^u(\d{4})(s\d{4}_sg(\d{4}))\.mat$", re.IGNORECASE)
 
 
 def load_sonof_online_file(path, extra_channels=None):
-    """Load a BiosecurID-SONOF pen recording (.mat with x, y, p) into a normalized trajectory array."""
+    """Load a BiosecurID-SONOF .mat file into a normalized trajectory."""
     from scipy.io import loadmat
     mat = loadmat(path)
     rows = np.column_stack([np.ravel(mat[key]) for key in ("x", "y", "p")]).astype(np.float32)
@@ -452,12 +404,7 @@ def load_sonof_online_file(path, extra_channels=None):
 
 
 def parse_biosecurid_sonof_pairs(root=BIOSECURID_SONOF_DIR):
-    """Pair each SONOF pen recording with the scan of the same signing.
-
-    Returns {writer_id: {"genuine": [(png, mat)], "forged": [(png, mat)]}}. A
-    missing scan, or one whose label disagrees with its slot, raises: a silent
-    gap or a shifted join would corrupt every fused number built on it.
-    """
+    """Pair each SONOF pen recording with its matching scan as {writer_id: {genuine/forged: [(png, mat)]}}."""
     online = os.path.join(root, "OnlineReal")
     _require_dir(online, "BiosecurID-SONOF OnlineReal")
     writers = {}
@@ -483,12 +430,7 @@ _SONOF_SCAN_FILE = re.compile(r"^u(\d{4})s\d{4}_sg(\d{4})([gf])\.png$", re.IGNOR
 
 
 def parse_biosecurid_sonof_scans(root=BIOSECURID_SONOF_DIR):
-    """Parse the SONOF scans (OfflineReal) as an offline corpus.
-
-    Writer IDs follow the pen files (`sonof_u1001` is scan folder u0001), so a
-    writer list carries over to the fused pairs. A label that disagrees with its
-    slot raises, as in parse_biosecurid_sonof_pairs.
-    """
+    """Parse SONOF OfflineReal scans using matching sonof_uXXXX writer IDs."""
     offline = os.path.join(root, "OfflineReal")
     _require_dir(offline, "BiosecurID-SONOF OfflineReal")
     writers = {}
@@ -611,11 +553,8 @@ def deepsigndb_source(user_id, split):
 
 
 def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False):
-    """Load a DeepSignDB trajectory file into a normalized array.
-
-    float32_parse reads the rows as float32, as training does (TEMPORAL_TRAIN_FLOAT32_PARSE).
-    """
-    # float64: timestamps pass 2**24 ms, where float32 stops holding every integer.
+    """Load a DeepSignDB trajectory file into a normalized array."""
+    # float64 avoids 1 ms quantization past 2**24 ms.
     rows = np.loadtxt(path, dtype=np.float32 if float32_parse else np.float64, skiprows=1, ndmin=2)
     if rows.size == 0:
         raise ValueError(f"No trajectory points in {path}")
@@ -641,7 +580,6 @@ def load_deepsigndb_file(path, source, extra_channels=None, float32_parse=False)
 
     extra = None
     if extra_channels == "dt" or extra_channels in TILT_CHANNEL_MODES:
-        # Calculate time delta between consecutive samples.
         gaps = np.zeros(len(rows), dtype=np.float32)
         gaps[1:] = np.diff(rows[:, 2])
         extra = np.clip(gaps, 0.0, MAX_GAP_MS)[:, None] / MAX_GAP_MS
@@ -746,7 +684,6 @@ def parse_sigcomp2011_offline(root=None):
     return writers
 
 
-# Registered parsers by dataset directory name.
 _PARSERS = {
     "cedar": parse_cedar,
     "bhsig260": parse_bhsig260,
@@ -758,11 +695,9 @@ _PARSERS = {
     "sigcomp2011": parse_sigcomp2011,
     "sigcomp2011_offline": parse_sigcomp2011_offline,
     "deepsigndb": parse_deepsigndb,
-    # Scans only; the pen files are read through parse_biosecurid_sonof_pairs.
-    "biosecurid_sonof": parse_biosecurid_sonof_scans,
+    "biosecurid_sonof": parse_biosecurid_sonof_scans,   # scans only; paired pen files use parse_biosecurid_sonof_pairs
 }
 
-# Supported additional channels by dataset.
 EXTRA_CHANNEL_SUPPORT = {
     "svc2004": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),
     "svc2004_task2": frozenset({"tilt", "dt", *TILT_CHANNEL_MODES}),

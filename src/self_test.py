@@ -1,17 +1,7 @@
-"""Whole-system self-test (issue #43): the five tests, run inside the app on a test kit.
+"""Whole-system self-test harness (`SigVerify --self-test KIT` or `python -m src.self_test KIT`).
 
-    SigVerify --self-test KIT_FOLDER          the installed app (run_test.bat / run_test.sh)
-    python -m src.self_test KIT_FOLDER        from source
-
-The kit (tools/make_test_kit.py) holds one signer: paper scans (PNG, blue ink), tablet signings
-as the signing window's own event log (CSV: t_ms, kind, x, y, pressure, xtilt, ytilt, inside)
-and expected.json, the scores the model gave those files, scored directly, when the kit was
-made. Nothing here is a fake model: the app's own window, pages, workers, signing window and
-weights, and an encrypted vault in a temporary folder. Only the hardware is replaced: the file
-dialog returns the kit's paths, and a virtual tablet plays each recorded signing into the
-signing window at its own speed, so the capture code rebuilds the trajectory as it did when the
-person signed. On a screen the window is shown and paced so the tester can follow it.
-Writes RESULTS_NAME into the kit folder, with no user name, machine name or path.
+Replays a recorded test kit (scans, tablet CSVs, expected.json) through the real app window,
+workers, and encrypted vault, and writes `RESULTS_NAME` into the kit folder.
 """
 import base64
 import contextlib
@@ -26,7 +16,7 @@ import tempfile
 import time
 import traceback
 
-import torch  # noqa: F401 — before PyQt5: on Windows the other order fails to load c10.dll
+import torch  # noqa: F401 - must precede PyQt5 on Windows so c10.dll loads cleanly
 
 RESULTS_NAME = "SigVerify-test-results.txt"
 PASSWORD = "correct horse battery staple"
@@ -73,8 +63,7 @@ def _peak_ram_gb():
                         ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                         ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
         from ctypes import wintypes
-        # Types declared: by default ctypes passes the process handle as a 32-bit int, the call
-        # failed and the counters stayed 0 (the first Windows runs reported 0.00 GB).
+        # Declare arg/return types so ctypes does not truncate the process handle to 32 bits.
         kernel32 = ctypes.WinDLL("kernel32")
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
         kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
@@ -112,9 +101,7 @@ def _pause(seconds):
 
 
 def _replay(canvas, pen_csv):
-    """Play one recorded signing into the signing box. Each event carries its recorded global
-    position and time, which the capture keeps; its local position, used only to draw it and to
-    say whether the pen is inside the box, is the recording scaled into this box."""
+    """Play a recorded tablet CSV into the canvas, scaling local positions to the box."""
     from PyQt5.QtCore import QPointF, Qt
     from PyQt5.QtGui import QTabletEvent
     from PyQt5.QtWidgets import QApplication
@@ -197,7 +184,6 @@ def _sandbox():
         (box, "information", lambda *a: hw["dialogs"].append(a)),
         (box, "question", lambda *a: box.Yes),
         (interfaces, "_service", None),
-        # where a visit's time goes (issue #43: scan visits took 2.7 s on Windows, 0.2 s on Linux)
         (interfaces, "_prepare_image", _timed(interfaces._prepare_image, "crop the photo")),
         (verification, "quality_gate", _timed(verification.quality_gate, "check the image")),
         (verification, "_as_spatial_input", _timed(verification._as_spatial_input, "read and resize the image")),

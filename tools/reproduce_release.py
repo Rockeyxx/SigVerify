@@ -29,21 +29,17 @@ class Train:
 
 @dataclass(frozen=True)
 class Weight:
-    """Represents a release asset and its published evaluation metrics."""
+    """Release asset metadata and published benchmark scores."""
     branch: str
     asset: str
     published: dict
     device: str
     channels: str = None
     train: Train = None
-    # Scored before the loaders read timestamps exactly: its figures reproduce only on the float32 read.
-    float32_parse: bool = False
+    float32_parse: bool = False  # reproduce scores measured with float32 timestamp reads
 
 
 _V05_TEMPORAL = {"mean": 10.26, "sigcomp_Dutch": 4.19, "sigcomp_Chinese": 8.11, "svc": 17.46}
-# Recipes the notes did not publish were recovered from the training logs in logs/
-# and the experiment record (docs/RELEASE_PLAN.md says which source each comes from).
-# The six paired temporal seeds all trained on split seed 42, as the split records say.
 _DT_RECIPE = Train("4a9f6ed", ("--branch", "temporal", "--temporal-channels", "dt", "--seed", "45",
                                "--split-seed", "42", "--epochs", "100"))
 _XYP_2LAYER_RECIPE = Train("46dae87", ("--branch", "temporal", "--seed", "42", "--epochs", "30",
@@ -51,8 +47,7 @@ _XYP_2LAYER_RECIPE = Train("46dae87", ("--branch", "temporal", "--seed", "42", "
 _M20_RECIPE = Train("96e297b", ("--branch", "spatial", "--seed", "42", "--lr-schedule", "plateau",
                                 "--margin", "2.0", "--random-impostor-ratio", "0.5"))
 
-# From the published notes, `gh release view <tag>`. Commits are where each recipe
-# runs; tags v0.1.0 to v0.7.0 point at older code (ENG_REPORT M9).
+# Recipes pin the exact training commit; tags v0.1.0 to v0.7.0 point at different commits.
 RELEASES = {
     "v0.1.0": (Weight("spatial", "archive_spatial_cnn_compact_12.31eer.pth", {"mean": 12.31, "sd": 0.96}, "cuda",
                       train=Train("eafdf10", ("--branch", "spatial", "--seed", "42"))),),
